@@ -15,10 +15,8 @@ env:
   LLVM_MINGW_VERSION: "20250417"
   LLVM_MINGW_FLAVOR: "ucrt-x86_64"
   LLVM_MINGW_SHA256: "3eba4da7af9e0ad3b736c9ac09f772d4d927da59bfb4e3688003ec21b3ed83fe"
-  # C++/WinRT as Windhawk's compiler carries it (the same version), from NuGet; the SHA-512 is
-  # the packageHash of NuGet's catalog entry for this version.
-  CPPWINRT_VERSION: "2.0.240405.15"
-  CPPWINRT_SHA512: "74460c233655e180dcceebdf16ad2d2f19d178c7c592c0677c623361558126930581556e39f6e12bd8ac4f57792be2d3f1b80188ef1a5de7cd7e8c72b7d598c1"
+  # The Windows SDK whose cppwinrt.exe writes the C++/WinRT headers (it is on the runner image).
+  WINDOWS_SDK_VERSION: "10.0.26100.0"
 
 permissions:
   contents: read
@@ -45,16 +43,13 @@ jobs:
           powershell -NoProfile -Command "Expand-Archive -LiteralPath \"\$env:RUNNER_TEMP\llvm-mingw.zip\" -DestinationPath \"\$env:RUNNER_TEMP\llvm-mingw\""
           echo "CXX=$(cygpath -u "$RUNNER_TEMP")/llvm-mingw/${name}/bin/clang++.exe" >> "$GITHUB_ENV"
 
-      # llvm-mingw has no C++/WinRT headers: the package's cppwinrt.exe writes them from the
-      # runner's Windows SDK, and tools/build-addon.sh takes them from CPPWINRT_INCLUDE.
+      # llvm-mingw has no C++/WinRT headers: the SDK's cppwinrt.exe writes them from the SDK's
+      # metadata, and tools/build-addon.sh takes them from CPPWINRT_INCLUDE.
       - name: C++/WinRT headers
         run: |
-          pkg="$RUNNER_TEMP/cppwinrt.zip"
-          url="https://api.nuget.org/v3-flatcontainer/microsoft.windows.cppwinrt/${CPPWINRT_VERSION}/microsoft.windows.cppwinrt.${CPPWINRT_VERSION}.nupkg"
-          curl -fsSL --retry 3 -o "$pkg" "$url"
-          echo "${CPPWINRT_SHA512}  $pkg" | sha512sum -c -
-          powershell -NoProfile -Command "Expand-Archive -LiteralPath \"\$env:RUNNER_TEMP\cppwinrt.zip\" -DestinationPath \"\$env:RUNNER_TEMP\cppwinrt\""
-          "$RUNNER_TEMP/cppwinrt/bin/cppwinrt.exe" -in sdk -out "$(cygpath -w "$RUNNER_TEMP/winrt-headers")"
+          sdk="/c/Program Files (x86)/Windows Kits/10"
+          "$sdk/bin/${WINDOWS_SDK_VERSION}/x64/cppwinrt.exe" -in "$WINDOWS_SDK_VERSION" \
+            -out "$(cygpath -w "$RUNNER_TEMP/winrt-headers")"
           grep -m1 CPPWINRT_VERSION "$RUNNER_TEMP/winrt-headers/winrt/base.h"
           echo "CPPWINRT_INCLUDE=$(cygpath -u "$RUNNER_TEMP")/winrt-headers" >> "$GITHUB_ENV"
 
