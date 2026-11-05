@@ -34,6 +34,11 @@ defs=(-DUNICODE -D_UNICODE -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -D_WIN32_IE=0x0
       -DNTDDI_VERSION=0x0A000008 -D__USE_MINGW_ANSI_STDIO=0)
 flags=(-target x86_64-w64-mingw32 -O2 -ffp-exception-behavior=maytrap -mguard=cf-nochecks "${defs[@]}")
 cxxflags=("${flags[@]}" -std=c++23)
+# Windhawk's compiler carries the C++/WinRT headers. Another llvm-mingw (the CI's) gets them from
+# CPPWINRT_INCLUDE, a folder that cppwinrt.exe wrote (it holds winrt/).
+if [[ -n "${CPPWINRT_INCLUDE:-}" ]]; then
+    cxxflags+=(-isystem "$CPPWINRT_INCLUDE")
+fi
 # The C++ runtime goes into each binary, so nothing like libc++.whl ships next to them.
 static=(-static)
 
@@ -93,7 +98,7 @@ build_bundle() {
     local tp="$root/third_party"
     {
         for f in "$tp/minhook/LICENSE.txt" "$tp/zydis/LICENSE" "$tp/zydis/LICENSE.zycore" \
-                 "$tp/notices/COPYING.MinGW-w64-runtime.txt"; do
+                 "$tp/notices/COPYING.MinGW-w64-runtime.txt" "$tp/notices/LICENSE.cppwinrt.txt"; do
             printf '==== %s ====\n\n' "${f#$tp/}"
             cat "$f"
             printf '\n\n'

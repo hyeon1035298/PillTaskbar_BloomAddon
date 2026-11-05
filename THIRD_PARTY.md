@@ -87,5 +87,6 @@ Bloom 애드온으로 빌드한 `PillTaskbarRuntime.dll`, `PillTaskbar.dll`, `Pi
 | [Zydis](https://github.com/zyantific/zydis) / Zycore | 4.1.0 합본 | MIT | `Wh_Disasm`(Intel 문법 글자) |
 | mingw-w64 런타임 | 빌드에 쓴 llvm-mingw에 든 것 | `COPYING.MinGW-w64-runtime.txt` | C 런타임 시작 코드 |
 | libc++, libunwind, compiler-rt | LLVM 20 | Apache-2.0 WITH LLVM-exception | 정적으로 묶은 C++ 런타임 |
+| [C++/WinRT](https://github.com/microsoft/cppwinrt) | 2.0.240405.15 | MIT (`LICENSE.cppwinrt.txt`) | 모드의 WinRT·XAML 호출에 쓰는 헤더(Windows SDK 메타데이터에서 만든 것) |
 
 런타임의 헤더(`runtime/include`)는 Windhawk 모드 API와 같은 함수 이름과 시그니처를 쓰지만 새로 썼다. Windhawk(GPL-3.0) 엔진의 동작(콜백 순서, 훅 적용 시점, 기호 캐시 서식)을 따랐다.

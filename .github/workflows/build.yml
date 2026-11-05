@@ -15,6 +15,10 @@ env:
   LLVM_MINGW_VERSION: "20250528"
   LLVM_MINGW_FLAVOR: "ucrt-x86_64"
   LLVM_MINGW_SHA256: "cd7813524da5e5cc747d47fbb483a45d39cdf7e0d8e44a60d17d6dd819290359"
+  # C++/WinRT as Windhawk's compiler carries it (the same version), from NuGet; the SHA-512 is
+  # the packageHash of NuGet's catalog entry for this version.
+  CPPWINRT_VERSION: "2.0.240405.15"
+  CPPWINRT_SHA512: "74460c233655e180dcceebdf16ad2d2f19d178c7c592c0677c623361558126930581556e39f6e12bd8ac4f57792be2d3f1b80188ef1a5de7cd7e8c72b7d598c1"
 
 permissions:
   contents: read
@@ -40,6 +44,19 @@ jobs:
           echo "${LLVM_MINGW_SHA256}  $RUNNER_TEMP/llvm-mingw.zip" | sha256sum -c -
           powershell -NoProfile -Command "Expand-Archive -LiteralPath \"\$env:RUNNER_TEMP\llvm-mingw.zip\" -DestinationPath \"\$env:RUNNER_TEMP\llvm-mingw\""
           echo "CXX=$(cygpath -u "$RUNNER_TEMP")/llvm-mingw/${name}/bin/clang++.exe" >> "$GITHUB_ENV"
+
+      # llvm-mingw has no C++/WinRT headers: the package's cppwinrt.exe writes them from the
+      # runner's Windows SDK, and tools/build-addon.sh takes them from CPPWINRT_INCLUDE.
+      - name: C++/WinRT headers
+        run: |
+          pkg="$RUNNER_TEMP/cppwinrt.zip"
+          url="https://api.nuget.org/v3-flatcontainer/microsoft.windows.cppwinrt/${CPPWINRT_VERSION}/microsoft.windows.cppwinrt.${CPPWINRT_VERSION}.nupkg"
+          curl -fsSL --retry 3 -o "$pkg" "$url"
+          echo "${CPPWINRT_SHA512}  $pkg" | sha512sum -c -
+          powershell -NoProfile -Command "Expand-Archive -LiteralPath \"\$env:RUNNER_TEMP\cppwinrt.zip\" -DestinationPath \"\$env:RUNNER_TEMP\cppwinrt\""
+          "$RUNNER_TEMP/cppwinrt/bin/cppwinrt.exe" -in sdk -out "$(cygpath -w "$RUNNER_TEMP/winrt-headers")"
+          grep -m1 CPPWINRT_VERSION "$RUNNER_TEMP/winrt-headers/winrt/base.h"
+          echo "CPPWINRT_INCLUDE=$(cygpath -u "$RUNNER_TEMP")/winrt-headers" >> "$GITHUB_ENV"
 
       - name: Compiler version
         run: '"$CXX" --version'
