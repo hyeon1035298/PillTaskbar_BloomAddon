@@ -143,6 +143,9 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - keepHiddenForBloom: false
     $name: Bloom 런처가 열려도 숨긴 채로
     $description: 끄면 Bloom 키나 Win 키로 Bloom 런처를 열 때 숨은 작업표시줄도 그 모니터에서 함께 나오고, 런처가 앞에 있는 동안 들어가지 않습니다
+  - keepHiddenOnFlash: true
+    $name: 앱이 깜박여도 숨긴 채로
+    $description: 앱이 작업표시줄 단추를 깜박여 알릴 때 숨은 작업표시줄이 나오지 않습니다. 끄면 Windows처럼 나와서 그 앱을 열 때까지 들어가지 않습니다
   $name: 자동 숨김
 - media:
   - enabled: true
@@ -383,6 +386,7 @@ struct Settings {
             int hideDelay;   // ms, -1 = Windows
             int animation;   // ms, 0 = Windows
             bool keepHiddenForBloom;  // else Bloom's launcher brings it out
+            bool keepHiddenOnFlash;   // else a flashing button brings it out
         } autohide;
         struct {
             bool enabled;
@@ -476,6 +480,7 @@ void Load() {
     g.autohide.hideDelay = Clamped(L"autohide.hideDelay", -1, 5000);
     g.autohide.animation = Clamped(L"autohide.animation", 0, 2000);
     g.autohide.keepHiddenForBloom = Wh_GetIntSetting(L"autohide.keepHiddenForBloom");
+    g.autohide.keepHiddenOnFlash = Wh_GetIntSetting(L"autohide.keepHiddenOnFlash");
 
     g.media.enabled = Wh_GetIntSetting(L"media.enabled");
     g.media.maxWidth = Clamped(L"media.maxWidth", 40, 600);
@@ -4779,6 +4784,11 @@ bool HeldHover(int tray, void* pThis, int request) {
            g_holdsHover(hwnd);
 }
 
+// UnhideRequest of an app flashing its taskbar button. Explorer asks again
+// while the button flashes and keeps the taskbar out until the app is
+// activated; dropping every one of them leaves auto-hide as it was.
+constexpr int kUnhideFlash = 17;
+
 // Diagnostics: who unhides a taskbar, with the pointer where.
 void LogUnhide(int tray, void* pThis, int flags, int request, void* caller) {
     HWND hwnd = TrayTaskbar(tray, pThis);
@@ -4816,6 +4826,9 @@ bool OnUnhide(int tray, void* pThis, int flags, int request, void* caller) {
         return false;
     }
     core::Guard(L"Unhide diag", [&] { LogUnhide(tray, pThis, flags, request, caller); });
+    if (request == kUnhideFlash && settings::g.autohide.keepHiddenOnFlash) {
+        return true;
+    }
     bool held = false;
     core::Guard(L"Unhide hold", [&] { held = HeldHover(tray, pThis, request); });
     return held;

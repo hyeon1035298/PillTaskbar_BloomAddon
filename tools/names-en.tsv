@@ -55,6 +55,8 @@ autohide.animation	Animation length (ms)
 autohide.animation#about	0 uses the Windows default
 autohide.keepHiddenForBloom	Stay hidden when the Bloom launcher opens
 autohide.keepHiddenForBloom#about	When off, opening the Bloom launcher with the Bloom key or Win key also brings out the hidden taskbar on that monitor, and it stays out while the launcher is in front
+autohide.keepHiddenOnFlash	Stay hidden when an app flashes
+autohide.keepHiddenOnFlash#about	An app flashing its taskbar button to get attention doesn't bring out the hidden taskbar. When off, the taskbar comes out as in Windows and stays out until you open that app
 group:media	Media
 media.enabled	Media player
 media.enabled#about	Puts the playing track's album art, title and previous/play/next buttons before the tray. Collapses when nothing is playing
