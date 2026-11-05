@@ -54,11 +54,19 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - enabled: true
     $name: 알약 모양
     $description: 끄면 Windows 기본 작업표시줄 모양으로 돌아갑니다
-  - style: windowGlass
+  - style: bloom
     $name: 모양
     $options:
+    - bloom: Bloom (유리에 옅은 윤곽선)
     - glass: 글래스모피즘 (빛을 받는 가장자리, 위 반사광과 아래 집광)
     - windowGlass: WindowGlass (테두리 없는 유리)
+  - theme: system
+    $name: 테마
+    $description: 작업표시줄과 그 안의 아이콘, 사용량, 폴더의 라이트·다크. Bloom 애드온으로 쓰면 Bloom의 테마를 따릅니다
+    $options:
+    - system: Windows 작업표시줄 테마
+    - dark: 다크
+    - light: 라이트
   - cornerRadius: 25
     $name: 모서리 (px)
   - blur: 12
@@ -99,6 +107,11 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - timeDate: 시간과 날짜
     - time: 시간만
     - hidden: 숨김
+  - clockFormat: h24
+    $name: 시간 표기
+    $options:
+    - h24: 24시간 (18:24)
+    - h12: 12시간 (오후 6:24)
   $name: 트레이
   $description: 숨긴 아이콘은 자리도 남기지 않습니다. 레지스트리는 건드리지 않습니다
 - size:
@@ -161,7 +174,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: Bloom이 내보낸 AI 사용량 파일을 읽어 트레이에 계정마다 주간 사용 %와 막대로 보여 줍니다. Bloom 설정의 홈 화면 > AI 사용량에서 파일 내보내기를 켜야 하고, 내보내기 폴더가 없으면 아무것도 만들지 않습니다
   - logoColor: brand
     $name: 로고 색
-    $description: 트레이와 아일랜드에 보이는 계정 아이콘(Bloom 설정 › AI 계정에서 고른 파일, 고르지 않으면 Bloom이 회사 사이트에서 받은 공식 로고)
+    $description: 트레이와 아일랜드에 보이는 계정 아이콘(Bloom 설정 › AI 계정에서 고른 파일, 고르지 않으면 Bloom에 들어 있는 Anthropic·OpenAI 로고)
     $options:
     - mono: 단색 (글자의 흐린 색)
     - brand: 원래 색 (아이콘 파일의 색 그대로, 검정이나 흰색 한 가지로 된 로고는 글자색)
@@ -176,6 +189,11 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - enabled: true
     $name: 숨김 아일랜드
     $description: 위쪽 작업표시줄이 자동 숨김으로 숨어 있을 때 화면 위 가운데에 작은 검은 아일랜드를 둡니다. 아일랜드를 클릭하거나(아래 설정) 포인터를 대면 아일랜드가 커지며 작업표시줄이 나옵니다. 자동 숨김 보조도 켜져 있어야 동작합니다
+  - color: black
+    $name: 아일랜드 색
+    $options:
+    - black: 검정
+    - white: 흰색
   - showClock: true
     $name: 시계 보이기
   - showMedia: false
@@ -342,7 +360,8 @@ namespace wf = winrt::Windows::Foundation;
 namespace settings {
 // ============================================================================
 
-enum class Style { kGlass, kWindowGlass };
+enum class Style { kBloom, kGlass, kWindowGlass };
+enum class Theme { kSystem, kDark, kLight };
 enum class Bell { kShown, kWhenNew, kHidden };
 enum class Clock { kTimeDate, kTime, kHidden };
 enum class FolderSide { kAuto, kAbove, kBelow };
@@ -353,6 +372,7 @@ struct Settings {
     struct {
         bool enabled;
         Style style;
+        Theme theme;
         double cornerRadius;
         float blur;
         int tintOpacity;  // 0..100
@@ -363,12 +383,7 @@ struct Settings {
             hideCopilot;
         Bell bell;
         Clock clock;
-        bool Any() const {
-            return hideVolume || hideNetwork || hideBattery || hideMicrophone ||
-                   hideLocation || hideStudioEffects || hideRecall ||
-                   hideLanguageBar || hideLanguageExtras || hideCopilot ||
-                   bell != Bell::kShown || clock != Clock::kTimeDate;
-        }
+        bool clock12;  // else 24 hours
     } tray;
     struct {
         bool enabled;
@@ -399,6 +414,7 @@ struct Settings {
         } usage;
         struct {
             bool enabled;
+            bool white;  // else black
             bool showClock, showMedia, showUsage;
             int height;  // px at 100% scale
             int width;   // body, px at 100% scale; 0 = fits the content
@@ -447,7 +463,8 @@ std::wstring Text(PCWSTR name) {
 
 void Load() {
     g.pill.enabled = Wh_GetIntSetting(L"pill.enabled");
-    g.pill.style = (Style)Choice(L"pill.style", {L"glass", L"windowGlass"});
+    g.pill.style = (Style)Choice(L"pill.style", {L"bloom", L"glass", L"windowGlass"});
+    g.pill.theme = (Theme)Choice(L"pill.theme", {L"system", L"dark", L"light"});
     g.pill.cornerRadius = Clamped(L"pill.cornerRadius", 0, 30);
     g.pill.blur = (float)Clamped(L"pill.blur", 0, 30);
     g.pill.tintOpacity = Clamped(L"pill.tintOpacity", 0, 100);
@@ -465,6 +482,7 @@ void Load() {
     t.hideCopilot = Wh_GetIntSetting(L"tray.hideCopilot");
     t.bell = (Bell)Choice(L"tray.bell", {L"shown", L"whenNew", L"hidden"});
     t.clock = (Clock)Choice(L"tray.clock", {L"timeDate", L"time", L"hidden"});
+    t.clock12 = Choice(L"tray.clockFormat", {L"h24", L"h12"}) == 1;
 
     g.size.enabled = Wh_GetIntSetting(L"size.enabled");
     g.size.taskbarHeight = Clamped(L"size.taskbarHeight", 6, 600);
@@ -491,6 +509,7 @@ void Load() {
     g.usage.gapAfter = Clamped(L"usage.gapAfter", 0, 100);
 
     g.island.enabled = Wh_GetIntSetting(L"island.enabled");
+    g.island.white = Choice(L"island.color", {L"black", L"white"}) == 1;
     g.island.showClock = Wh_GetIntSetting(L"island.showClock");
     g.island.showMedia = Wh_GetIntSetting(L"island.showMedia");
     g.island.showUsage = Wh_GetIntSetting(L"island.showUsage");
@@ -514,6 +533,19 @@ void Load() {
     f.popupScale = Clamped(L"folders.popupScale", 50, 150);
     f.autoRunning = Wh_GetIntSetting(L"folders.autoRunning");
     f.runningName = Text(L"folders.runningName");
+}
+
+// The taskbar's theme: the one set (pill.theme, which Bloom sets to its own), else
+// Windows' taskbar theme, not the apps' one.
+bool Dark() {
+    if (g.pill.enabled && g.pill.theme != Theme::kSystem) {
+        return g.pill.theme == Theme::kDark;
+    }
+    DWORD light = 1, size = sizeof(light);
+    RegGetValue(HKEY_CURRENT_USER,
+                L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
+    return !light;
 }
 
 // Shape values that are not on the settings page (the WindowGlass look).
@@ -542,6 +574,9 @@ constexpr double kGripperMinWidth = 24;
 constexpr double kClockFontSize = 13;
 constexpr PCWSTR kClockFont = L"vivo Sans EN VF";
 constexpr PCWSTR kTintResource = L"SystemChromeMediumColor";
+// The Bloom style's outline: one physical pixel of the theme's text color, faint.
+constexpr PCWSTR kEdgeResource = L"SystemBaseHighColor";
+constexpr double kEdgeOpacity = 0.08;
 // Glass style, top to bottom. Light catches the rim at the top and, refracted
 // through the body, again at the bottom; the sides stay dim.
 struct GlassStop {
@@ -573,19 +608,21 @@ constexpr int kMediaButtonHeight = 28;
 constexpr int kMediaGlyphSize = 12;
 constexpr PCWSTR kMediaHover = L"#FF7A9E";
 // Usage meter colors, dark / light: the text and
-// its quieter steps, the bar's track and gray ramp, and amber and red past the
-// warning and danger lines (red text is lighter than the red bar).
+// its quieter steps, the bar's track, and amber and red past the warning and
+// danger lines (red text is lighter than the red bar).
 struct UsagePalette {
-    winrt::Windows::UI::Color text, muted, faint, track, low, high, warn, danger, dangerText;
+    winrt::Windows::UI::Color text, muted, faint, track, warn, danger, dangerText;
 };
 constexpr UsagePalette kUsageDark{
     {255, 0xEC, 0xED, 0xEE}, {255, 0xA1, 0xA1, 0xAA}, {0x99, 0xEC, 0xED, 0xEE},
-    {0x1F, 0xFF, 0xFF, 0xFF}, {255, 0x52, 0x52, 0x5B}, {255, 0xDC, 0xDA, 0xD5},
-    {255, 0xF7, 0xB7, 0x50}, {255, 0xE5, 0x48, 0x4D}, {255, 0xE7, 0x75, 0x78}};
+    {0x59, 0x7F, 0x7F, 0x7F}, {255, 0xF7, 0xB7, 0x50}, {255, 0xE5, 0x48, 0x4D},
+    {255, 0xE7, 0x75, 0x78}};
 constexpr UsagePalette kUsageLight{
     {255, 0x11, 0x18, 0x1C}, {255, 0x3F, 0x3F, 0x46}, {255, 0x52, 0x52, 0x5B},
-    {0x1F, 0x11, 0x11, 0x11}, {255, 0xA1, 0xA1, 0xAA}, {255, 0x27, 0x27, 0x2A},
-    {255, 0x62, 0x42, 0x0E}, {255, 0xDC, 0x3E, 0x42}, {255, 0xB3, 0x36, 0x3A}};
+    {0x59, 0x7F, 0x7F, 0x7F}, {255, 0x62, 0x42, 0x0E}, {255, 0xDC, 0x3E, 0x42},
+    {255, 0xB3, 0x36, 0x3A}};
+// Below the warning line the bar is filled flat in the text color at this alpha.
+constexpr uint8_t kUsageFillAlpha = 0xD9;
 constexpr double kUsageWarnPercent = 80;
 constexpr double kUsageDangerPercent = 90;
 // An account: its icon or letter at the left, the number at the right, and under them a
@@ -638,6 +675,10 @@ constexpr PCWSTR kIslandFallbackFont = L"Segoe UI Variable Text";
 constexpr winrt::Windows::UI::Color kIslandFill{0xFF, 0x00, 0x00, 0x00};
 constexpr winrt::Windows::UI::Color kIslandText{0xFF, 0xFF, 0xFF, 0xFF};
 constexpr winrt::Windows::UI::Color kIslandDimText{0xB8, 0xFF, 0xFF, 0xFF};
+// island.color white: the light theme's text on white.
+constexpr winrt::Windows::UI::Color kIslandWhiteFill{0xFF, 0xFF, 0xFF, 0xFF};
+constexpr winrt::Windows::UI::Color kIslandWhiteText{0xFF, 0x11, 0x18, 0x1C};
+constexpr winrt::Windows::UI::Color kIslandWhiteDimText{0xB8, 0x11, 0x18, 0x1C};
 // The morph between the island and the pill. Its length is the taskbar's
 // slide too, unless the auto-hide animation length is set.
 constexpr int kIslandMorphMs = 280;
@@ -1673,15 +1714,38 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
             Wh_Log(L"Tint brush failed: %08X", winrt::to_hresult());
             m_tint = nullptr;
         }
+        if (settings::g.pill.style == settings::Style::kBloom && !host) {
+            // Kept in the owner's resources, like the tint, to follow its theme.
+            try {
+                m_edge = Markup::XamlReader::Load(winrt::hstring(
+                             L"<SolidColorBrush xmlns=\"http://schemas.microsoft.com/"
+                             L"winfx/2006/xaml/presentation\" Color=\"{ThemeResource " +
+                             std::wstring(theme::kEdgeResource) + L"}\" Opacity=\"" +
+                             std::to_wstring(theme::kEdgeOpacity) + L"\"/>"))
+                             .as<Media::SolidColorBrush>();
+                owner.Resources().Insert(box_value(m_key + L"Edge"), m_edge);
+            } catch (...) {
+                Wh_Log(L"Edge brush failed: %08X", winrt::to_hresult());
+                m_edge = nullptr;
+            }
+        }
     }
 
     ~GlassBrush() {
-        if (auto owner = m_owner.get(); owner && m_tint) {
-            try {
-                owner.Resources().Remove(box_value(m_key));
-            } catch (...) {
+        auto owner = m_owner.get();
+        for (auto [brush, key] : {std::pair{m_tint, m_key}, std::pair{m_edge, m_key + L"Edge"}}) {
+            if (owner && brush) {
+                try {
+                    owner.Resources().Remove(box_value(key));
+                } catch (...) {
+                }
             }
         }
+    }
+
+    // The Bloom style's outline, null in the others.
+    Media::Brush Edge() const {
+        return m_edge;
     }
 
     void OnConnected() {
@@ -1740,6 +1804,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
     winrt::weak_ref<FrameworkElement> m_owner;
     bool m_host;
     Media::SolidColorBrush m_tint{nullptr};
+    Media::SolidColorBrush m_edge{nullptr};
     std::wstring m_key;
 };
 
@@ -1749,7 +1814,7 @@ CornerRadius Corners(double l, double r) {
     return {l, r, r, l};
 }
 
-// The glass style's edge is one physical pixel: a hairline disappears at 100%
+// The glass and Bloom styles' edge is one physical pixel: a hairline disappears at 100%
 // scale, and a whole DIP at a fractional scale spills into a second,
 // half-covered pixel row that reads as a rough edge.
 double PhysicalPixel(FrameworkElement const& element) {
@@ -1781,14 +1846,15 @@ void StylePiece(FrameworkElement const& piece,
                 CornerRadius corners) {
     core::Set(piece, FrameworkElement::MarginProperty(), box_value(margin),
               L"Margin");
-    auto brush = winrt::make<GlassBrush>(piece);
+    auto glass = winrt::make_self<GlassBrush>(piece);
+    auto brush = glass.as<Media::Brush>();
     Media::Brush edge{nullptr};
-    if (settings::g.pill.style == settings::Style::kGlass) {
+    if (settings::g.pill.style != settings::Style::kWindowGlass) {
         double pixel = PhysicalPixel(piece);
         auto full = [pixel](double v) { return v > 0 ? pixel : 0.0; };
         border = {full(border.Left), full(border.Top), full(border.Right),
                   full(border.Bottom)};
-        edge = Rim();
+        edge = settings::g.pill.style == settings::Style::kGlass ? Rim() : glass->Edge();
     }
     if (piece.try_as<Controls::Grid>()) {
         using G = Controls::Grid;
@@ -2091,6 +2157,12 @@ void StyleRoot(XamlRoot const& root, HWND hwnd) {
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
     if (!content) {
         return;
+    }
+    // A theme set (Bloom's own) over Windows': all under the root follows it.
+    if (auto set = settings::g.pill.theme; set != settings::Theme::kSystem) {
+        core::Set(content, FrameworkElement::RequestedThemeProperty(),
+                  box_value(set == settings::Theme::kDark ? ElementTheme::Dark
+                                                          : ElementTheme::Light));
     }
     if (auto frame = core::FindDescendant(
             content, [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); },
@@ -2849,7 +2921,59 @@ void BellIcon(FrameworkElement const& iconView) {
     }
 }
 
+// The time now as tray.clockFormat writes it, from the user's locale: 24 hours, or
+// 12 with its AM/PM mark (오전/오후); with seconds when Windows shows them.
+std::wstring ClockText(bool seconds) {
+    wchar_t locale[80];
+    std::wstring format = GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT,
+                                          seconds ? LOCALE_STIMEFORMAT : LOCALE_SSHORTTIME,
+                                          locale, 80)
+                              ? locale
+                              : (seconds ? L"H:mm:ss" : L"H:mm");
+    if (S().clock12) {
+        std::ranges::replace(format, L'H', L'h');
+        if (format.find(L't') == std::wstring::npos) {
+            format = L"tt " + format;
+        }
+    } else {
+        std::erase(format, L't');
+        std::ranges::replace(format, L'h', L'H');
+        while (format.find(L"  ") != std::wstring::npos) {
+            format.erase(format.find(L"  "), 1);
+        }
+        format.erase(0, format.find_first_not_of(L' '));
+        format.erase(format.find_last_not_of(L' ') + 1);
+    }
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    wchar_t text[64];
+    return GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &now, format.c_str(), text, 64)
+               ? text
+               : L"";
+}
+
+// Explorer writes the time again each minute; it's written over in the format set.
+void FormatClock(Controls::TextBlock const& time) {
+    std::wstring shown(time.Text());
+    auto text = ClockText(std::ranges::count(shown, L':') >= 2);
+    if (!text.empty() && text != shown) {
+        time.Text(text);
+    }
+}
+
 void ClockIcon(FrameworkElement const& iconView) {
+    if (S().clock != Clock::kHidden) {
+        if (auto time = core::FindDescendant(
+                            iconView, [](auto& e) { return e.Name() == L"TimeInnerTextBlock"; },
+                            8)
+                            .try_as<Controls::TextBlock>()) {
+            core::Watch(time, Controls::TextBlock::TextProperty(),
+                        [](DependencyObject const& sender) {
+                            FormatClock(sender.as<Controls::TextBlock>());
+                        });
+            FormatClock(time);
+        }
+    }
     if (S().clock == Clock::kHidden) {
         core::Keep(iconView, UIElement::VisibilityProperty(),
                    box_value(Visibility::Collapsed));
@@ -6432,31 +6556,36 @@ IconFile ReadIconFile(std::wstring const& path) {
     return f;
 }
 
-// An <svg> drawn as an <img> is: its own width and height give way to the
-// square, keeping its view box, which they make when it has none.
-void FitSvg(ID2D1SvgDocument* doc) {
+// An <svg> drawn as an <img> is, in the `px` square: with a view box its own
+// width and height give way to the square; without one its width and height
+// are scaled into it, centered. Returns the transform to draw it with.
+// Attribute setters taking a value fail (E_INVALIDARG) as this compiler's
+// headers declare them, so only removal and the transform are used.
+D2D1_MATRIX_3X2_F FitSvg(ID2D1SvgDocument* doc, UINT px) {
+    auto fit = D2D1::Matrix3x2F::Identity();
     winrt::com_ptr<ID2D1SvgElement> root;
     doc->GetRoot(root.put());
     if (!root) {
-        return;
+        return fit;
     }
-    if (!root->IsAttributeSpecified(L"viewBox")) {
-        D2D1_SVG_LENGTH w{}, h{};
-        if (SUCCEEDED(root->GetAttributeValue(L"width", D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &w,
-                                              sizeof(w))) &&
-            SUCCEEDED(root->GetAttributeValue(L"height", D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &h,
-                                              sizeof(h))) &&
-            w.units == D2D1_SVG_LENGTH_UNITS_NUMBER && h.units == D2D1_SVG_LENGTH_UNITS_NUMBER &&
-            w.value > 0 && h.value > 0) {
-            D2D1_SVG_VIEWBOX box{0, 0, w.value, h.value};
-            root->SetAttributeValue(L"viewBox", D2D1_SVG_ATTRIBUTE_POD_TYPE_VIEWBOX, &box,
-                                    sizeof(box));
-        }
+    if (root->IsAttributeSpecified(L"viewBox")) {
+        root->RemoveAttribute(L"width");
+        root->RemoveAttribute(L"height");
+        return fit;
     }
-    D2D1_SVG_LENGTH full{100, D2D1_SVG_LENGTH_UNITS_PERCENTAGE};
-    for (PCWSTR name : {L"width", L"height"}) {
-        root->SetAttributeValue(name, D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &full, sizeof(full));
+    D2D1_SVG_LENGTH w{}, h{};
+    if (SUCCEEDED(root->GetAttributeValue(L"width", D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &w,
+                                          sizeof(w))) &&
+        SUCCEEDED(root->GetAttributeValue(L"height", D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &h,
+                                          sizeof(h))) &&
+        w.units == D2D1_SVG_LENGTH_UNITS_NUMBER && h.units == D2D1_SVG_LENGTH_UNITS_NUMBER &&
+        w.value > 0 && h.value > 0) {
+        float k = px / std::max(w.value, h.value);
+        fit = D2D1::Matrix3x2F::Scale(k, k) *
+              D2D1::Matrix3x2F::Translation((px - w.value * k) / 2, (px - h.value * k) / 2);
+        doc->SetViewportSize(D2D1::SizeF(w.value, h.value));
     }
+    return fit;
 }
 
 // Through a render target on a WIC bitmap, whose device context draws SVG
@@ -6488,10 +6617,11 @@ bool DrawSvg(IconFile const& f, IWICImagingFactory* wic, IconPixels& out) {
                                      doc.put()))) {
         return false;
     }
-    FitSvg(doc.get());
+    auto fit = FitSvg(doc.get(), px);
     dc->BeginDraw();
     D2D1_COLOR_F clear{};
     dc->Clear(&clear);
+    dc->SetTransform(fit);
     dc->DrawSvgDocument(doc.get());
     if (FAILED(dc->EndDraw())) {
         return false;
@@ -6811,21 +6941,6 @@ View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind
     return v;
 }
 
-// The gray ramp along the fill.
-Media::LinearGradientBrush LevelBrush(bool dark) {
-    auto const& p = Palette(dark);
-    Media::LinearGradientBrush brush;
-    brush.StartPoint({0, 0.5f});
-    brush.EndPoint({1, 0.5f});
-    for (auto [offset, color] : {std::pair{0.0, p.low}, std::pair{1.0, p.high}}) {
-        Media::GradientStop stop;
-        stop.Offset(offset);
-        stop.Color(color);
-        brush.GradientStops().Append(stop);
-    }
-    return brush;
-}
-
 void Refresh(View& v,
              Model const& m,
              Account const& a,
@@ -6858,16 +6973,17 @@ void Refresh(View& v,
         letter.Foreground(Media::SolidColorBrush(p.text));
     } else {
         v.initial.Text(label.initial);
-        v.initial.Foreground(Media::SolidColorBrush(p.muted));
+        v.initial.Foreground(Media::SolidColorBrush(p.text));
     }
     v.tag.Text(label.tag);
     v.tag.Visibility(label.tag.empty() ? Visibility::Collapsed : Visibility::Visible);
-    v.tag.Foreground(Media::SolidColorBrush(p.muted));
+    v.tag.Foreground(Media::SolidColorBrush(p.text));
     v.percent.Text(value.Figure());
-    v.percent.Foreground(Media::SolidColorBrush(FigureColor(value, dark)));
+    auto figure = Media::SolidColorBrush(FigureColor(value, dark));
+    v.percent.Foreground(figure);
     v.unit.Visibility(value.kind == Value::kNumber ? Visibility::Visible
                                                    : Visibility::Collapsed);
-    v.unit.Foreground(Media::SolidColorBrush(p.muted));
+    v.unit.Foreground(figure);
     v.track.Background(Media::SolidColorBrush(p.track));
     // Shares of the block, whatever its width; a used limit never shows as
     // an empty bar, at least two pixels of the narrowest block.
@@ -6877,11 +6993,9 @@ void Refresh(View& v,
     auto columns = v.bar.ColumnDefinitions();
     columns.GetAt(0).Width({fraction, GridUnitType::Star});
     columns.GetAt(1).Width({1 - fraction, GridUnitType::Star});
-    if (auto alert = AlertColor(value, dark, false)) {
-        v.fill.Background(Media::SolidColorBrush(*alert));
-    } else {
-        v.fill.Background(LevelBrush(dark));
-    }
+    auto fill = p.text;
+    fill.A = theme::kUsageFillAlpha;
+    v.fill.Background(Media::SolidColorBrush(AlertColor(value, dark, false).value_or(fill)));
     v.root.Opacity(Dim(m, a, now) ? theme::kUsageDimOpacity : 1.0);
     Controls::ToolTipService::SetToolTip(
         v.root, box_value(Tooltip(m, a, label, now)));
@@ -7763,18 +7877,24 @@ int MorphMs() {
     return ms > 0 ? ms : theme::kIslandMorphMs;
 }
 
-// The taskbar follows the system theme, not the apps' one.
-bool SystemDark() {
-    DWORD light = 1, size = sizeof(light);
-    RegGetValue(HKEY_CURRENT_USER,
-                L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
-    return !light;
+// The island's colors: black with white text (its default), or white with the
+// light theme's.
+bool DarkIsland() {
+    return !settings::g.island.white;
+}
+
+Color IslandFill() {
+    return DarkIsland() ? theme::kIslandFill : theme::kIslandWhiteFill;
+}
+
+Color IslandText(bool dim) {
+    return DarkIsland() ? (dim ? theme::kIslandDimText : theme::kIslandText)
+                        : (dim ? theme::kIslandWhiteDimText : theme::kIslandWhiteText);
 }
 
 // The glass pill's look at a glance: its tint, as strong as it's set.
 Color PillColor() {
-    Color c = SystemDark() ? theme::kIslandPillDark : theme::kIslandPillLight;
+    Color c = settings::Dark() ? theme::kIslandPillDark : theme::kIslandPillLight;
     c.A = (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55);
     return c;
 }
@@ -7850,7 +7970,7 @@ void DrawFillets(Island& g) {
     for (int i = 0; i < 2; i++) {
         auto fillet = Fillet(g.d2d.get(), g.filletSize, i == 1);
         Paint(g.filletSurfaces[i], [&](ID2D1DeviceContext* dc) {
-            dc->FillGeometry(fillet.get(), Brush(dc, theme::kIslandFill).get(), nullptr);
+            dc->FillGeometry(fillet.get(), Brush(dc, IslandFill()).get(), nullptr);
         });
     }
 }
@@ -7888,8 +8008,8 @@ void DrawContent(Island& g, Content const& c) {
         float s = g.dpi / 96.0f;
         float h = g.shape.height;
         float gap = std::round((float)theme::kIslandGap * s);
-        Color textColor = theme::kIslandText;
-        Color dimColor = theme::kIslandDimText;
+        Color textColor = IslandText(false);
+        Color dimColor = IslandText(true);
         auto text = Brush(dc, textColor);
         auto put = [&](Text const& t, float left, float top, ID2D1Brush* brush) {
             dc->DrawTextLayout({left, top}, t.layout.get(), brush,
@@ -7919,7 +8039,8 @@ void DrawContent(Island& g, Content const& c) {
         x += c.usageLead;
         for (auto const& m : c.meters) {
             float opacity = m.dim ? (float)theme::kUsageDimOpacity : 1.0f;
-            auto muted = Brush(dc, theme::kUsageDark.muted, opacity);
+            auto ink = Brush(dc, textColor, opacity);
+            auto figure = Brush(dc, m.color, opacity);
             float left = x;
             float top = std::round((h - m.logoSize) / 2);
             if (m.icon) {
@@ -7938,25 +8059,24 @@ void DrawContent(Island& g, Content const& c) {
             } else if (m.tile) {
                 float r = m.logoSize * (float)theme::kUsageTileRadius;
                 D2D1_ROUNDED_RECT tile{{x, top, x + m.logoSize, top + m.logoSize}, r, r};
-                Color fill = theme::kUsageDark.text;
+                Color fill = textColor;
                 fill.A = theme::kUsageTileAlpha;
                 dc->FillRoundedRectangle(&tile, Brush(dc, fill, opacity).get());
                 put(m.initial, x + (m.logoSize - m.initial.width) / 2,
-                    top + (m.logoSize - m.initial.height) / 2,
-                    Brush(dc, theme::kUsageDark.text, opacity).get());
+                    top + (m.logoSize - m.initial.height) / 2, ink.get());
                 x += m.logoSize;
             } else {
-                put(m.initial, x, (h - m.initial.height) / 2, muted.get());
+                put(m.initial, x, (h - m.initial.height) / 2, ink.get());
                 x += m.initial.width;
             }
             x += logoGap;
             if (m.tag.layout) {
-                put(m.tag, x, (h - m.tag.height) / 2, muted.get());
+                put(m.tag, x, (h - m.tag.height) / 2, ink.get());
                 x += m.tag.width + logoGap;
             }
-            put(m.percent, x, (h - m.percent.height) / 2, Brush(dc, m.color, opacity).get());
+            put(m.percent, x, (h - m.percent.height) / 2, figure.get());
             if (m.unit.layout) {
-                put(m.unit, x + m.percent.width, (h - m.unit.height) / 2, muted.get());
+                put(m.unit, x + m.percent.width, (h - m.unit.height) / 2, figure.get());
             }
             x = left + m.width + gap;
         }
@@ -8047,13 +8167,13 @@ Content Measure(Island& g, float height, float room) {
             auto const& a = model->accounts[i];
             auto value = usage::Evaluate(*model, a, usage::BarLimit(a), now);
             Meter m;
-            // On the black island, the dark theme's colors.
+            // The dark theme's colors on the black island, the light one's on white.
             auto icon = a.hasIcon ? usage::IconAt(a.icon, (UINT)size) : nullptr;
             auto mark = usage::MarkOf(a, icon != nullptr);
             m.logoSize = size;
             if (mark == usage::Mark::kIcon) {
                 bool mono = settings::g.usage.logoColor != settings::LogoColor::kBrand;
-                m.icon = usage::Colored(icon, mono, usage::IconTint(mono, true));
+                m.icon = usage::Colored(icon, mono, usage::IconTint(mono, DarkIsland()));
             } else if (mark == usage::Mark::kTile) {
                 m.tile = true;
                 m.initial = MakeText(g, labels[i].letter,
@@ -8074,7 +8194,7 @@ Content Measure(Island& g, float height, float room) {
                 m.unit = MakeText(g, theme::kUsageUnit, size, DWRITE_FONT_WEIGHT_NORMAL, 0,
                                   false, &g.usageFont);
             }
-            m.color = usage::FigureColor(value, true);
+            m.color = usage::FigureColor(value, DarkIsland());
             m.dim = usage::Dim(*model, a, now);
             bool square = m.icon || m.tile;
             m.width = (square ? m.logoSize : m.initial.width) + logoGap +
@@ -8228,7 +8348,7 @@ void Bind(Island& g) {
     m.InsertScalar(L"Progress", 0);
     m.InsertScalar(L"Hover", 0);
     m.InsertScalar(L"HoverOpacity", 1 - settings::g.island.hoverTransparency / 100.0f);
-    m.InsertColor(L"Black", theme::kIslandFill);
+    m.InsertColor(L"Black", IslandFill());
     m.InsertColor(L"Pill", PillColor());
     Place(g);
     auto bind = [&](wuc::CompositionObject const& target, PCWSTR property,
@@ -9168,7 +9288,7 @@ void Build(Island& g, HWND taskbar) {
     g.shapes = g.compositor.CreateContainerVisual();
     g.bodyVisual = g.compositor.CreateShapeVisual();
     g.body = g.compositor.CreateRoundedRectangleGeometry();
-    g.fill = g.compositor.CreateColorBrush(theme::kIslandFill);
+    g.fill = g.compositor.CreateColorBrush(IslandFill());
     auto body = g.compositor.CreateSpriteShape(g.body);
     body.FillBrush(g.fill);
     g.bodyVisual.Shapes().Append(body);
@@ -11100,12 +11220,7 @@ void RegroupLoose(bool all) {
 
 // The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one.
 bool LightTaskbar() {
-    DWORD light = 0, size = sizeof(light);
-    return RegGetValueW(HKEY_CURRENT_USER,
-                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                        L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &light,
-                        &size) == ERROR_SUCCESS &&
-           light;
+    return !settings::Dark();
 }
 
 // Deletes the files in `dir` (the loose folder's own) except `keep`, and `dir` with them
@@ -14817,7 +14932,8 @@ struct Features {
 Features g_features;
 
 Features Wanted() {
-    return {.pill = settings::g.pill.enabled, .tray = settings::g.tray.Any(),
+    // The tray part always has the clock to write in its 24 or 12 hours.
+    return {.pill = settings::g.pill.enabled, .tray = true,
             .size = settings::g.size.enabled,
             .autohide = settings::g.autohide.enabled,
             .media = settings::g.media.enabled,
