@@ -223,6 +223,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 | `takeOut` | `folder`, `item`(파일 이름) | `TakeOut`(폴더 옆에 고정) |
 | `order` | `folder`, `names[]`(파일 이름) | `.order` 쓰기 |
 | `dissolve` | `folder` | `DissolveFolder`(폴더는 휴지통) |
+| `delete` | `folder` | `DeleteFolder`(앱을 다시 고정하지 않고 폴더째 빼고, 폴더는 휴지통) |
 
 구현에서 정한 것(모드 사본 기준):
 
