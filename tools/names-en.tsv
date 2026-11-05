@@ -1,0 +1,120 @@
+group:pill	Pill
+pill.enabled	Pill shape
+pill.enabled#about	When off, the taskbar goes back to the default Windows look
+pill.style	Style
+pill.style=glass	Glassmorphism (lit edges, top reflection and bottom glow)
+pill.style=windowGlass	WindowGlass (borderless glass)
+pill.cornerRadius	Corner radius (px)
+pill.blur	Background blur
+pill.tintOpacity	Background tint opacity (%)
+group:tray	Tray
+group:tray#about	Hidden icons leave no empty space. The registry is not changed
+tray.hideVolume	Hide volume icon
+tray.hideNetwork	Hide network icon
+tray.hideBattery	Hide battery icon
+tray.hideMicrophone	Hide microphone icon
+tray.hideLocation	Hide location icon
+tray.hideStudioEffects	Hide Studio Effects icon
+tray.hideRecall	Hide Recall icon
+tray.hideLanguageBar	Hide language bar
+tray.hideLanguageExtras	Hide extra language icons
+tray.hideCopilot	Hide Copilot icon
+tray.bell	Notification bell
+tray.bell=shown	Always show
+tray.bell=whenNew	Only when there are new notifications
+tray.bell=hidden	Hidden
+tray.clock	Clock
+tray.clock=timeDate	Time and date
+tray.clock=time	Time only
+tray.clock=hidden	Hidden
+group:size	Size
+group:size#about	Don't use together with the Windows "small taskbar buttons" setting
+size.enabled	Change size
+size.taskbarHeight	Taskbar height (px)
+size.taskbarHeight#about	Windows default is 48
+size.iconSize	Icon size (px)
+size.iconSize#about	Windows default is 24
+size.iconSpacing	Icon spacing (px)
+size.iconSpacing#about	App button width is icon size plus spacing (Windows default is 20)
+group:start	Start button
+group:start#about	The right-click menu stays the same
+start.mode	Start button
+start.mode=windows	Unchanged
+start.mode=hidden	Hidden (open Start with the Win key)
+start.mode=bloom	Bloom button (opens and closes Bloom)
+group:autohide	Auto-hide
+autohide.enabled	Auto-hide helper
+autohide.enabled#about	Turn auto-hide on or off in Windows Settings (Taskbar behaviors). This feature also lets a taskbar at the top hide, and applies the values below
+autohide.revealZone	Reveal zone (%)
+autohide.revealZone#about	The mouse brings the taskbar out only in this middle part of the edge. 100 means the whole edge
+autohide.showDelay	Show delay (ms)
+autohide.showDelay#about	-1 uses the Windows default (mouse hover time, usually 400)
+autohide.hideDelay	Hide delay (ms)
+autohide.hideDelay#about	Time after the mouse leaves before hiding. -1 uses the Windows default (mouse hover time)
+autohide.animation	Animation length (ms)
+autohide.animation#about	0 uses the Windows default
+autohide.keepHiddenForBloom	Stay hidden when the Bloom launcher opens
+autohide.keepHiddenForBloom#about	When off, opening the Bloom launcher with the Bloom key or Win key also brings out the hidden taskbar on that monitor, and it stays out while the launcher is in front
+group:media	Media
+media.enabled	Media player
+media.enabled#about	Puts the playing track's album art, title and previous/play/next buttons before the tray. Collapses when nothing is playing
+media.maxWidth	Max title width (px)
+media.maxWidth#about	Longer titles are shortened with …
+group:usage	Usage
+usage.enabled	Show Bloom usage
+usage.enabled#about	Reads the AI usage file Bloom exports and shows each account's weekly usage % with a bar in the tray. Turn on file export under Home > AI usage in Bloom settings. Nothing is created if the export folder doesn't exist
+usage.logoColor	Logo color
+usage.logoColor#about	The account icons in the tray and the island (files picked in Bloom Settings › AI accounts)
+usage.logoColor=mono	Mono (dim text color)
+usage.logoColor=brand	Original colors (as in the icon file)
+usage.gapBefore	Gap from apps (px)
+usage.gapBefore#about	Space added between the last app button and the usage
+usage.gapAfter	Right gap (px)
+usage.gapAfter#about	Space from the end of the usage to the tray icons on the right
+group:island	Auto-hide island
+island.enabled	Auto-hide island
+island.enabled#about	While the top taskbar is hidden by auto-hide, puts a small black island at the top center of the screen. Clicking the island (setting below) or pointing at it expands the island and brings out the taskbar. Auto-hide helper must also be on
+island.showClock	Show clock
+island.showMedia	Show playing track
+island.showMedia#about	Shows album art and title when the media player is on
+island.showUsage	Show AI usage
+island.showUsage#about	Shows when Bloom usage is on and the Bloom file exists
+island.height	Height (px)
+island.height#about	At 100% scale, from 20 to 60
+island.width	Width (px)
+island.width#about	Width of the island body at 100% scale, up to 1200. 0 fits what it shows. If the content doesn't fit, the track title is shortened with …
+island.reveal	Bring out the taskbar
+island.reveal#about	With the click option, pointing at the island doesn't bring the taskbar out; you have to click the island. Pointing at the top edge doesn't either, except while dragging a file, as before
+island.reveal=hover	As soon as you point at it
+island.reveal=click	Only when you click the island
+island.hoverTransparency	Transparency on hover (%)
+island.hoverTransparency#about	Makes the island this transparent while the pointer is over it, so what's below shows through. 0 leaves it as is, 100 makes it invisible. The island still gets the clicks
+group:folders	Folders
+folders.enabled	Taskbar folders
+folders.enabled#about	Drag a pinned app onto another app to group them into a folder. Keep the Taskbar Folders mod off while this is on
+folders.foldersPath	Folder location
+folders.foldersPath#about	Each subfolder in this folder becomes one taskbar folder
+folders.mergeDelay	Merge delay (ms)
+folders.mergeDelay#about	How long an app must stay over another app before the two can merge (100–3000)
+folders.popupScale	Folder size (%)
+folders.popupScale#about	Shrinks or enlarges an open folder and its menu as a whole, text and icons included (50–150)
+folders.showLabels	Show app names
+folders.showLabels#about	Puts names under the apps in an open folder. When off, the cells shrink to icon size
+folders.iconSize	Icon size in folders (px)
+folders.iconSize#about	Size of app icons in an open folder (16–96)
+folders.appSpacing	App spacing (px)
+folders.appSpacing#about	Between apps in an open folder (0–40)
+folders.popupSide	Folder opens
+folders.popupSide=auto	Away from the taskbar
+folders.popupSide=above	Above the taskbar
+folders.popupSide=below	Below the taskbar
+folders.popupGap	Distance from taskbar (px)
+folders.popupGap#about	Between the taskbar and an open folder or its menu (0–200)
+folders.cornerRadius	Corner radius (px)
+folders.cornerRadius#about	Corners of an open folder and its menu (0–40)
+folders.cornerSmoothing	Corner smoothing (%)
+folders.cornerSmoothing#about	0 gives ordinary rounded corners, 60 a continuous curve like Apple icons (0–100)
+folders.autoRunning	Running folder
+folders.autoRunning#about	Gathers apps you started without pinning, and that aren't in any folder, into one clock-shaped folder. Apps leave it when closed, and the folder is gone when there are none
+folders.runningName	Running folder name
+folders.runningName#about	The name the taskbar gives this folder's button

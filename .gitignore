@@ -1,0 +1,37 @@
+# Build output and scratch
+build/
+dist/
+.work/
+sandbox/
+_backup/
+work/
+*.o
+*.obj
+*.exp
+*.lib
+*.a
+*.log
+*.tmp
+*.bak
+__pycache__/
+
+# Debug symbols, offset tables and symbol caches stay local
+*.pdb
+offsets/
+symcache/
+SymbolCache/
+names-*.txt
+*_*.txt.offsets
+
+# Private notes; the add-on protocol is public
+docs/*
+!docs/addon-protocol.md
+
+# Local development tools (tools/public-files.txt, [private])
+tools/build.sh
+tools/compare_cache.py
+tools/pe_imports.py
+tools/*harness*
+tools/crash-test-mod.cpp
+tools/disasm-check.cpp
+tools/windhawk-values.py

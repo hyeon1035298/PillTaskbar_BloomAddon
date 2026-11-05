@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# The maintainer fills the hash from the release page of the pinned llvm-mingw version.
+# The job fails while it is empty, so nothing unverified is ever run.
+env:
+  LLVM_MINGW_VERSION: "20250528"
+  LLVM_MINGW_FLAVOR: "ucrt-x86_64"
+  LLVM_MINGW_SHA256: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch llvm-mingw
+        run: |
+          if [ -z "$LLVM_MINGW_SHA256" ]; then
+            echo "LLVM_MINGW_SHA256 is empty: set it in .github/workflows/build.yml" >&2
+            exit 1
+          fi
+          name="llvm-mingw-${LLVM_MINGW_VERSION}-${LLVM_MINGW_FLAVOR}"
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${name}.zip"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm-mingw.zip" "$url"
+          echo "${LLVM_MINGW_SHA256}  $RUNNER_TEMP/llvm-mingw.zip" | sha256sum -c -
+          powershell -NoProfile -Command "Expand-Archive -LiteralPath \"\$env:RUNNER_TEMP\llvm-mingw.zip\" -DestinationPath \"\$env:RUNNER_TEMP\llvm-mingw\""
+          echo "CXX=$(cygpath -u "$RUNNER_TEMP")/llvm-mingw/${name}/bin/clang++.exe" >> "$GITHUB_ENV"
+
+      - name: Compiler version
+        run: '"$CXX" --version'
+
+      - name: Check the tree
+        run: python -I tools/check-public.py
+
+      - name: Build
+        run: bash tools/build-addon.sh
+
+      - name: Write SOURCE.txt
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          {
+            echo "Source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "Tag: ${GITHUB_REF_NAME}"
+            echo "Commit: ${GITHUB_SHA}"
+          } > build/addon/SOURCE.txt
+
+      - name: Stage release files
+        run: |
+          out="dist/PillTaskbar_BloomAddon"
+          mkdir -p "$out"
+          cp LICENSE "$out/"
+          for f in PillTaskbarHost.exe PillTaskbarRuntime.dll PillTaskbar.dll symbols.txt addon.json \
+                   settings.schema.json THIRD_PARTY.md THIRD_PARTY_NOTICES.txt SOURCE.txt; do
+            if [ -f "build/addon/$f" ]; then
+              cp "build/addon/$f" "$out/"
+            elif [ "$f" != settings.schema.json ] && [ "$f" != SOURCE.txt ]; then
+              echo "missing build/addon/$f" >&2
+              exit 1
+            fi
+          done
+          if [[ "$GITHUB_REF" == refs/tags/v* && ! -f "$out/SOURCE.txt" ]]; then
+            echo "SOURCE.txt missing on a tag build" >&2
+            exit 1
+          fi
+          ls -l "$out"
+
+      - name: Zip
+        run: |
+          name="PillTaskbar_BloomAddon-${GITHUB_REF_NAME//\//-}"
+          (cd dist/PillTaskbar_BloomAddon && 7z a -tzip "../${name}.zip" . >/dev/null)
+          echo "ZIP_NAME=${name}.zip" >> "$GITHUB_ENV"
+          (cd dist && sha256sum "${name}.zip" | tee "${name}.zip.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: addon
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
