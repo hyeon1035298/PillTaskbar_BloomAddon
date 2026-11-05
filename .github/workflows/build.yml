@@ -7,12 +7,14 @@ on:
     tags: ["v*"]
   pull_request:
 
-# The maintainer fills the hash from the release page of the pinned llvm-mingw version.
-# The job fails while it is empty, so nothing unverified is ever run.
+# The pinned llvm-mingw release and its zip's SHA-256. GitHub gives no digest for releases
+# this old; the hash is the one in winget's manifest for the same zip
+# (microsoft/winget-pkgs, MartinStorsjo.LLVM-MinGW.UCRT 20.1.6-20250528).
+# The job fails while it is empty or wrong, so nothing unverified is ever run.
 env:
   LLVM_MINGW_VERSION: "20250528"
   LLVM_MINGW_FLAVOR: "ucrt-x86_64"
-  LLVM_MINGW_SHA256: ""
+  LLVM_MINGW_SHA256: "cd7813524da5e5cc747d47fbb483a45d39cdf7e0d8e44a60d17d6dd819290359"
 
 permissions:
   contents: read
