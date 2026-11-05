@@ -61,7 +61,7 @@ private:
     HostState state_;
 };
 
-// Crash rules (plan, design 5): a crash counts when explorer died with an NTSTATUS
+// Crash rules: a crash counts when explorer died with an NTSTATUS
 // error code or left an Application Error event, within 5 minutes of injecting; two
 // counted crashes within 10 minutes turn safe mode on.
 constexpr uint64_t kCrashAfterInjectWindow = 5 * 60 * 10000000ull;

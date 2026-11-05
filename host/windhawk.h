@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Keeps the add-on from running next to the Windhawk build of the same mod, which
-// would hook every function twice (plan, design 5). Reads only; never writes
+// would hook every function twice. Reads only; never writes
 // Windhawk's registry or its service.
 //
 // The registry alone does not load anything: Windhawk's engine does, and only while

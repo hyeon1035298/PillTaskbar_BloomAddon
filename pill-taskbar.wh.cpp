@@ -12230,8 +12230,8 @@ wux::Media::SolidColorBrush Brush(uint32_t argb) {
 
 // HeroUI v3's default theme (@heroui/styles): layers of fill rather than lines, large
 // corners. The surface is glass like the taskbar's, tinted with the theme's surface
-// (dark lifted to the user's mid tone), and fills on it are see-through layers. The one
-// accent is the user's pink.
+// (dark lifted to a middle gray), and fills on it are see-through layers. The one
+// accent is pink (#FF7A9E dark, #E04E78 light).
 struct Palette {
     uint32_t surface, border, hover, press, field, text, muted, accent;
     uint32_t running;  // the accent, soft: under a running app

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Taskbar symbol preparation (plan, design 3; docs/research/addon-symbols.md): read
+// Taskbar symbol preparation: read
 // each module's RSDS record from disk, find or download its PDB, resolve the names in
 // symbols.txt with the System32 dbghelp, and write the offsets file the runtime reads.
 

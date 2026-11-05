@@ -113,8 +113,8 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 - `--safe-mode`: `safeMode`를 켜고 `--stop`처럼 내린다. 떠 있는 호스트가 없으면 파일만 고친다.
 - `--reset-safe-mode`: Bloom의 [다시 켜기]. 시작할 때 `safeMode`와 `crashes`를 비운다.
 - `--log`: 런타임의 `Wh_Log`를 처음부터 켠다.
-- `--mod none`: 런타임만 넣는다(주입 시험 6). `--mod <파일>`: 같은 폴더의 다른 모드 DLL(충돌 시험 10).
-- `--resolve-symbols`: 기호만 준비하고 끝난다(검증 3). `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다.
+- `--mod none`: 런타임만 넣는다(주입 시험용). `--mod <파일>`: 같은 폴더의 다른 모드 DLL(충돌 시험용).
+- `--resolve-symbols`: 기호만 준비하고 끝난다. `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다.
 
 ## 3. 종료 코드
 
@@ -133,7 +133,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 
 코드 12의 규칙. 레지스트리만으로는 아무것도 올라가지 않고 Windhawk 엔진이 올린다. 그래서 `ADDON_WINDHAWK_MODS`의 어느 id가 `HKLM\SOFTWARE\Windhawk\Engine\Mods\<id>`에서 꺼져 있지 않을(`Disabled`가 0이거나 없음) 때, 다음 가운데 하나면 충돌이다: `windhawk.exe` 프로세스가 있음, `windhawk` 서비스가 스스로 시작함(시작 유형 자동, 지연 자동 포함), explorer에 그 모드 DLL(`<id>_…`)이 이미 있음. Windhawk가 돌지 않고 서비스가 수동이거나 없으면 넣는다. 사용자가 할 일은 셋 중 하나다: Windhawk에서 그 모드 끄기, Windhawk 서비스를 수동 시작으로 두고 Windhawk 끄기, Windhawk 지우기. 호스트는 레지스트리와 서비스를 읽기만 한다.
 
-Bloom은 10-15 뒤에 스스로 다시 띄우지 않는다.
+Bloom은 종료 코드 10–15 뒤에는 스스로 다시 띄우지 않는다.
 
 ## 4. 순서
 
