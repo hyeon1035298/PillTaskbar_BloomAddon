@@ -11637,6 +11637,19 @@ void DissolveFolder(const std::wstring& folder) {
     Regroup(released);
 }
 
+// The folder and its shortcuts leave the taskbar, the folder for the Recycle Bin; its apps
+// aren't pinned again (their windows get buttons of their own).
+void DeleteFolder(const std::wstring& folder) {
+    ComPtr<IPinManagerInterop3> manager = PinManager();
+    std::vector<Pin> pins = ReadPins();
+    int index = FindFolderPin(pins, folder);
+    if (!manager || index < 0 || g_unloading) return;
+    std::vector<std::wstring> released = FolderKeys(folder);
+    Unpin(manager.Get(), pins[index].pidl.get());
+    RemoveFolder(folder);
+    Regroup(released);
+}
+
 void RenameFolder(HWND owner, const std::wstring& folder) {
     std::wstring name = FolderName(folder);
     if (PromptName(owner, &name)) RenameFolderTo(folder, name);
@@ -15745,6 +15758,11 @@ PCWSTR Dissolve(const std::wstring& folder) {
     return folders::FindFolderPin(folders::ReadPins(), folder) < 0 ? nullptr : kFailed;
 }
 
+PCWSTR Delete(const std::wstring& folder) {
+    folders::DeleteFolder(folder);
+    return folders::FindFolderPin(folders::ReadPins(), folder) < 0 ? nullptr : kFailed;
+}
+
 // Icon files Bloom handed over stay while a folder's pin shortcut points at them.
 void PruneIcons() {
     std::wstring root = folders::Root(), dir = folders::PinsDir() + L"\\" + kIconsDir;
@@ -15769,8 +15787,8 @@ PCWSTR Execute(const Command& c) {
     if (c.badArgs) return kBadArgs;
     if (folders::g_unloading) return kFailed;
     if (c.cmd == L"create") return Create(c);
-    static constexpr PCWSTR kOnFolder[] = {L"rename", L"icon", L"add", L"takeOut", L"order",
-                                           L"dissolve"};
+    static constexpr PCWSTR kOnFolder[] = {L"rename", L"icon",     L"add",   L"takeOut",
+                                           L"order",  L"dissolve", L"delete"};
     if (std::none_of(std::begin(kOnFolder), std::end(kOnFolder),
                      [&](PCWSTR cmd) { return c.cmd == cmd; }) ||
         c.folder.empty())
@@ -15782,6 +15800,7 @@ PCWSTR Execute(const Command& c) {
     if (c.cmd == L"add") return Add(folder, c);
     if (c.cmd == L"takeOut") return TakeOut(folder, c);
     if (c.cmd == L"order") return Order(folder, c);
+    if (c.cmd == L"delete") return Delete(folder);
     return Dissolve(folder);
 }
 
