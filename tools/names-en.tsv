@@ -66,9 +66,9 @@ group:usage	Usage
 usage.enabled	Show Bloom usage
 usage.enabled#about	Reads the AI usage file Bloom exports and shows each account's weekly usage % with a bar in the tray. Turn on file export under Home > AI usage in Bloom settings. Nothing is created if the export folder doesn't exist
 usage.logoColor	Logo color
-usage.logoColor#about	The account icons in the tray and the island (files picked in Bloom Settings › AI accounts)
+usage.logoColor#about	The account icons in the tray and the island (files picked in Bloom Settings › AI accounts, or else the official logos Bloom fetches from the companies' sites)
 usage.logoColor=mono	Mono (dim text color)
-usage.logoColor=brand	Original colors (as in the icon file)
+usage.logoColor=brand	Original colors (as in the icon file; a logo in black or white alone takes the text color)
 usage.gapBefore	Gap from apps (px)
 usage.gapBefore#about	Space added between the last app button and the usage
 usage.gapAfter	Right gap (px)

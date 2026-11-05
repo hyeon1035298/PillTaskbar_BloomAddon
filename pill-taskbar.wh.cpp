@@ -161,10 +161,10 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: Bloom이 내보낸 AI 사용량 파일을 읽어 트레이에 계정마다 주간 사용 %와 막대로 보여 줍니다. Bloom 설정의 홈 화면 > AI 사용량에서 파일 내보내기를 켜야 하고, 내보내기 폴더가 없으면 아무것도 만들지 않습니다
   - logoColor: brand
     $name: 로고 색
-    $description: 트레이와 아일랜드에 보이는 계정 아이콘(Bloom 설정 › AI 계정에서 고른 파일)
+    $description: 트레이와 아일랜드에 보이는 계정 아이콘(Bloom 설정 › AI 계정에서 고른 파일, 고르지 않으면 Bloom이 회사 사이트에서 받은 공식 로고)
     $options:
     - mono: 단색 (글자의 흐린 색)
-    - brand: 원래 색 (아이콘 파일의 색 그대로)
+    - brand: 원래 색 (아이콘 파일의 색 그대로, 검정이나 흰색 한 가지로 된 로고는 글자색)
   - gapBefore: 14
     $name: 앱과의 간격 (px)
     $description: 마지막 앱 버튼과 사용량 사이에 더하는 간격입니다
@@ -6650,6 +6650,44 @@ winrt::Windows::UI::Color MonoTint(bool dark) {
     return Palette(dark).muted;
 }
 
+// Every pixel more than half there of one grey (black, grey or white, one of
+// them): a one-color mark, which its company draws in the text color of a
+// dark page. Black on a white disc is two.
+bool OneGrey(IconPixels const& icon) {
+    int low = 255, high = 0;
+    bool any = false;
+    for (uint32_t p : icon.bgra) {
+        uint32_t a = p >> 24;
+        if (a < 128) {
+            continue;
+        }
+        int r = (int)(((p >> 16) & 0xff) * 255 / a), g = (int)(((p >> 8) & 0xff) * 255 / a),
+            b = (int)((p & 0xff) * 255 / a);
+        int most = std::max({r, g, b}), least = std::min({r, g, b});
+        if (most - least > 24) {
+            return false;  // a hue
+        }
+        low = std::min(low, least);
+        high = std::max(high, most);
+        any = true;
+    }
+    return any && high - low <= 48;
+}
+
+// The one color an icon is drawn in when it is drawn in one: mono's, or the
+// text's for a one-color mark under the brand colors.
+winrt::Windows::UI::Color IconTint(bool mono, bool dark) {
+    return mono ? MonoTint(dark) : Palette(dark).text;
+}
+
+// The icon as the logo color draws it: in `tint` when mono or a one-color
+// mark, else in its own colors.
+std::shared_ptr<const IconPixels> Colored(std::shared_ptr<const IconPixels> const& icon,
+                                          bool mono,
+                                          winrt::Windows::UI::Color tint) {
+    return mono || OneGrey(*icon) ? Tinted(icon, tint) : icon;
+}
+
 // The tile's color: the text's, faint.
 winrt::Windows::UI::Color TileFill(bool dark) {
     auto c = Palette(dark).text;
@@ -6801,14 +6839,13 @@ void Refresh(View& v,
     if (v.icon) {
         // Its own colors, or one color.
         bool mono = settings::g.usage.logoColor != settings::LogoColor::kBrand;
-        auto color = MonoTint(dark);
+        auto color = IconTint(mono, dark);
         std::wstring key = a.icon + L"|" + std::to_wstring(g_iconsRead) + L"|" +
-                           std::to_wstring(iconPx) + L"|" +
-                           (mono ? std::to_wstring(color.R << 16 | color.G << 8 | color.B)
-                                 : L"");
+                           std::to_wstring(iconPx) + L"|" + (mono ? L"m" : L"b") +
+                           std::to_wstring(color.R << 16 | color.G << 8 | color.B);
         if (key != v.iconDrawn) {
             if (auto icon = IconAt(a.icon, iconPx)) {
-                if (auto bitmap = IconBitmap(mono ? *Tinted(icon, color) : *icon)) {
+                if (auto bitmap = IconBitmap(*Colored(icon, mono, color))) {
                     v.icon.Source(bitmap);
                     v.iconDrawn = key;
                 }
@@ -8016,7 +8053,7 @@ Content Measure(Island& g, float height, float room) {
             m.logoSize = size;
             if (mark == usage::Mark::kIcon) {
                 bool mono = settings::g.usage.logoColor != settings::LogoColor::kBrand;
-                m.icon = mono ? usage::Tinted(icon, usage::MonoTint(true)) : icon;
+                m.icon = usage::Colored(icon, mono, usage::IconTint(mono, true));
             } else if (mark == usage::Mark::kTile) {
                 m.tile = true;
                 m.initial = MakeText(g, labels[i].letter,
