@@ -853,7 +853,9 @@ bool SameValue(wf::IInspectable const& a, wf::IInspectable const& b) {
     }
     if (auto x = a.try_as<wf::IReference<double>>()) {
         auto y = b.try_as<wf::IReference<double>>();
-        return y && x.Value() == y.Value();
+        // NaN is a size's "Auto"; two of them are the same value.
+        return y && (x.Value() == y.Value() ||
+                     (std::isnan(x.Value()) && std::isnan(y.Value())));
     }
     if (auto x = a.try_as<wf::IReference<Visibility>>()) {
         auto y = b.try_as<wf::IReference<Visibility>>();
@@ -2098,8 +2100,10 @@ void StyleFrame(FrameworkElement const& frame, HWND hwnd) {
                             GridLength{1, GridUnitType::Auto},
                             GridLength{1, GridUnitType::Star}});
     core::Set(frame, Controls::Grid::ColumnProperty(), box_value(1));
-    core::Set(frame, FrameworkElement::WidthProperty(),
-              box_value(std::numeric_limits<double>::quiet_NaN()));
+    // Explorer gives a secondary taskbar's frame the width the tray leaves
+    // again later (as the clock's width changes), which stretches the pill.
+    core::Keep(frame, FrameworkElement::WidthProperty(),
+               box_value(std::numeric_limits<double>::quiet_NaN()));
     core::Set(frame, FrameworkElement::MinWidthProperty(),
               box_value(theme::kFrameMinWidth));
     core::Set(frame, FrameworkElement::MaxWidthProperty(),
