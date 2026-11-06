@@ -921,12 +921,14 @@ void SetColumns(Controls::Grid const& grid,
     }
 }
 
-// Property change callbacks of the mod, one per object and property;
+// Property change callbacks of the mod, one per object, property and user
+// (`who`: two parts that watch the same property each name themselves);
 // RestoreAll removes them.
 struct Watched {
     winrt::weak_ref<DependencyObject> obj;
     DependencyProperty prop{nullptr};
     int64_t token;
+    PCWSTR who;
 };
 
 std::vector<Watched> g_watched;
@@ -935,9 +937,10 @@ size_t g_watchPruneAt = 64;
 template <class F>
 void Watch(DependencyObject const& obj,
            DependencyProperty const& prop,
-           F&& onChange) {
+           F&& onChange,
+           PCWSTR who = L"") {
     bool known = std::any_of(g_watched.begin(), g_watched.end(), [&](auto& w) {
-        return w.prop == prop && w.obj.get() == obj;
+        return w.prop == prop && w.obj.get() == obj && wcscmp(w.who, who) == 0;
     });
     if (known) {
         return;
@@ -953,7 +956,7 @@ void Watch(DependencyObject const& obj,
                 Guard(L"Watch", [&] { onChange(sender); });
             }
         });
-    g_watched.push_back({winrt::make_weak(obj), prop, token});
+    g_watched.push_back({winrt::make_weak(obj), prop, token, who});
 }
 
 // For properties explorer writes again later: Set, then put the value back
@@ -8821,10 +8824,13 @@ void FindClock() {
     }
     g_clockText = text;
     g_clock = text.Text();
-    core::Watch(text, Controls::TextBlock::TextProperty(),
-                [](DependencyObject const& sender) {
-                    OnClock(sender.as<Controls::TextBlock>().Text());
-                });
+    // The tray's clock format watches this text too.
+    core::Watch(
+        text, Controls::TextBlock::TextProperty(),
+        [](DependencyObject const& sender) {
+            OnClock(sender.as<Controls::TextBlock>().Text());
+        },
+        L"island");
 }
 
 void DecodeArt(Island& g, wss::IBuffer const& bytes) {
