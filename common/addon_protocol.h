@@ -66,7 +66,7 @@ constexpr char kHookProcName[] = "PillTaskbarHookProc";
 // lpData the second start's command line (UTF-16, no terminator needed).
 constexpr ULONG_PTR kCopyDataCommand = 0x50544831;  // 'PTH1'
 
-// Host exit codes. Bloom does not restart the host by itself after 10-15.
+// Host exit codes. Bloom does not restart the host by itself after exit codes 10 to 15.
 enum ExitCode : int {
     kExitOk = 0,
     kExitError = 1,         // bad arguments, missing files, anything unexpected

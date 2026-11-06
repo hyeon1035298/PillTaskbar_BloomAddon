@@ -10,7 +10,7 @@
 |---|---|
 | `ADDON_ID` | 데이터 폴더 `<local>\addons\<id>`, `Local\Bloom.Addon.<id>.Host/Stop`, 창 클래스, `WH_MOD_ID`, addon.json `id` |
 | `ADDON_NAME` | `<이름>Host.exe`, `<이름>Runtime.dll`, `<이름>.dll`, explorer 쪽 객체 `Local\<이름>.Config/Loaded/Unload/Unloaded/Runtime.%u` |
-| `ADDON_VERSION` | `kVersion`, addon.json `version`(전에는 `addon_protocol.h`에 있었음) |
+| `ADDON_VERSION` | `kVersion`, addon.json `version` |
 | `ADDON_MOD_SRC`, `ADDON_MOD_VERSION` | 모드 소스(conf 기준 경로), `WH_MOD_VERSION` |
 | `ADDON_WINDHAWK_MODS` | 거절 검사에 쓰는 Windhawk 모드 id(3절 코드 12) |
 | `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32 |
@@ -179,7 +179,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 
 ## 5. 작업표시줄 상태와 폴더 명령
 
-모드가 Windhawk판이든 애드온판이든 같은 소스로 돈다. 폴더 위치는 `%LOCALAPPDATA%\Bloom\addons\pill-taskbar\`(이하 `<data>`)로 고정한다. `%LOCALAPPDATA%\Bloom`이 없으면(이 PC에 Bloom이 없음) 모드는 아무것도 만들지 않는다. 개발 복사본의 Bloom은 `--data\local`을 보므로 실제 explorer와 닿지 않고, 화면 QA는 그 안에 가짜 `state.json`을 둔다.
+모드가 Windhawk판이든 애드온판이든 같은 소스로 돈다. 폴더 위치는 `%LOCALAPPDATA%\Bloom\addons\pill-taskbar\`(이하 `<data>`)로 고정한다. `%LOCALAPPDATA%\Bloom`이 없으면(이 PC에 Bloom이 없음) 모드는 아무것도 만들지 않는다. `--data`로 띄운 Bloom은 그 폴더 안의 `local`을 보므로 실제 explorer와 닿지 않는다.
 
 ### `state.json` (모드가 씀, Bloom이 읽음)
 
@@ -225,7 +225,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 | `dissolve` | `folder` | `DissolveFolder`(폴더는 휴지통) |
 | `delete` | `folder` | `DeleteFolder`(앱을 다시 고정하지 않고 폴더째 빼고, 폴더는 휴지통) |
 
-구현에서 정한 것(모드 사본 기준):
+구현 규칙:
 
 - `pinned`와 `items`에는 작업표시줄에 고정된 폴더만 나온다. 디스크에만 있는 폴더를 가리키는 명령은 `noFolder`.
 - 폴더 기능이 꺼져 있어도 `state.json`은 쓴다(`folders.enabled: false`, 고정 항목은 모두 `app`).

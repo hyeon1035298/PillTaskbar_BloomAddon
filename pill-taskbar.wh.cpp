@@ -210,7 +210,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 100% 배율 기준 아일랜드 몸통의 폭, 1200까지. 0이면 보여 주는 내용에 맞춥니다. 내용이 넘치면 곡 제목을 …로 줄입니다
   - reveal: hover
     $name: 작업표시줄 부르기
-    $description: 클릭이면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 위 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 지금처럼 나옵니다
+    $description: 클릭이면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 위 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 나옵니다
     $options:
     - hover: 포인터를 대면 바로
     - click: 아일랜드를 클릭해야
@@ -265,7 +265,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 */
 // ==/WindhawkModSettings==
 
-// 구역 목차 (기능 하나를 고칠 때는 그 구역만 연다)
+// 구역 목차 (기능마다 한 구역에 모여 있다)
 //   settings  Windhawk 설정 읽기와 theme 상수
 //   core      UI 스레드, 작업표시줄 찾기, restore 목록, XAML 도우미
 //   region    F1 클릭 통과 (SetWindowRgn)
