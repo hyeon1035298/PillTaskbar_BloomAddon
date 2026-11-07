@@ -14,7 +14,10 @@
 #include <wchar.h>
 
 #include <algorithm>
+#include <exception>
 #include <vector>
+
+#include <winrt/base.h>  // only for winrt::hresult_error in CallMod
 
 namespace rt {
 HMODULE g_self;
@@ -216,6 +219,26 @@ bool ReleaseMod(bool hooksOff, ULONGLONG deadline) {
     return true;
 }
 
+// Runs one of the mod's callbacks. An exception leaving it would end the control
+// thread and with it explorer, so it stops here, is logged, and the call counts as
+// failed.
+template <typename Fn>
+bool CallMod(PCWSTR name, Fn&& fn) {
+    try {
+        fn();
+        return true;
+    } catch (const winrt::hresult_error& e) {
+        log::Line(L"%s threw hresult_error 0x%08X", name, (unsigned)e.code().value);
+    } catch (const std::exception& e) {
+        log::Line(L"%s threw %S", name, e.what());
+    } catch (...) {
+        log::Line(L"%s threw an exception", name);
+    }
+    return false;
+}
+
+bool UnloadMod(ULONGLONG deadline);
+
 bool LoadMod() {
     if (g_leaked) {
         WriteState(L"refused", L"restart");
@@ -245,15 +268,25 @@ bool LoadMod() {
     }
     g_mod = {module, file, callbacks, false};
     log::Line(L"loading %s (%s %s)", file.c_str(), callbacks->modId, callbacks->modVersion);
-    if (!callbacks->init()) {
+    BOOL started = FALSE;
+    if (!CallMod(L"Wh_ModInit", [&] { started = callbacks->init(); }) || !started) {
         // As in Windhawk: no Uninit after a failed Init, and its queued hooks are dropped.
+        // An Init that threw is treated the same.
         ReleaseMod(true, GetTickCount64() + addon::kRuntimeUnloadMs);
         WriteState(L"initFailed", hooks::g_symbolsFailed ? L"symbols" : L"init");
         return false;
     }
     hooks::EndInit();
     g_mod.running = true;
-    callbacks->afterInit();
+    if (!CallMod(L"Wh_ModAfterInit", [&] { callbacks->afterInit(); })) {
+        // Half started: taken out again through its Uninit, and the start counts as failed.
+        if (UnloadMod(UnloadDeadline())) {
+            WriteState(L"initFailed", L"init");
+        } else {
+            WriteState(L"refused", L"restart");
+        }
+        return false;
+    }
     WriteState(L"running");
     return true;
 }
@@ -265,11 +298,14 @@ bool UnloadMod(ULONGLONG deadline) {
     }
     bool hooksOff = true;
     if (g_mod.running) {
-        g_mod.callbacks->beforeUninit();
+        // A callback that throws does not stop the unload; ReleaseMod still checks
+        // that nothing is left in the mod's code before it is freed.
+        const PillAddonCallbacks* callbacks = g_mod.callbacks;
+        CallMod(L"Wh_ModBeforeUninit", [&] { callbacks->beforeUninit(); });
         hooksOff = hooks::DisableAll();
         // The mod's Uninit waits for calls still inside its hooks, which needs the
         // hooks off first.
-        g_mod.callbacks->uninit();
+        CallMod(L"Wh_ModUninit", [&] { callbacks->uninit(); });
     }
     return ReleaseMod(hooksOff, deadline);
 }
@@ -283,7 +319,12 @@ void OnValuesChanged() {
         return;
     }
     BOOL reload = FALSE;
-    BOOL keep = g_mod.callbacks->settingsChanged(&reload);
+    BOOL keep = TRUE;
+    const PillAddonCallbacks* callbacks = g_mod.callbacks;
+    if (!CallMod(L"Wh_ModSettingsChanged", [&] { keep = callbacks->settingsChanged(&reload); })) {
+        // Its settings may be half applied: start it afresh with the new values.
+        reload = TRUE;
+    }
     if (reload) {
         WriteState(L"reloading");
         if (UnloadMod(UnloadDeadline())) {

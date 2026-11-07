@@ -5,10 +5,12 @@
 
 #include "addon_protocol.h"
 #include "args.h"
+#include "autohide.h"
 #include "commands.h"
 #include "json.h"
 #include "state.h"
 #include "symbols.h"
+#include "taskbar.h"
 #include "util.h"
 #include "windhawk.h"
 
@@ -74,6 +76,22 @@ void TestCrashRules() {
     Check(!CrashCounts(t0, t0 + 6 * m), L"crash: 6 min after injecting does not");
     Check(!CrashCounts(0, t0), L"crash: nothing injected");
     Check(!CrashCounts(t0, t0 - m), L"crash: before injecting does not");
+    Check(CrashCounts(t0, t0 + 37 * m, true), L"crash: in the add-on's DLL counts long after injecting");
+    Check(!CrashCounts(t0, t0 + 37 * m, false), L"crash: in another module only within 5 min");
+    Check(!CrashCounts(0, t0, true), L"crash: in the add-on's DLL, nothing injected");
+    Check(!CrashCounts(t0, t0 - m, true), L"crash: in the add-on's DLL before injecting does not");
+
+    const std::wstring name = ADDON_NAME;
+    std::vector<std::wstring> dlls = {addon::kRuntimeDll, addon::kModDll, L""};
+    Check(IsAddonModule(addon::kModDll, dlls) && IsAddonModule(addon::kRuntimeDll, dlls),
+          L"crash module: the mod and the runtime");
+    Check(IsAddonModule(Lower(addon::kModDll), dlls), L"crash module: any case");
+    Check(IsAddonModule(name + L".r123456.dll", dlls), L"crash module: a reload copy of the mod");
+    Check(!IsAddonModule(name + L".r.dll", dlls) && !IsAddonModule(name + L".r12x.dll", dlls),
+          L"crash module: not a reload copy");
+    Check(!IsAddonModule(L"Taskbar.View.dll", dlls) && !IsAddonModule(L"unknown", dlls) && !IsAddonModule(L"", dlls),
+          L"crash module: other modules");
+    Check(IsAddonModule(L"Other.dll", {addon::kRuntimeDll, L"Other.dll"}), L"crash module: a --mod file");
 
     HostState s;
     Check(!RecordCrash(s, t0, t0), L"crash: first one is not safe mode");
@@ -85,6 +103,15 @@ void TestCrashRules() {
     std::vector<uint64_t> c = {t0 + 5 * m, t0, t0 + 20 * m};
     PruneCrashes(c, t0 + 21 * m);
     Check(c.size() == 1 && c[0] == t0 + 20 * m, L"crash: prune keeps the last 10 min");
+}
+
+void TestExplorerReady() {
+    Check(!ExplorerReady(false, 240), L"taskbar: 240 ms after explorer started is too early");
+    Check(!ExplorerReady(true, kExplorerSettleMs - 1), L"taskbar: island, still settling");
+    Check(ExplorerReady(true, kExplorerSettleMs), L"taskbar: island and settled");
+    Check(!ExplorerReady(false, kExplorerSettleMs), L"taskbar: no island yet");
+    Check(ExplorerReady(false, kExplorerReadyMaxMs), L"taskbar: no island at the limit goes ahead");
+    Check(ExplorerReady(false, UINT64_MAX), L"taskbar: unknown age goes ahead");
 }
 
 void TestTime() {
@@ -223,6 +250,21 @@ void TestPtr64() {
           L"ptr64: no change without __ptr64");
 }
 
+void TestIslandWanted() {
+    json::Value schema, values;
+    json::Parse("{\"groups\": [{\"items\": [{\"key\": \"autohide.enabled\", \"default\": true}]},"
+                " {\"items\": [{\"key\": \"island.enabled\", \"default\": true}]}]}",
+                schema);
+    Check(IslandWanted(values, schema), L"island: no values.json takes the schema's defaults");
+    json::Parse("{\"pill.glass\": false}", values);
+    Check(IslandWanted(values, schema), L"island: keys left out are at their default");
+    json::Parse("{\"island.enabled\": false, \"autohide.enabled\": false}", values);
+    Check(!IslandWanted(values, schema), L"island: off in values.json");
+    json::Parse("{\"autohide.enabled\": 0}", values);
+    Check(!IslandWanted(values, schema), L"island: needs the auto-hide part too");
+    Check(!IslandWanted(json::Value{}, json::Value{}), L"island: no default known is off");
+}
+
 void TestWindhawkRule() {
     WindhawkEngine none, running{true, false}, boot{false, true};
     Check(!WindhawkRule(false, false, running).any(), L"windhawk: not installed");
@@ -240,12 +282,14 @@ void TestWindhawkRule() {
 int RunSelfTest() {
     TestArgs();
     TestCrashRules();
+    TestExplorerReady();
     TestTime();
     TestJson();
     TestHostState();
     TestOffsets();
     TestPtr64();
     TestWindhawkRule();
+    TestIslandWanted();
     Print(Format(L"self-test: %d checks, %d failed", g_checks, g_failures));
     return g_failures;
 }

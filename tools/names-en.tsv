@@ -10,6 +10,8 @@ pill.theme#about	Light or dark for the taskbar and the icons, usage and folders 
 pill.theme=system	Windows taskbar theme
 pill.theme=dark	Dark
 pill.theme=light	Light
+pill.glass	Glass effect
+pill.glass#about	When off, the pill, the island's morph and the folder popup are filled in the theme's color without blur. As a Bloom add-on it follows Bloom's glass effect
 pill.cornerRadius	Corner radius (px)
 pill.blur	Background blur
 pill.tintOpacity	Background tint opacity (%)

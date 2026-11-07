@@ -8,10 +8,18 @@
 
 #include <string>
 
+#include "json.h"
+
 namespace host {
 
-// Turns Windows' auto-hide on when values.json in dataDir has the island on and
-// auto-hide is off. Logs what it did; never turns auto-hide off.
+// True when the mod runs the island: island.enabled and autohide.enabled both on.
+// values.json leaves out a value at its default, so a missing key takes the
+// default from the settings schema (groups[].items[].default).
+bool IslandWanted(const json::Value& values, const json::Value& schema);
+
+// Turns Windows' auto-hide on when the island is on (values.json in dataDir, then
+// settings.schema.json beside the host) and auto-hide is off. Logs what it did;
+// never turns auto-hide off.
 void KeepAutoHideForIsland(const std::wstring& dataDir);
 
 }  // namespace host

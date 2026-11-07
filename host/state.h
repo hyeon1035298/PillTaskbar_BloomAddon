@@ -62,14 +62,19 @@ private:
 };
 
 // Crash rules: a crash counts when explorer died with an NTSTATUS
-// error code or left an Application Error event, within 5 minutes of injecting; two
-// counted crashes within 10 minutes turn safe mode on.
+// error code or left an Application Error event, within 5 minutes of injecting, or at
+// any time after injecting when that event names one of the add-on's own DLLs as the
+// faulting module; two counted crashes within 10 minutes turn safe mode on.
 constexpr uint64_t kCrashAfterInjectWindow = 5 * 60 * 10000000ull;
 constexpr uint64_t kCrashCountWindow = 10 * 60 * 10000000ull;
 constexpr size_t kCrashesForSafeMode = 2;
 
 bool IsCrashExitCode(DWORD code);
-bool CrashCounts(uint64_t injectedAt, uint64_t diedAt);
+// inAddon: the crash event's faulting module is one of the add-on's DLLs.
+bool CrashCounts(uint64_t injectedAt, uint64_t diedAt, bool inAddon = false);
+// Whether a faulting module name is one of dlls (file names, empty ones skipped) or
+// a reload copy of one ("<name>.r<digits>.dll").
+bool IsAddonModule(const std::wstring& module, const std::vector<std::wstring>& dlls);
 void PruneCrashes(std::vector<uint64_t>& crashes, uint64_t now);
 // Adds a counted crash and says whether safe mode should turn on.
 bool RecordCrash(HostState& s, uint64_t diedAt, uint64_t now);

@@ -22,6 +22,20 @@ bool FindTaskbar(Taskbar& out) {
     return true;
 }
 
+bool ExplorerReady(bool hasIsland, uint64_t ageMs) {
+    return ageMs >= kExplorerReadyMaxMs || (hasIsland && ageMs >= kExplorerSettleMs);
+}
+
+bool TaskbarHasIsland(HWND tray) {
+    return FindWindowExW(tray, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr) != nullptr;
+}
+
+uint64_t ProcessAgeMs(DWORD pid) {
+    uint64_t created = ProcessCreationTime(pid), now = NowTicks();
+    if (!created) return UINT64_MAX;
+    return now > created ? (now - created) / kTicksPerMs : 0;
+}
+
 std::vector<std::wstring> ProcessModules(DWORD pid) {
     std::vector<std::wstring> out;
     Handle p(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));

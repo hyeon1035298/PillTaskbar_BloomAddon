@@ -67,6 +67,9 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - system: Windows 작업표시줄 테마
     - dark: 다크
     - light: 라이트
+  - glass: true
+    $name: 유리 효과
+    $description: 끄면 알약, 숨김 아일랜드가 바뀌는 모양, 폴더 창이 블러 없이 테마 색으로 칠해집니다. Bloom 애드온으로 쓰면 Bloom의 유리 효과를 따릅니다
   - cornerRadius: 25
     $name: 모서리 (px)
   - blur: 12
@@ -373,6 +376,7 @@ struct Settings {
         bool enabled;
         Style style;
         Theme theme;
+        bool glass;  // else an opaque fill in the theme's color, no blur
         double cornerRadius;
         float blur;
         int tintOpacity;  // 0..100
@@ -465,6 +469,7 @@ void Load() {
     g.pill.enabled = Wh_GetIntSetting(L"pill.enabled");
     g.pill.style = (Style)Choice(L"pill.style", {L"bloom", L"glass", L"windowGlass"});
     g.pill.theme = (Theme)Choice(L"pill.theme", {L"system", L"dark", L"light"});
+    g.pill.glass = Wh_GetIntSetting(L"pill.glass");
     g.pill.cornerRadius = Clamped(L"pill.cornerRadius", 0, 30);
     g.pill.blur = (float)Clamped(L"pill.blur", 0, 30);
     g.pill.tintOpacity = Clamped(L"pill.tintOpacity", 0, 100);
@@ -782,28 +787,85 @@ FrameworkElement FromAbi(void* unknown) {
     return e;
 }
 
-// Exceptions must not reach XAML or the explorer code around a hook: XAML turns
-// them into a crash.
-void DiagLine(PCWSTR format, ...) {
-    WCHAR path[MAX_PATH];
-    if (!GetTempPath(MAX_PATH, path)) {
-        return;
+// Diagnostics go to %TEMP%\pilltaskbar-diag.txt, bounded: past kDiagCap bytes
+// the file becomes pilltaskbar-diag.old.txt and starts over, a line equal to
+// the one before is only counted, and a file that won't open is left alone for
+// kDiagRetryMs. Any thread.
+constexpr ULONGLONG kDiagCap = 256 << 10;
+constexpr DWORD kDiagRetryMs = 60000;
+
+ULONGLONG FileSize(PCWSTR path) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data)) {
+        return 0;
     }
-    wcscat_s(path, L"pilltaskbar-diag.txt");
+    return ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+}
+
+void DiagLine(PCWSTR format, ...) {
     WCHAR line[512];
     va_list args;
     va_start(args, format);
     _vsnwprintf_s(line, _TRUNCATE, format, args);
     va_end(args);
-    if (FILE* f = _wfopen(path, L"a, ccs=UTF-8")) {
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        fwprintf(f, L"%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond,
-                 t.wMilliseconds, line);
-        fclose(f);
+
+    static std::mutex lock;
+    static WCHAR path[MAX_PATH], old[MAX_PATH], last[ARRAYSIZE(line)];
+    static ULONG repeats;
+    static ULONGLONG size = ~0ull;  // written so far as counted here; unknown at first
+    static DWORD failedAt;          // tick of the open that failed, 0 for none
+    std::lock_guard guard(lock);
+    if (wcscmp(line, last) == 0) {
+        repeats++;
+        return;
     }
+    if (failedAt && GetTickCount() - failedAt < kDiagRetryMs) {
+        return;
+    }
+    failedAt = 0;
+    if (!path[0]) {
+        DWORD n = GetTempPath(MAX_PATH, path);
+        if (!n || n > MAX_PATH - 32) {
+            path[0] = 0;
+            failedAt = GetTickCount() | 1;
+            return;
+        }
+        wcscpy_s(old, path);
+        wcscat_s(path, L"pilltaskbar-diag.txt");
+        wcscat_s(old, L"pilltaskbar-diag.old.txt");
+    }
+    // Past the cap by the count, the file's own size decides: it may have been
+    // deleted, or another explorer writes to it too.
+    if (size > kDiagCap) {
+        size = FileSize(path);
+    }
+    bool restart = false;  // the file couldn't be moved aside: it's emptied
+    if (size > kDiagCap) {
+        restart = !MoveFileExW(path, old, MOVEFILE_REPLACE_EXISTING);
+        size = 0;
+    }
+    FILE* f = _wfopen(path, restart ? L"w, ccs=UTF-8" : L"a, ccs=UTF-8");
+    if (!f) {
+        failedAt = GetTickCount() | 1;
+        return;
+    }
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    int written = 0;
+    if (repeats) {
+        written += fwprintf(f, L"%02d:%02d:%02d.%03d (the line above %lu more times)\n",
+                            t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, repeats);
+    }
+    written += fwprintf(f, L"%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond,
+                        t.wMilliseconds, line);
+    fclose(f);
+    size += written > 0 ? written + 2 : 0;  // about: CRLF, mostly ASCII
+    repeats = 0;
+    wcscpy_s(last, line);
 }
 
+// Exceptions must not reach XAML or the explorer code around a hook: XAML turns
+// them into a crash.
 template <class F>
 void Guard(PCWSTR what, F&& work) {
     try {
@@ -1758,12 +1820,14 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
             return;
         }
         auto tint = m_tint ? m_tint.Color() : winrt::Windows::UI::Color{};
-        tint.A = (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55);
-        if (settings::g.pill.style == settings::Style::kGlass) {
+        // Without glass the tint is the whole fill, opaque.
+        bool glass = settings::g.pill.glass;
+        tint.A = glass ? (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55) : 255;
+        if (glass && settings::g.pill.style == settings::Style::kGlass) {
             core::Guard(L"Glass brush",
                         [&] { CompositionBrush(CreateBlur(tint, true)); });
         }
-        if (!CompositionBrush()) {
+        if (glass && !CompositionBrush()) {
             core::Guard(L"Blur brush",
                         [&] { CompositionBrush(CreateBlur(tint, false)); });
         }
@@ -1940,11 +2004,82 @@ void StyleBackground(FrameworkElement const& background) {
     }
 }
 
+// The taskbar lights the focused app's button (BackgroundElement's fill and
+// stroke) through its Active* visual states. After each state pass a button in
+// one of them goes to its inactive twin, which keeps the pointer feedback. The
+// running line has its own group (RunningIndicatorStates) and stays.
+constexpr std::pair<std::wstring_view, std::wstring_view> kUnlitStates[] = {
+    {L"ActiveNormal", L"InactiveNormal"},
+    {L"ActivePointerOver", L"InactivePointerOver"},
+    {L"ActivePressed", L"InactivePressed"},
+    {L"MultiWindowActive", L"MultiWindowNormal"},
+    {L"WindowSharingActive", L"WindowSharingNormal"},
+    {L"WindowSharingActivePointerOver", L"WindowSharingPointerOver"},
+    {L"WindowSharingActivePressed", L"WindowSharingPressed"},
+    {L"MultiWindowSharingActive", L"MultiWindowSharingNormal"},
+};
+
+// A state the mod replaced, for Restore to put back.
+struct Unlit {
+    winrt::weak_ref<Controls::Control> button;
+    winrt::weak_ref<VisualStateGroup> group;
+    std::wstring_view active, inactive;
+};
+std::vector<Unlit> g_unlit;
+
+void Unlight(Controls::Control const& button) {
+    std::erase_if(g_unlit, [&](auto& u) {
+        auto b = u.button.get();
+        return !b || b == button;
+    });
+    if (Media::VisualTreeHelper::GetChildrenCount(button) == 0) {
+        return;  // no template yet
+    }
+    auto root = Media::VisualTreeHelper::GetChild(button, 0).try_as<FrameworkElement>();
+    if (!root) {
+        return;
+    }
+    for (auto const& group : VisualStateManager::GetVisualStateGroups(root)) {
+        auto state = group.CurrentState();
+        if (!state) {
+            continue;
+        }
+        auto name = state.Name();
+        for (auto& [active, inactive] : kUnlitStates) {
+            if (name == active) {
+                if (VisualStateManager::GoToState(button, inactive, true)) {
+                    g_unlit.push_back({winrt::make_weak(button), winrt::make_weak(group),
+                                       active, inactive});
+                }
+                break;
+            }
+        }
+    }
+}
+
+// Buttons still in a state the mod chose go back to the taskbar's own.
+void RelightAll() {
+    for (auto& u : g_unlit) {
+        core::Guard(L"Relight", [&] {
+            auto button = u.button.get();
+            auto group = u.group.get();
+            auto state = group ? group.CurrentState() : nullptr;
+            if (button && state && state.Name() == u.inactive) {
+                VisualStateManager::GoToState(button, u.active, false);
+            }
+        });
+    }
+    g_unlit.clear();
+}
+
 void StyleTaskButton(FrameworkElement const& button) {
     if (core::g_vertical) {
         return;
     }
     auto control = button.try_as<Controls::Control>();
+    if (control) {
+        Unlight(control);
+    }
     CornerRadius r{theme::kTaskButtonRadius, theme::kTaskButtonRadius,
                    theme::kTaskButtonRadius, theme::kTaskButtonRadius};
     if (control && control.CornerRadius() != r) {
@@ -2243,6 +2378,7 @@ void Apply(HWND hwnd) {
 void Restore() {
     g_pendingLoads.clear();
     g_containers.clear();
+    RelightAll();
     region::Clear();
 }
 
@@ -2416,6 +2552,23 @@ void Add(HWND taskbar,
     Detach(element);
     host.Children().InsertAt((uint32_t)std::min<size_t>(index, host.Children().Size()),
                              element);
+}
+
+// As tray icons load: widgets that came before their tray did (a young
+// explorer) go into it now.
+void PlaceWaiting() {
+    if (core::g_vertical || core::g_unloading) {
+        return;
+    }
+    for (auto& bar : g_bars) {
+        for (Side side : {Side::kStart, Side::kEnd}) {
+            auto host = bar.hosts[(int)side].get();
+            if ((!host || !core::Parent(host)) && IsWindow(bar.hwnd) &&
+                std::ranges::any_of(bar.items, [&](auto& i) { return i.side == side; })) {
+                Host(bar, side);
+            }
+        }
+    }
 }
 
 void Remove(HWND taskbar, PCWSTR name) {
@@ -4636,7 +4789,14 @@ bool OnTrayThread(HWND hwnd) {
 
 void TrayCheckFailed(PCWSTR what, const void* at) {
     static bool logged;
-    core::DiagLine(L"Tray check failed: %s %p", what, at);
+    // A tray that can't be asked fails on every Unhide: noted once per change.
+    static PCWSTR lastWhat;
+    static const void* lastAt;
+    if (what != lastWhat || at != lastAt) {
+        lastWhat = what;
+        lastAt = at;
+        core::DiagLine(L"Tray check failed: %s %p", what, at);
+    }
     if (!std::exchange(logged, true)) {
         Wh_Log(L"Auto-hide: the tray can't be asked (%s)", what);
     }
@@ -5232,6 +5392,7 @@ std::atomic<bool> g_stop;
 std::atomic<uint32_t> g_dirty;
 std::atomic<uint32_t> g_commands;
 std::atomic<int> g_signalling;  // Signal calls in progress, for Stop
+std::atomic<int> g_handlers;    // event handlers the sources still hold, for Stop
 std::mutex g_opLock;            // g_op
 [[clang::no_destroy]] wf::IAsyncInfo g_op{nullptr};  // what the worker waits on
 
@@ -5250,6 +5411,10 @@ void Signal(uint32_t dirty, uint32_t commands) {
 // mod waiting on a slow player.
 template <class Op>
 auto Wait(Op const& op) {
+    // A session on its way out can hand back no operation.
+    if (!op) {
+        winrt::throw_hresult(E_POINTER);
+    }
     {
         std::lock_guard guard(g_opLock);
         g_op = op;
@@ -5277,6 +5442,14 @@ struct Snapshot {
 };
 
 void Show(Snapshot const& s);
+
+// Captured by every event handler, so Stop sees when the sources have let go
+// of them all and none can still be called.
+struct HandlerRef {
+    HandlerRef() { g_handlers++; }
+    HandlerRef(HandlerRef const&) { g_handlers++; }
+    ~HandlerRef() { g_handlers--; }
+};
 
 // The island (F8) mirrors what's shown; set between its Apply and Restore.
 void (*g_onShow)(Snapshot const&) = nullptr;
@@ -5310,7 +5483,7 @@ struct Watcher {
     }
 
     void Subscribe() {
-        auto onSessions = [](auto&&, auto&&) {
+        auto onSessions = [ref = HandlerRef()](auto&&, auto&&) {
             core::Guard(L"Media sessions changed", [] { Signal(kSession, 0); });
         };
         sessionsChanged = manager.SessionsChanged(onSessions);
@@ -5332,10 +5505,10 @@ struct Watcher {
         if (!session) {
             return;
         }
-        propsChanged = session.MediaPropertiesChanged([](auto&&, auto&&) {
+        propsChanged = session.MediaPropertiesChanged([ref = HandlerRef()](auto&&, auto&&) {
             core::Guard(L"Media properties changed", [] { Signal(kProps, 0); });
         });
-        playbackChanged = session.PlaybackInfoChanged([](auto&&, auto&&) {
+        playbackChanged = session.PlaybackInfoChanged([ref = HandlerRef()](auto&&, auto&&) {
             core::Guard(L"Media playback changed", [] { Signal(kPlayback, 0); });
         });
     }
@@ -5360,12 +5533,12 @@ void ReadArt(Watcher& w,
     wss::IBuffer raw{nullptr};
     if (thumbnail) {
         auto stream = Wait(thumbnail.OpenReadAsync());
-        uint64_t size = stream.Size();
+        uint64_t size = stream ? stream.Size() : 0;
         if (size > 0 && size <= kMaxArtBytes) {
             wss::Buffer buffer((uint32_t)size);
             auto bytes = Wait(stream.ReadAsync(buffer, (uint32_t)size,
                                                wss::InputStreamOptions::None));
-            if (bytes.Length() > 0) {
+            if (bytes && bytes.Length() > 0) {
                 hash = Hash(bytes.data(), bytes.Length());
             }
             if (hash && hash != w.artHash) {
@@ -5402,9 +5575,11 @@ void Refresh(Watcher& w, uint32_t dirty) {
     }
 
     Snapshot s;
-    if (w.session) {
+    // A session that is closing can return no playback info (S_OK and null);
+    // it counts as nothing playing.
+    auto info = w.session ? w.session.GetPlaybackInfo() : nullptr;
+    if (info) {
         using Status = wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus;
-        auto info = w.session.GetPlaybackInfo();
         auto status = info.PlaybackStatus();
         s.visible = status == Status::Playing || status == Status::Paused ||
                     status == Status::Changing;
@@ -5454,9 +5629,10 @@ void Send(Watcher& w, uint32_t commands) {
         w.session.TrySkipPreviousAsync();
     }
     if (commands & kToggle) {
-        // Some players offer play and pause but not the toggle.
+        // Some players offer play and pause but not the toggle. Without
+        // playback info (a closing session) the toggle is all there is.
         auto info = w.session.GetPlaybackInfo();
-        auto controls = info.Controls();
+        auto controls = info ? info.Controls() : nullptr;
         if (!controls || controls.IsPlayPauseToggleEnabled()) {
             w.session.TryTogglePlayPauseAsync();
         } else if (info.PlaybackStatus() == wmc::
@@ -5473,10 +5649,25 @@ void Send(Watcher& w, uint32_t commands) {
 
 void Loop() {
     Watcher w;
-    w.manager = Wait(
-        wmc::GlobalSystemMediaTransportControlsSessionManager::RequestAsync());
+    // Right after explorer starts the broker may not answer yet: asked again,
+    // a while later each time, until it does or the mod stops.
+    for (DWORD delay = 1000; !g_stop; delay = std::min<DWORD>(delay * 2, 60000)) {
+        HRESULT hr = S_OK;
+        try {
+            w.manager = Wait(
+                wmc::GlobalSystemMediaTransportControlsSessionManager::RequestAsync());
+        } catch (...) {
+            hr = winrt::to_hresult();
+        }
+        if (w.manager) {
+            break;
+        }
+        if (delay == 1000) {
+            Wh_Log(L"No media session manager (%08X), asking again", hr);
+        }
+        WaitForSingleObject(g_wake, delay);
+    }
     if (!w.manager) {
-        Wh_Log(L"No media session manager");
         return;
     }
     w.Subscribe();
@@ -5496,7 +5687,8 @@ void Loop() {
     }
 }
 
-DWORD WINAPI Worker(void*) {
+// `module`: the worker's own reference to this module, let go as it ends.
+DWORD WINAPI Worker(void* module) {
     bool com = false;
     core::Guard(L"Media apartment", [&] {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -5505,6 +5697,9 @@ DWORD WINAPI Worker(void*) {
     if (com) {
         core::Guard(L"Media worker", Loop);
         winrt::uninit_apartment();
+    }
+    if (module) {
+        FreeLibraryAndExitThread((HMODULE)module, 0);
     }
     return 0;
 }
@@ -5760,11 +5955,18 @@ void Start() {
         return;
     }
     g_dirty = kSession | kResend;
-    g_thread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    // Stop may have to leave the worker in a player's call; this keeps the
+    // module's code loaded until the worker gets out.
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (PCWSTR)Worker, &module);
+    g_thread = CreateThread(nullptr, 0, Worker, module, 0, nullptr);
     if (!g_thread) {
         Wh_Log(L"Media thread failed");
         CloseHandle(g_wake);
         g_wake = nullptr;
+        if (module) {
+            FreeLibrary(module);
+        }
     }
 }
 
@@ -5802,16 +6004,26 @@ void Stop() {
         }
     }
     SetEvent(g_wake);
+    // A player that ignores the cancel can hold the worker in its call for
+    // good. It's left there with its handles; its module reference keeps this
+    // code loaded until it gets out.
     if (WaitForSingleObject(g_thread, 3000) == WAIT_TIMEOUT) {
-        Wh_Log(L"Waiting for the media worker");
-        WaitForSingleObject(g_thread, INFINITE);
+        Wh_Log(L"Media worker left running");
+        g_thread = nullptr;
+        return;
     }
     CloseHandle(g_thread);
     g_thread = nullptr;
-    while (g_signalling > 0) {
+    // The sources let go of the handlers as the worker unsubscribes, or once
+    // an event they are delivering is done.
+    for (ULONGLONG until = GetTickCount64() + 1000;
+         (g_handlers > 0 || g_signalling > 0) && GetTickCount64() < until;) {
         Sleep(1);
     }
-    // Event and completion threads may still be returning from the handlers.
+    if (g_handlers > 0 || g_signalling > 0) {
+        Wh_Log(L"%d media handlers still held", g_handlers.load());
+    }
+    // A handler may still be returning from its last release.
     Sleep(50);
     CloseHandle(g_wake);
     g_wake = nullptr;
@@ -5945,7 +6157,8 @@ Account ParseAccount(wdj::JsonObject const& obj) {
     a.label = Text(obj, L"label");
     a.bar = Text(obj, L"bar");
     if (auto icon = Field(obj, L"icon", wdj::JsonValueType::String)) {
-        std::wstring_view path = icon.GetString();
+        winrt::hstring text = icon.GetString();  // `path` reads from it
+        std::wstring_view path = text;
         a.hasIcon = !path.empty();
         if (LocalPath(path)) {
             a.icon = path;
@@ -7146,10 +7359,9 @@ void OnModel(std::shared_ptr<const Model> model) {
 
 // ---- lifecycle -------------------------------------------------------------------------
 
+// Also with a vertical taskbar, which Apply skips: the meter then shows once
+// it turns horizontal.
 void Start() {
-    if (core::g_vertical) {
-        return;
-    }
     if (!InitPaths() || !IsDirectory(g_local)) {
         Wh_Log(L"No local app data folder; usage meter stays off");
         return;
@@ -7411,6 +7623,18 @@ void Attach(FrameworkElement const& button) {
         L"Width=\"8.44\" Height=\"8.44\"/></Canvas></Viewbox>";
     auto& f = g_flowers.emplace_back();
     Flower* p = &f;
+    // A throw on the way takes the entry out again, so the next pass builds
+    // the flower anew instead of finding it done.
+    struct Unlist {
+        std::list<Flower>::iterator it;
+        bool done = false;
+        ~Unlist() {
+            if (!done) {
+                core::Guard(L"Bloom icon", [&] { Detach(*it); });
+                g_flowers.erase(it);
+            }
+        }
+    } unlist{std::prev(g_flowers.end())};
     f.button = winrt::make_weak(button);
     f.root = winrt::make_weak(root);
     f.host = host;
@@ -7479,6 +7703,7 @@ void Attach(FrameworkElement const& button) {
                 g_seenOpen = !open;
             });
         });
+    unlist.done = true;
     core::DiagLine(L"Start flower: stock %.1fx%.1f, host %s", stock.ActualWidth(),
                    stock.ActualHeight(), winrt::get_class_name(host).c_str());
 }
@@ -7931,10 +8156,11 @@ Color IslandText(bool dim) {
                         : (dim ? theme::kIslandWhiteDimText : theme::kIslandWhiteText);
 }
 
-// The glass pill's look at a glance: its tint, as strong as it's set.
+// The glass pill's look at a glance: its tint, as strong as it's set; without
+// glass the pill's opaque fill.
 Color PillColor() {
     Color c = settings::Dark() ? theme::kIslandPillDark : theme::kIslandPillLight;
-    c.A = (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55);
+    c.A = settings::g.pill.glass ? (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55) : 255;
     return c;
 }
 
@@ -8933,11 +9159,14 @@ void OnMedia(media::Snapshot const& s) {
     }
 }
 
+void RetryBuild(HWND taskbar);
+
 // The taskbar's real state picks the morph; a quick in and out that is over
 // before this runs leaves the island as it was.
 void OnCollapsedChanged(HWND hwnd) {
     Island* p = Of(hwnd);
     if (!p) {
+        RetryBuild(hwnd);
         return;
     }
     auto& g = *p;
@@ -9286,8 +9515,12 @@ void Build(Island& g, HWND taskbar) {
     CreateDevice(g);
 
     RECT monitor;
-    if (!Register() || !MonitorRect(g, monitor)) {
+    if (!Register()) {
         Wh_Log(L"Island window class failed");
+        return;
+    }
+    if (!MonitorRect(g, monitor)) {
+        Wh_Log(L"Island monitor not found");
         return;
     }
     g.hwnd = CreateWindowEx(
@@ -9428,6 +9661,15 @@ void OnTaskbarDestroyed(HWND) {
     core::Post(Prune);
 }
 
+// A young explorer may have no device or monitor for a taskbar yet. A taskbar
+// whose build failed is tried again as it later goes in or out: a few times in
+// all, some seconds apart.
+constexpr int kBuildTries = 5;
+constexpr ULONGLONG kBuildRetryMs = 2000;
+[[clang::no_destroy]] std::vector<HWND> g_unbuilt;  // taskbars whose build failed
+int g_buildTries = kBuildTries;
+ULONGLONG g_buildFailed;  // tick of the last failure
+
 void Apply(HWND taskbar) {
     if (core::g_vertical || core::g_unloading || !taskbar || Of(taskbar)) {
         return;
@@ -9439,7 +9681,19 @@ void Apply(HWND taskbar) {
     if (!it->ready) {
         Teardown(*it);
         g_islands.erase(it);
+        g_buildFailed = GetTickCount64();
+        if (std::ranges::find(g_unbuilt, taskbar) == g_unbuilt.end()) {
+            g_unbuilt.push_back(taskbar);
+        }
+        if (--g_buildTries > 0) {
+            Wh_Log(L"Island tried again later, %d more times", g_buildTries);
+            autohide::g_onCollapsedChanged = OnCollapsedChanged;
+        }
         return;
+    }
+    // A late island missed what media sent; it is sent again.
+    if (std::erase(g_unbuilt, taskbar)) {
+        media::Signal(media::kResend, 0);
     }
     NoteWindow();
     autohide::g_onCollapsedChanged = OnCollapsedChanged;
@@ -9452,6 +9706,13 @@ void Apply(HWND taskbar) {
     media::g_onShow = OnMedia;
     usage::g_onModel = SyncAll;
     core::Guard(L"Island show", [&] { Sync(*it); });
+}
+
+void RetryBuild(HWND taskbar) {
+    if (g_buildTries > 0 && std::ranges::find(g_unbuilt, taskbar) != g_unbuilt.end() &&
+        GetTickCount64() - g_buildFailed >= kBuildRetryMs) {
+        Apply(taskbar);
+    }
 }
 
 void Restore() {
@@ -9469,6 +9730,8 @@ void Restore() {
         Teardown(g);
     }
     g_islands.clear();
+    g_unbuilt.clear();
+    g_buildTries = kBuildTries;
     g_thread = 0;
     g_clockText = nullptr;
     g_clock.clear();
@@ -9477,9 +9740,16 @@ void Restore() {
 
 // Windhawk thread, at unload: the windows go on their own thread even if the
 // taskbar can't be reached any more. Any island's window reaches that thread.
+// A thread that doesn't answer isn't waited on for long; RestoreAll's run on
+// the taskbar thread then takes the windows down.
+constexpr UINT kStopWaitMs = 5000;
+
 void Stop() {
     if (HWND hwnd = g_window.exchange(nullptr)) {
-        SendMessage(hwnd, kStopMsg, 0, 0);
+        if (!SendMessageTimeout(hwnd, kStopMsg, 0, 0, SMTO_NORMAL | SMTO_ABORTIFHUNG,
+                                kStopWaitMs, nullptr)) {
+            Wh_Log(L"Island stop got no answer: %u", GetLastError());
+        }
     }
 }
 
@@ -11924,7 +12194,12 @@ DWORD WINAPI JobThread(void* param) {
     std::unique_ptr<Job> job(static_cast<Job*>(param));
     HMODULE module = job->module;
     HRESULT ole = OleInitialize(nullptr);  // COM plus drag and drop
-    job->work();
+    // An exception leaving the thread would end explorer.
+    try {
+        job->work();
+    } catch (...) {
+        Wh_Log(L"Folder job failed: %08X", winrt::to_hresult());
+    }
     if (SUCCEEDED(ole)) OleUninitialize();
     job.reset();
     g_jobs--;
@@ -12470,7 +12745,9 @@ void SetBrushes(const wux::FrameworkElement& element,
     for (const auto& [key, argb] : brushes) resources.Insert(winrt::box_value(key), Brush(argb));
 }
 
+// The surface as glass; with pill.glass off, the surface color alone.
 wux::Media::Brush GlassBrush(const Palette& colors) {
+    if (!settings::g.pill.glass) return Brush(colors.surface);
     auto color = Brush(colors.surface).Color();
     wux::Media::AcrylicBrush glass;
     glass.BackgroundSource(wux::Media::AcrylicBackgroundSource::HostBackdrop);
@@ -13529,6 +13806,24 @@ void WINAPI CommitDismissFlyout_Hook(void* pThis) {
         false, winrt::Windows::System::DispatcherQueuePriority::Low);
 }
 
+// The hover model at `field`, if what is there looks like one: readable, with its vtable
+// in the module its functions come from. Else null, and the previews stay.
+void* HoverModelAt(void* const* field) {
+    if (!autohide::Readable(field, sizeof(void*))) return nullptr;
+    void* model = *field;
+    if (!autohide::Readable(model, sizeof(void*))) return nullptr;
+    constexpr DWORD kFlags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    HMODULE expected = nullptr, found = nullptr;
+    if (!GetModuleHandleExW(kFlags, reinterpret_cast<LPCWSTR>(HoverFlyoutDismiss), &expected) ||
+        !GetModuleHandleExW(kFlags, static_cast<LPCWSTR>(*static_cast<void**>(model)), &found) ||
+        found != expected) {
+        Wh_Log(L"previews stay: no hover model at %p", field);
+        return nullptr;
+    }
+    return model;
+}
+
 // The window previews over a button close once the taskbar acts on the click, which a
 // folder skips; so they close the way a right-click closes them, through the hover model
 // the button's view model holds (+0xA0 of the object behind its interface at +8). True if
@@ -13545,7 +13840,7 @@ bool DismissHoverFlyout(const wux::FrameworkElement& button, POINT pt) {
             return false;
         }
         auto object = static_cast<BYTE*>(winrt::get_abi(viewModel)) - 8;
-        void* model = *reinterpret_cast<void**>(object + 0xA0);
+        void* model = HoverModelAt(reinterpret_cast<void* const*>(object + 0xA0));
         if (!model) return false;
         bool showing = HoverFlyoutVisible && HoverFlyoutVisible(model);
         if (showing) {
@@ -15118,6 +15413,9 @@ void* WINAPI IconView_IconView_Hook(void* pThis) {
             if (g_features.tray) {
                 core::Guard(L"Tray icon loaded", [&] { tray::OnIcon(icon); });
             }
+            if (g_features.media || g_features.usage) {
+                core::Guard(L"Widgets placed", widgets::PlaceWaiting);
+            }
         });
     });
     return ret;
@@ -16017,6 +16315,23 @@ bool IsTaskbarProcess() {
     return false;
 }
 
+// The inbox's directory read. However Watch ends, a read under way is called off and
+// waited out before the buffer it writes into goes.
+struct InboxRead {
+    winrt::file_handle dir;
+    OVERLAPPED overlapped{};
+    alignas(DWORD) BYTE buffer[1024];
+    bool pending = false;
+    ~InboxRead() {
+        if (!pending) return;
+        CancelIoEx(dir.get(), &overlapped);
+        DWORD bytes;
+        GetOverlappedResult(dir.get(), &overlapped, &bytes, TRUE);
+    }
+};
+
+constexpr DWORD kRearmMs = 5000;  // an inbox that could not be watched is tried again
+
 void Watch() {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     if (!IsTaskbarProcess() || !MakeFolders()) return;
@@ -16031,12 +16346,13 @@ void Watch() {
         return taskband && RegNotifyChangeKeyValue(taskband, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
                                                    pinsChanged.get(), TRUE) == ERROR_SUCCESS;
     };
-    winrt::file_handle dir;
-    OVERLAPPED overlapped{};
+    InboxRead read;  // after `changed`, which its wait uses
+    winrt::file_handle& dir = read.dir;
+    OVERLAPPED& overlapped = read.overlapped;
     overlapped.hEvent = changed.get();
-    alignas(DWORD) BYTE buffer[1024];
-    bool pending = false;
+    bool& pending = read.pending;
     int failures = 0;  // in a row; an inbox that can't be watched is left alone
+    ULONGLONG armDue = 0;
     auto armInbox = [&] {
         ResetEvent(changed.get());
         if (!dir && failures < 3 && MakeFolders())
@@ -16044,7 +16360,7 @@ void Watch() {
                 g_inbox.c_str(), FILE_LIST_DIRECTORY,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr)};
-        pending = dir && ReadDirectoryChangesW(dir.get(), buffer, sizeof(buffer), FALSE,
+        pending = dir && ReadDirectoryChangesW(dir.get(), read.buffer, sizeof(read.buffer), FALSE,
                                                FILE_NOTIFY_CHANGE_FILE_NAME |
                                                    FILE_NOTIFY_CHANGE_LAST_WRITE,
                                                nullptr, &overlapped, nullptr);
@@ -16052,6 +16368,8 @@ void Watch() {
             failures++;
             dir.close();
         }
+        // Nothing else wakes the loop for an inbox that isn't watched.
+        armDue = !pending && failures < 3 ? GetTickCount64() + kRearmMs : 0;
     };
     armPins();
     armInbox();  // before the first pass, so a file that comes meanwhile isn't missed
@@ -16072,7 +16390,8 @@ void Watch() {
             RunJob(WriteState);
         }
         constexpr ULONGLONG kNever = std::numeric_limits<ULONGLONG>::max();
-        ULONGLONG due = std::min(stateDue ? stateDue : kNever, retryDue ? retryDue : kNever);
+        ULONGLONG due = std::min({stateDue ? stateDue : kNever, retryDue ? retryDue : kNever,
+                                  armDue ? armDue : kNever});
         now = GetTickCount64();
         DWORD timeout = due == kNever ? INFINITE : due > now ? DWORD(due - now) : 0;
         DWORD woke = WaitForMultipleObjects(ARRAYSIZE(waits), waits, FALSE, timeout);
@@ -16092,11 +16411,10 @@ void Watch() {
         } else if (woke == WAIT_TIMEOUT && retryDue && GetTickCount64() >= retryDue) {
             scan = true;
         }
-    }
-    if (pending) {
-        CancelIoEx(dir.get(), &overlapped);
-        DWORD bytes;
-        GetOverlappedResult(dir.get(), &overlapped, &bytes, TRUE);
+        if (armDue && GetTickCount64() >= armDue) {
+            armInbox();
+            scan = scan || pending;  // files that came while it wasn't watched
+        }
     }
     if (taskband) RegCloseKey(taskband);
 }

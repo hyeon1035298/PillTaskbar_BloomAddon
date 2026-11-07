@@ -85,7 +85,7 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 - `phase`: `starting`, `symbols`(기호 준비, `progress`는 받은 바이트와 전체 바이트), `waiting`(작업표시줄을 기다리거나 충돌 뒤 쉬는 중), `injecting`, `running`, `stopping`, `stopped`, `failed`.
 - `reason`(`failed`나 종료 때): `windhawk`, `noSymbols`, `download`, `blocked`, `crashes`, `unloadTimeout`, `error`.
 - `loaded`: 넣기 직전에 먼저 쓰는 explorer 기록(pid, 프로세스 생성 시각 FILETIME, 시각). 내린 뒤에는 `null`.
-- `crashes`: 넣은 뒤 5분 안에 explorer가 죽은 시각들. 10분보다 오래된 것은 지운다.
+- `crashes`: 센 explorer 충돌 시각들(셈 규칙은 아래 "지키기"). 10분보다 오래된 것은 지운다.
 - `safeMode`: 참이면 호스트는 넣지 않고 코드 10으로 끝난다. `--reset-safe-mode`로 띄우면 `crashes`와 함께 비운다.
 
 ### `runtime-state.json`
@@ -161,7 +161,7 @@ Bloom은 종료 코드 10–15 뒤에는 스스로 다시 띄우지 않는다.
 5. 공유 메모리 `Local\PillTaskbar.Config.<pid>`(`addon::Config`)를 만들고, 이벤트 `Loaded`, `Unload`, `Unloaded`(모두 수동 재설정)를 만든다.
 6. 실행용 복사본의 `PillTaskbarRuntime.dll`을 호스트에 올려 `PillTaskbarHookProc` 주소를 얻고, `SetWindowsHookExW(WH_GETMESSAGE, …, 작업표시줄 스레드)`, `PostMessage(Shell_TrayWnd, WM_NULL)`. 런타임이 `Loaded`를 켜면(10초 안, 0.5초마다 `WM_NULL`을 다시 보냄) 훅을 푼다.
 7. 런타임: 훅 프로시저가 처음 불리면 공유 메모리를 복사하고, 자기 모듈에 참조를 하나 더 잡고(`GetModuleHandleEx`), 제어 스레드를 만든다. `Config`의 크기나 `kProtocol`이 다르면 `dataDir`까지만 읽어 `refused`/`protocol`을 알린다(`dataDir`까지의 필드는 버전이 바뀌어도 자리를 지킨다). 제어 스레드는 런타임 뮤텍스를 5초까지 기다려 얻고(못 얻으면 아무것도 쓰지 않고 끝남), `starting`을 쓴 뒤 `Loaded`를 켠다. 그다음 거절 사유를 본다: 이 이미지가 앞서 모드를 남겼거나 다른 `PillTaskbarRuntime.dll`이 올라 있으면 `restart`, Windhawk판 모드가 있으면 `windhawk`. 거절이 아니면 데이터 폴더 감시를 먼저 시작하고 `values.json`을 읽은 뒤 모드 DLL을 올린다(`Wh_ModInit`, 훅 일괄 적용, `Wh_ModAfterInit`). 결과는 `runtime-state.json`에 쓴다.
-8. 호스트는 `runtime-state.json`이 `running`이 되면 `phase: running`. 이때(이미 들어 있던 런타임을 이어받을 때도) `values.json`의 `island.enabled`가 켜져 있고 Windows 작업표시줄 자동 숨김이 꺼져 있으면 `ABM_SETSTATE`로 켠다. 끄지는 않는다. 끄는 것은 Bloom의 "숨김 아일랜드 쓰기" 스위치가 한다(끄면 자동 숨김도 끈다). `initFailed`면 내리고 `symbols`는 11, 그 밖은 1. `refused`면 내리고 `windhawk`는 12, `restart`는 15, 그 밖은 1로 끝난다.
+8. 호스트는 `runtime-state.json`이 `running`이 되면 `phase: running`. 이때(이미 들어 있던 런타임을 이어받을 때도) `island.enabled`와 `autohide.enabled`가 둘 다 켜져 있고(`values.json`에 없는 키는 호스트 옆 `settings.schema.json`의 기본값, `values.json`이 없으면 모두 기본값) Windows 작업표시줄 자동 숨김이 꺼져 있으면 `ABM_SETSTATE`로 켠다. 끄지는 않는다. 끄는 것은 Bloom의 "숨김 아일랜드 쓰기" 스위치가 한다(끄면 자동 숨김도 끈다). `initFailed`면 내리고 `symbols`는 11, 그 밖은 1. `refused`면 내리고 `windhawk`는 12, `restart`는 15, 그 밖은 1로 끝난다.
 
 같은 explorer에 같은 경로의 런타임을 다시 넣으면 훅 프로시저가 이미 올라 있는 이미지에서 다시 불린다. 제어 스레드가 끝날 때 시작 표시를 지우므로 그 이미지도 처음부터 다시 시작한다(앞서 모드를 남긴 이미지면 `restart`로 거절).
 
@@ -169,7 +169,7 @@ Bloom은 종료 코드 10–15 뒤에는 스스로 다시 띄우지 않는다.
 
 - 호스트는 explorer 프로세스, Bloom 프로세스, `Stop` 이벤트, 창 메시지(`TaskbarCreated`, `WM_COPYDATA`)를 함께 기다린다.
 - 런타임이 들어 있는 동안 5초(`kWindhawkPollMs`)마다 코드 12의 규칙을 다시 본다. Windhawk가 나중에 시작했거나 서비스가 자동으로 바뀌어 충돌이 되면 내리기(아래)를 하고 12로 끝난다. 그 사이 몇 초는 두 사본이 같이 걸려 있을 수 있다.
-- explorer가 끝나면 종료 코드(상위 비트 `0xC…`)와 응용 프로그램 로그 이벤트 1000(그 pid)으로 충돌인지 본다. 넣은 뒤 5분 안의 충돌만 센다. 10분 안에 2번이면 `safeMode`를 켜고 10으로 끝난다. 첫 충돌 뒤에는 새 작업표시줄이 뜨고 5초 뒤에 넣는다. 충돌이 아니면 새 작업표시줄이 뜨면 바로 넣는다.
+- explorer가 끝나면 종료 코드(상위 비트 `0xC…`)와 응용 프로그램 로그 이벤트 1000(그 pid)으로 충돌인지 본다. 이벤트의 오류 모듈이 애드온의 DLL(런타임, 모드, 다시 올리기 복사본 `<이름>.r<숫자>.dll`)이면 넣은 뒤 지난 시간과 상관없이 세고, 다른 모듈이거나 모듈을 모르면 넣은 뒤 5분 안의 충돌만 센다. 오류 모듈과 오프셋은 `host.log`에 남긴다. 이벤트가 아직 없으면 다음에 넣기 전에 한 번 더 찾는다. 10분 안에 2번이면 `safeMode`를 켜고 10으로 끝난다. 첫 충돌 뒤에는 새 작업표시줄이 뜨고 5초 뒤에 넣는다. 새 explorer에는 작업표시줄에 XAML 아일랜드 창(`Windows.UI.Composition.DesktopWindowContentBridge`)이 생기고 프로세스가 3초 넘게 지났을 때 넣는다. 아일랜드 창이 15초 안에 생기지 않으면 그때 넣고, 프로세스 나이를 못 읽으면 바로 넣는다. 기다리는 동안에도 250ms마다 다시 보며 다른 이벤트를 받는다.
 - Bloom 프로세스가 끝나면 10초 기다린다. 그 사이 새 Bloom이 `--serve`를 넘기면 그 pid로 바꿔 이어 간다. 10초가 지나면 내리고 0으로 끝난다.
 
 ### 내리기

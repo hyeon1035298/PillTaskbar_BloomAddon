@@ -26,6 +26,8 @@ constexpr DWORD kBloomGraceMs = 10000;
 constexpr DWORD kAfterCrashDelayMs = 5000;
 constexpr DWORD kRuntimeStartMs = 60000;
 constexpr DWORD kTaskbarPollMs = 1000;
+// How often a new taskbar is looked at while it is not ready yet.
+constexpr DWORD kTaskbarReadyPollMs = 250;
 // While the runtime is in: how often the host looks whether Windhawk can now load the
 // same mod (windhawk.exe started, or its service set to start by itself).
 constexpr DWORD kWindhawkPollMs = 5000;
@@ -120,10 +122,14 @@ private:
     int WaitRuntimeReady();
     int OnExplorerExit();
     int RecheckPendingCrash();
+    bool FaultInAddon(const AppCrash& c) const;
+    bool TaskbarReady(const Taskbar& t);
     bool TakeOverBloom(DWORD pid, const std::wstring& exe);
     addon::Config MakeConfig() const;
     std::wstring RuntimePath() const { return JoinPath(exeDir_, addon::kRuntimeDll); }
     std::wstring ModPath() const { return args_.mod.empty() ? std::wstring() : JoinPath(exeDir_, args_.mod); }
+    // The add-on's DLL file names, as event log records name them.
+    std::vector<std::wstring> AddonDlls() const { return {addon::kRuntimeDll, addon::kModDll, FileName(ModPath())}; }
 
     Args args_;
     std::wstring exeDir_, dataDir_;
@@ -139,6 +145,7 @@ private:
     bool haveExplorer_ = false;
     bool delayNext_ = false;          // the last explorer crashed: wait after the new taskbar
     ULONGLONG injectNotBefore_ = 0;
+    DWORD settlingPid_ = 0;           // the explorer whose new taskbar is not ready yet
     ULONGLONG graceStart_ = 0;        // Bloom went away at this tick; 0 when Bloom runs
     ULONGLONG windhawkCheckedAt_ = 0;  // the last Windhawk look while the runtime is in
     struct Pending {
@@ -335,10 +342,10 @@ void Host::CountLeftoverLoaded() {
     if (!s.loaded) return;
     LoadedRecord l = *s.loaded;
     if (ProcessAlive(l.pid, l.created)) return;  // still there: the attach path decides
-    uint64_t when = 0;
-    if (FindAppCrashEvent(l.pid, l.created, l.at, l.at + kCrashAfterInjectWindow, when) && CrashCounts(l.at, when)) {
+    AppCrash c;
+    if (FindAppCrashEvent(l.pid, l.created, l.at, NowTicks(), c) && CrashCounts(l.at, c.time, FaultInAddon(c))) {
         Log(L"explorer %lu crashed after the last injection (found in the event log)", l.pid);
-        if (RecordCrash(s, when, NowTicks())) s.safeMode = true;
+        if (RecordCrash(s, c.time, NowTicks())) s.safeMode = true;
     }
     s.loaded.reset();
     state_.Save();
@@ -449,7 +456,7 @@ int Host::Inject() {
             s.loaded.reset();
             ex_.mapping.Reset();
             std::wstring which;
-            if (FindCodeIntegrityBlock({addon::kRuntimeDll, addon::kModDll, FileName(ModPath())}, which)) {
+            if (FindCodeIntegrityBlock(AddonDlls(), which)) {
                 Log(L"code integrity blocked %ls", which.c_str());
                 return addon::kExitBlocked;
             }
@@ -518,15 +525,15 @@ int Host::OnExplorerExit() {
                                                                                              : NowTicks();
     HostState& s = state_.state();
     bool ours = ex_.injectedAt != 0;
-    bool crash = IsCrashExitCode(code);
-    uint64_t when = diedAt;
-    if (!crash && ours) crash = FindAppCrashEvent(ex_.taskbar.pid, ex_.created, ex_.injectedAt, NowTicks(), when);
+    // The event names the faulting module, so it is read for crash exit codes too.
+    AppCrash c;
+    bool found = ours && FindAppCrashEvent(ex_.taskbar.pid, ex_.created, ex_.injectedAt, NowTicks(), c);
+    bool crash = IsCrashExitCode(code) || found;
     Log(L"explorer %lu exited with 0x%08lX%ls", ex_.taskbar.pid, code, crash ? L" (crash)" : L"");
     s.loaded.reset();
     pendingCrash_ = {};
-    bool counts = ours && crash && CrashCounts(ex_.injectedAt, diedAt);
-    if (ours && !crash && diedAt - ex_.injectedAt <= kCrashAfterInjectWindow)
-        pendingCrash_ = {ex_.taskbar.pid, ex_.created, ex_.injectedAt};
+    bool counts = ours && crash && CrashCounts(ex_.injectedAt, diedAt, found && FaultInAddon(c));
+    if (ours && !found && !counts) pendingCrash_ = {ex_.taskbar.pid, ex_.created, ex_.injectedAt};
     ex_ = Explorer{};
     haveExplorer_ = false;
     delayNext_ = false;
@@ -543,22 +550,51 @@ int Host::OnExplorerExit() {
 }
 
 // Application Error events can land a little after the process is gone, so an exit
-// that looked clean is looked up once more before the next injection.
+// without one is looked up once more before the next injection.
 int Host::RecheckPendingCrash() {
     Pending p = pendingCrash_;
     pendingCrash_ = {};
     if (!p.pid) return kContinue;
-    uint64_t when = 0;
-    if (!FindAppCrashEvent(p.pid, p.created, p.injectedAt, NowTicks(), when) || !CrashCounts(p.injectedAt, when))
-        return kContinue;
+    AppCrash c;
+    if (!FindAppCrashEvent(p.pid, p.created, p.injectedAt, NowTicks(), c)) return kContinue;
     Log(L"explorer %lu did crash (event log)", p.pid);
-    if (RecordCrash(state_.state(), when, NowTicks())) {
+    if (!CrashCounts(p.injectedAt, c.time, FaultInAddon(c))) return kContinue;
+    if (RecordCrash(state_.state(), c.time, NowTicks())) {
         Log(L"explorer crashed twice within 10 minutes; safe mode on");
         return Finish(addon::kExitCrashes);
     }
     state_.Save();
     delayNext_ = true;
     return kContinue;
+}
+
+// Logs where a crash event puts the fault and says whether that is in the add-on's own
+// DLLs, which makes the crash count however long after injecting it came.
+bool Host::FaultInAddon(const AppCrash& c) const {
+    bool in = IsAddonModule(c.module, AddonDlls());
+    Log(L"fault in %ls at offset 0x%llX, exception 0x%08lX%ls", c.module.empty() ? L"(unknown)" : c.module.c_str(),
+        c.offset, (DWORD)c.code, in ? L" (the add-on's own)" : L"");
+    return in;
+}
+
+// Holds off injecting until a new explorer has built its taskbar (ExplorerReady). It
+// never blocks: the main loop asks again every kTaskbarReadyPollMs.
+bool Host::TaskbarReady(const Taskbar& t) {
+    // An explorer that cannot be opened counts as ready; StartExplorer reports it.
+    uint64_t ageMs = ProcessAgeMs(t.pid);
+    bool island = TaskbarHasIsland(t.tray);
+    if (ExplorerReady(island, ageMs)) {
+        if (settlingPid_ == t.pid)
+            Log(L"explorer %lu is %llu ms old%ls; injecting", t.pid, ageMs,
+                island ? L"" : L" and its taskbar has no XAML island");
+        settlingPid_ = 0;
+        return true;
+    }
+    if (settlingPid_ != t.pid) {
+        settlingPid_ = t.pid;
+        Log(L"explorer %lu started %llu ms ago; waiting for its taskbar", t.pid, ageMs);
+    }
+    return false;
 }
 
 int Host::Run() {
@@ -614,12 +650,14 @@ int Host::Run() {
             return Shutdown();
         }
         Taskbar t;
+        bool settling = false;
         if (!haveExplorer_ && FindTaskbar(t)) {
             if (delayNext_ && !injectNotBefore_) {
                 injectNotBefore_ = now + kAfterCrashDelayMs;
                 Log(L"new taskbar after a crash; waiting %lu ms", kAfterCrashDelayMs);
             }
-            if (now >= injectNotBefore_) {
+            settling = now >= injectNotBefore_ && !TaskbarReady(t);
+            if (now >= injectNotBefore_ && !settling) {
                 r = RecheckPendingCrash();
                 if (r != kContinue) return r;
                 if (!delayNext_ || injectNotBefore_) {
@@ -651,6 +689,7 @@ int Host::Run() {
         DWORD timeout = haveExplorer_ ? (ex_.runtimeIn ? kWindhawkPollMs : INFINITE) : kTaskbarPollMs;
         if (graceStart_) timeout = std::min<DWORD>(timeout, (DWORD)(kBloomGraceMs - std::min<ULONGLONG>(now - graceStart_, kBloomGraceMs)));
         if (injectNotBefore_ > now) timeout = std::min<DWORD>(timeout, (DWORD)(injectNotBefore_ - now));
+        if (settling) timeout = std::min<DWORD>(timeout, kTaskbarReadyPollMs);
         wakeOnTaskbar_ = !haveExplorer_;
         r = Wait(hs, timeout, true);
         wakeOnTaskbar_ = false;
@@ -686,10 +725,16 @@ int Host::DryRun() {
                  s.crashes.size(), s.loaded ? Format(L"pid %lu", s.loaded->pid).c_str() : L"null",
                  args_.resetSafeMode ? L" (--reset-safe-mode would clear safeMode and crashes)" : L""));
     if (s.loaded && !ProcessAlive(s.loaded->pid, s.loaded->created)) {
-        uint64_t when;
-        bool crash = FindAppCrashEvent(s.loaded->pid, s.loaded->created, s.loaded->at,
-                                       s.loaded->at + kCrashAfterInjectWindow, when);
-        Print(Format(L"  leftover loaded: explorer gone, crash event %ls", crash ? L"found" : L"not found"));
+        AppCrash c;
+        bool crash = FindAppCrashEvent(s.loaded->pid, s.loaded->created, s.loaded->at, NowTicks(), c);
+        bool in = crash && IsAddonModule(c.module, AddonDlls());
+        Print(Format(L"  leftover loaded: explorer gone, crash event %ls",
+                     crash ? Format(L"found (fault in %ls at offset 0x%llX%ls), %ls",
+                                    c.module.empty() ? L"(unknown)" : c.module.c_str(), c.offset,
+                                    in ? L", the add-on's own" : L"",
+                                    CrashCounts(s.loaded->at, c.time, in) ? L"counts" : L"does not count")
+                                 .c_str()
+                           : L"not found"));
     }
 
     Handle bloom;
@@ -710,6 +755,11 @@ int Host::DryRun() {
         return addon::kExitOk;
     }
     Print(Format(L"taskbar: Shell_TrayWnd %p, explorer pid %lu, thread %lu", (void*)t.tray, t.pid, t.tid));
+    uint64_t ageMs = ProcessAgeMs(t.pid);
+    bool island = TaskbarHasIsland(t.tray);
+    Print(Format(L"taskbar ready: %ls (XAML island %ls, explorer %llu s old)",
+                 ExplorerReady(island, ageMs) ? L"yes" : L"no, a real start would wait", island ? L"yes" : L"no",
+                 ageMs / 1000));
     std::vector<std::wstring> mods = ProcessModules(t.pid);
     CheckWindhawkModules(mods, wh);
     Print(Format(L"explorer modules: %zu", mods.size()));

@@ -33,12 +33,13 @@ bool RenderValues(EVT_HANDLE context, EVT_HANDLE event, std::vector<BYTE>& buf, 
     return EvtRender(context, event, EvtRenderEventValues, (DWORD)buf.size(), buf.data(), &used, &count);
 }
 
-// Application Error stores numbers as text such as "0x1a2b"; accept both forms.
-bool VariantNumber(const EVT_VARIANT& v, uint64_t& out) {
+// Application Error stores numbers as text such as "0x1a2b"; accept both forms. Its
+// exception code and offset are hex without "0x" ("c0000005"): base 16 for those.
+bool VariantNumber(const EVT_VARIANT& v, uint64_t& out, int base = 0) {
     switch (v.Type & EVT_VARIANT_TYPE_MASK) {
         case EvtVarTypeString:
             if (!v.StringVal) return false;
-            out = wcstoull(v.StringVal, nullptr, 0);
+            out = wcstoull(v.StringVal, nullptr, base);
             return true;
         case EvtVarTypeUInt32:
         case EvtVarTypeHexInt32: out = v.UInt32Val; return true;
@@ -81,10 +82,11 @@ bool ForEachEvent(const wchar_t* channel, const std::wstring& query, Fn fn) {
 
 }  // namespace
 
-bool FindAppCrashEvent(DWORD pid, uint64_t created, uint64_t from, uint64_t to, uint64_t& eventTime) {
+bool FindAppCrashEvent(DWORD pid, uint64_t created, uint64_t from, uint64_t to, AppCrash& out) {
     std::wstring query = L"*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[@SystemTime>='" +
                          IsoTime(from, true) + L"' and @SystemTime<='" + IsoTime(to, true) + L"']]]";
-    // Event data: 8 = process id, 9 = process creation time (both hex text).
+    // Event data: 3 = faulting module name, 6 = exception code, 7 = fault offset,
+    // 8 = process id, 9 = process creation time.
     Evt user(EvtCreateRenderContext(0, nullptr, EvtRenderContextUser));
     Evt system(EvtCreateRenderContext(0, nullptr, EvtRenderContextSystem));
     if (!user || !system) return false;
@@ -96,11 +98,17 @@ bool FindAppCrashEvent(DWORD pid, uint64_t created, uint64_t from, uint64_t to, 
         uint64_t evPid = 0, evCreated = 0;
         if (!VariantNumber(v[8], evPid) || evPid != pid) return false;
         if (created && VariantNumber(v[9], evCreated) && evCreated && evCreated != created) return false;
-        eventTime = to;
+        out = AppCrash{};
+        if ((v[3].Type & EVT_VARIANT_TYPE_MASK) == EvtVarTypeString && v[3].StringVal)
+            out.module = FileName(v[3].StringVal);
+        uint64_t code = 0;
+        if (VariantNumber(v[6], code, 16)) out.code = (uint32_t)code;
+        VariantNumber(v[7], out.offset, 16);
+        out.time = to;
         if (RenderValues(system.h, ev, sysBuf, count) && count > EvtSystemTimeCreated) {
             auto* s = (EVT_VARIANT*)sysBuf.data();
             if ((s[EvtSystemTimeCreated].Type & EVT_VARIANT_TYPE_MASK) == EvtVarTypeFileTime)
-                eventTime = s[EvtSystemTimeCreated].FileTimeVal;
+                out.time = s[EvtSystemTimeCreated].FileTimeVal;
         }
         return true;
     });

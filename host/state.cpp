@@ -119,8 +119,25 @@ bool IsCrashExitCode(DWORD code) {
     return (code & 0xF0000000u) == 0xC0000000u;
 }
 
-bool CrashCounts(uint64_t injectedAt, uint64_t diedAt) {
-    return injectedAt != 0 && diedAt >= injectedAt && diedAt - injectedAt <= kCrashAfterInjectWindow;
+bool CrashCounts(uint64_t injectedAt, uint64_t diedAt, bool inAddon) {
+    return injectedAt != 0 && diedAt >= injectedAt && (inAddon || diedAt - injectedAt <= kCrashAfterInjectWindow);
+}
+
+bool IsAddonModule(const std::wstring& module, const std::vector<std::wstring>& dlls) {
+    const std::wstring ext = L".dll";
+    for (const auto& dll : dlls) {
+        if (dll.empty()) continue;
+        if (EqualsNoCase(module, dll)) return true;
+        // The runtime loads a copy "<stem>.r<tick>.dll" while an old image is still mapped.
+        if (dll.size() <= ext.size() || !EqualsNoCase(dll.substr(dll.size() - ext.size()), ext)) continue;
+        std::wstring prefix = dll.substr(0, dll.size() - ext.size()) + L".r";
+        if (module.size() <= prefix.size() + ext.size() || !StartsWithNoCase(module, prefix) ||
+            !EqualsNoCase(module.substr(module.size() - ext.size()), ext))
+            continue;
+        std::wstring tick = module.substr(prefix.size(), module.size() - prefix.size() - ext.size());
+        if (std::all_of(tick.begin(), tick.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; })) return true;
+    }
+    return false;
 }
 
 void PruneCrashes(std::vector<uint64_t>& crashes, uint64_t now) {
