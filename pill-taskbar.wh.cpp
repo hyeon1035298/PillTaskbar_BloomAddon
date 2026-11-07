@@ -9580,10 +9580,18 @@ bool StandsIn(HWND hwnd) {
     return g && g->shown;
 }
 
+void RecheckFullscreen(Island& g);
+
 // Explorer raises the taskbar as it comes out; a morph stays on top of it, and
-// so does an idle island in click mode.
+// so does an idle island in click mode. A fullscreen app coming or going
+// restacks it too (RecheckFullscreen).
 void OnTaskbarRestacked(HWND hwnd) {
     Island* p = Of(hwnd);
+    if (!p) {
+        return;
+    }
+    RecheckFullscreen(*p);
+    p = Of(hwnd);  // Sync may have hidden or rebuilt it
     if (!p) {
         return;
     }
@@ -9673,18 +9681,51 @@ bool CoversMonitor(Island const& g, HWND window) {
 // frame that Windows reports as one for filling the monitor. A window activated
 // on another monitor leaves that as it is, unless the fullscreen app has gone
 // meanwhile.
+void SetFullscreen(Island& g, HWND window) {
+    g.fullscreenWindow = window;
+    bool fullscreen = window != nullptr;
+    if (fullscreen != g.fullscreen) {
+        g.fullscreen = fullscreen;
+        Sync(g);
+    }
+}
+
 void OnActivated(Island& g, HWND window, bool rude) {
     bool here = window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) ==
                               core::MonitorOf(g.taskbar);
     if (here || !window) {
-        g.fullscreenWindow = rude && here && !IsZoomed(window) ? window : nullptr;
+        SetFullscreen(g, rude && here && !IsZoomed(window) ? window : nullptr);
     } else if (!CoversMonitor(g, g.fullscreenWindow)) {
-        g.fullscreenWindow = nullptr;
+        SetFullscreen(g, nullptr);
     }
-    bool fullscreen = g.fullscreenWindow != nullptr;
-    if (fullscreen != g.fullscreen) {
-        g.fullscreen = fullscreen;
-        Sync(g);
+}
+
+// The activation's word comes only as a window is activated, and a game mostly
+// goes fullscreen after that, or switches to it from its settings. Windows takes
+// the taskbar out of the topmost band then, which restacks it (OnTaskbarRestacked):
+// the window in front is looked at again. Filling this monitor without being
+// maximized, it is a fullscreen app; maximized, it is one only when Direct3D
+// holds the screen (exclusive fullscreen). The idle island, topmost while the
+// taskbar isn't, would otherwise stay over the game, and an exclusive one
+// minimizes when a window comes over it.
+void RecheckFullscreen(Island& g) {
+    if (GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+        if (!CoversMonitor(g, g.fullscreenWindow)) {
+            SetFullscreen(g, nullptr);  // the game left fullscreen
+        }
+        return;
+    }
+    HWND front = GetForegroundWindow();
+    if (!front || front == g.hwnd || front == g.taskbar ||
+        MonitorFromWindow(front, MONITOR_DEFAULTTONULL) != core::MonitorOf(g.taskbar) ||
+        !CoversMonitor(g, front)) {
+        return;
+    }
+    QUERY_USER_NOTIFICATION_STATE state{};
+    bool d3d = SUCCEEDED(SHQueryUserNotificationState(&state)) &&
+               state == QUNS_RUNNING_D3D_FULL_SCREEN;
+    if (!IsZoomed(front) || d3d) {
+        SetFullscreen(g, front);
     }
 }
 
