@@ -11254,7 +11254,9 @@ extern SRWLOCK g_looseWork;
 // The taskbar reads a pinned shortcut's icon as it is pinned and not again, whatever the
 // shell is told about the file: the folder is pinned anew in its own place. One pin per
 // app ID, so the old pin goes first, and the new one gets a second try.
-void RepinInPlace(const std::wstring& folder) {
+// `looseLast`: the loose folder goes to the end after it; one doing several folders sends
+// it there once, after the last.
+void RepinInPlace(const std::wstring& folder, bool looseLast = true) {
     ComPtr<IPinManagerInterop3> manager = PinManager();
     std::vector<Pin> pins = ReadPins();
     int index = FindFolderPin(pins, folder);
@@ -11265,6 +11267,7 @@ void RepinInPlace(const std::wstring& folder) {
     if (!ok) ok = PinAt(manager.Get(), PidlFromPath(PinLnkPath(folder)).get(), index);
     Wh_Log(L"repin %s at %d: %d", folder.c_str(), index, ok);
     Regroup(FolderKeys(folder));
+    if (!looseLast) return;
     // A new pin's button comes after the buttons there are, the loose folder's too:
     // that one goes again, to the end.
     AcquireSRWLockExclusive(&g_looseWork);
@@ -11274,7 +11277,7 @@ void RepinInPlace(const std::wstring& folder) {
 
 // The taskbar keeps one pin per app ID, so a new icon goes into the pinned shortcut
 // itself, and the pin is made again for the taskbar to show it.
-bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
+bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon, bool looseLast = true) {
     std::vector<Pin> pins = ReadPins();
     int index = FindFolderPin(pins, folder);
     if (index >= 0) RestorePinLink(pins[index], folder);
@@ -11282,7 +11285,7 @@ bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
     ComPtr<IShellLinkW> link = pinned.empty() ? nullptr : LoadShellLink(pinned);
     bool ok = link && SUCCEEDED(link->SetIconLocation(icon.path.c_str(), icon.index)) &&
               SaveShellLink(link, pinned) && WritePinLnk(folder, icon);
-    if (ok) RepinInPlace(folder);
+    if (ok) RepinInPlace(folder, looseLast);
     Wh_Log(L"icon of %s: %d", folder.c_str(), ok);
     if (ok) bloom_link::Nudge();
     return ok;
@@ -11702,7 +11705,9 @@ bool AwaitHook(DWORD ms, Done done) {
 // and after the passing ID, until the hook sees the window resolve under it. A window the
 // hook saw resolve after its button came back is in its group, and keeps its ID.
 // shortcut: no hook tells when a button is gone, so that step keeps its fixed wait.
-void Reannounce(const std::vector<HWND>& windows) {
+// `together`: every button goes before any comes back, so a group they share is made
+// anew, at the end; one by one, the group keeps the place it has.
+void Reannounce(const std::vector<HWND>& windows, bool together) {
     if (windows.empty()) return;
     ULONGLONG start = GetTickCount64();
     ComPtr<ITaskbarList> tabs;
@@ -11713,6 +11718,12 @@ void Reannounce(const std::vector<HWND>& windows) {
     constexpr DWORD kStepMs = 120;
     WatchResolves watch(windows);
     int readded = 0, retagged = 0, kept = 0, noticed = 0, timedOut = 0;
+    std::vector<HWND> out;  // with `together`: the buttons taken out already
+    if (tabs && together) {
+        for (HWND window : windows)
+            if (SUCCEEDED(tabs->DeleteTab(window))) out.push_back(window);
+        if (!out.empty()) Sleep(kStepMs);
+    }
     // Waits until the hook has seen `window` resolve once more than `before`, under the
     // passing ID or under another.
     auto await = [&](HWND window, const Resolves& before, bool passing) {
@@ -11725,8 +11736,10 @@ void Reannounce(const std::vector<HWND>& windows) {
         return seen;
     };
     for (HWND window : windows) {
-        if (tabs && SUCCEEDED(tabs->DeleteTab(window))) {
-            Sleep(kStepMs);
+        bool gone = together ? std::find(out.begin(), out.end(), window) != out.end()
+                             : tabs && SUCCEEDED(tabs->DeleteTab(window));
+        if (gone) {
+            if (!together) Sleep(kStepMs);
             Resolves before = SeenResolves(window);
             if (SUCCEEDED(tabs->AddTab(window))) {
                 readded++;
@@ -11847,7 +11860,7 @@ void Regroup(const std::vector<std::wstring>& keys) {
     std::vector<std::wstring> windowKeys;  // resolved outside the lock the hook waits on
     for (HWND window : windows) windowKeys.push_back(WindowAppKey(resolver.Get(), window));
     WatchResolves watch(windows);
-    Reannounce(windows);
+    Reannounce(windows, false);
     // Members' windows the taskbar has not handed to the hook within half a second get
     // one more go. The wait ends early once each has resolved under its own ID last and
     // is in a folder: a record from before the move does not count.
@@ -11866,7 +11879,7 @@ void Regroup(const std::vector<std::wstring>& keys) {
         }
         return settled;
     });
-    if (!missed.empty() && !g_unloading) Reannounce(missed);
+    if (!missed.empty() && !g_unloading) Reannounce(missed, false);
 }
 
 // Open windows of a folder item, topmost first.
@@ -12019,7 +12032,7 @@ void ReleaseGroupedWindows() {
     g_looseReady = false;
     ReleaseSRWLockExclusive(&g_lock);
     for (HWND window : windows) SetPropW(window, kReleasedProp, HANDLE(1));
-    Reannounce(windows);
+    Reannounce(windows, false);
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
     DWORD process = 0;
     if (!windows.empty() && tray && GetWindowThreadProcessId(tray, &process) &&
@@ -12124,7 +12137,8 @@ std::vector<HWND> ButtonWindows() {
 }
 
 // After the loose folder changed (start, its setting or name): windows go into it or out
-// of it where they belong elsewhere now, and with `all` every window in it goes again.
+// of it where they belong elsewhere now, and with `all` every window in it goes again,
+// all out before any is back, so its button is made anew at the end.
 void RegroupLoose(bool all) {
     ComPtr<IAppResolver8> resolver = AppResolver();
     std::vector<HWND> windows = ButtonWindows(), released = ReleasedWindows();
@@ -12155,7 +12169,7 @@ void RegroupLoose(bool all) {
         if (std::find(released.begin(), released.end(), window) != released.end())
             RemovePropW(window, kReleasedProp);
     if (!moving.empty()) Wh_Log(L"%d windows move for the loose folder", int(moving.size()));
-    Reannounce(moving);
+    Reannounce(moving, all);
 }
 
 // The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one:
@@ -12179,21 +12193,24 @@ std::wstring ThemedTwin(const std::wstring& path, bool light) {
     return GetFileAttributesW(twin.c_str()) != INVALID_FILE_ATTRIBUTES ? twin : L"";
 }
 
-// Pinned folders whose icon is such a pair take the look of the taskbar's theme.
-void RethemeIcons() {
-    bool light = LightTaskbar();
+// Pinned folders whose icon is such a pair take the look of the taskbar's theme. True when
+// one was pinned again; the loose folder is left where that put it.
+bool RethemeIcons() {
+    bool light = LightTaskbar(), repinned = false;
     for (const Pin& pin : ReadPins()) {
         std::wstring folder = FolderOfPin(pin);
         if (folder.empty() || g_unloading) continue;
         IconLocation now = PinIcon(folder);
         std::wstring want = ThemedTwin(now.path, light);
-        if (!want.empty() && _wcsicmp(want.c_str(), now.path.c_str()) != 0)
-            SetFolderIcon(folder, {want});
+        if (!want.empty() && _wcsicmp(want.c_str(), now.path.c_str()) != 0 &&
+            SetFolderIcon(folder, {want}, false))
+            repinned = true;
     }
+    return repinned;
 }
 
-// Deletes the files in `dir` (the loose folder's own) except `keep`, and `dir` with them
-// when nothing is kept.
+// Deletes the files in `dir` (the loose folder's own) and in its folders except `keep`,
+// and each folder left empty.
 void CleanLooseDir(const std::wstring& dir, const std::vector<std::wstring>& keep) {
     if (dir.empty()) return;
     WIN32_FIND_DATAW fd;
@@ -12201,15 +12218,19 @@ void CleanLooseDir(const std::wstring& dir, const std::vector<std::wstring>& kee
     if (find != INVALID_HANDLE_VALUE) {
         do {
             std::wstring path = dir + L"\\" + fd.cFileName;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                std::none_of(keep.begin(), keep.end(), [&](const std::wstring& kept) {
-                    return _wcsicmp(kept.c_str(), path.c_str()) == 0;
-                }))
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0 &&
+                    !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                    CleanLooseDir(path, keep);
+            } else if (std::none_of(keep.begin(), keep.end(), [&](const std::wstring& kept) {
+                           return _wcsicmp(kept.c_str(), path.c_str()) == 0;
+                       })) {
                 DeleteFileW(path.c_str());
+            }
         } while (FindNextFileW(find, &fd));
         FindClose(find);
     }
-    if (keep.empty()) RemoveDirectoryW(dir.c_str());
+    RemoveDirectoryW(dir.c_str());  // fails while something kept is in it
 }
 
 SRWLOCK g_looseWork = SRWLOCK_INIT;  // one worker at a time sets up the loose folder
@@ -12227,15 +12248,19 @@ void PrepareLoose() {
     std::vector<std::wstring> keep;
     if (on && !dir.empty() && !g_unloading) {
         bool light = LightTaskbar();
+        std::wstring look = light ? L"light" : L"dark";
         // "-2": the drawing's version; a new drawing needs a new name past the icon cache.
-        std::wstring icon = dir + L"\\clock-" + (light ? L"light" : L"dark") + L"-2.ico";
-        std::wstring lnk = dir + L"\\" + name + L".lnk";
-        std::wstring appId = kLooseAppId + HashHex(name + (light ? L"\nlight" : L"\ndark"));
+        std::wstring icon = dir + L"\\clock-" + look + L"-2.ico";
+        // The taskbar keeps the icon it read for a shortcut's path, so each tile's shortcut
+        // has a folder of its own, under the same name.
+        std::wstring lnk = dir + L"\\" + look + L"\\" + name + L".lnk";
+        std::wstring appId = kLooseAppId + HashHex(name + L"\n" + look);
         CreateDirectoryW(dir.c_str(), nullptr);
+        CreateDirectoryW((dir + L"\\" + look).c_str(), nullptr);
         bool ok = (GetFileAttributesW(icon.c_str()) != INVALID_FILE_ATTRIBUTES ||
                    WriteFileBytes(icon, EncodeIco(ClockIcon(!light), kIconCanvas))) &&
                   WriteExplorerLnk(lnk, L"", {icon}, appId);
-        if (ok) NotifyUpdated(lnk);  // the same file now names the other tile
+        if (ok) NotifyUpdated(lnk);  // a rewritten file, told at once
         if (Pidl shortcut = ok ? PidlFromPath(lnk) : nullptr) {
             folder = {appId, {shortcut.release(), PidlFree{}}};
             keep = {icon, lnk};
@@ -12258,12 +12283,13 @@ std::wstring LooseAppId() {
     return appId;
 }
 
-// After its settings may have changed: the loose folder's files, then its windows.
-void UpdateLoose() {
+// After its settings may have changed: the loose folder's files, then its windows, which
+// all go again when it changed or `last` asks for it at the end.
+void UpdateLoose(bool last) {
     AcquireSRWLockExclusive(&g_looseWork);
     std::wstring before = LooseAppId();
     PrepareLoose();
-    RegroupLoose(LooseAppId() != before);
+    RegroupLoose(last || LooseAppId() != before);
     ReleaseSRWLockExclusive(&g_looseWork);
 }
 
@@ -15842,8 +15868,8 @@ void BeginStart(bool afterUpdate) {
             if (std::wstring folder = FolderOfPin(pin); !folder.empty()) RestorePinLink(pin, folder);
         RebuildMembers();
         Regroup(MemberKeys());
-        UpdateLoose();
-        RethemeIcons();
+        // Folders first: a pin made again comes after the loose folder, which then goes last.
+        UpdateLoose(RethemeIcons());
     });
 }
 
@@ -15864,8 +15890,7 @@ void SettingsChanged() {
     ApplySettings();
     StartJob([] {
         RebuildMembers();
-        UpdateLoose();
-        RethemeIcons();
+        UpdateLoose(RethemeIcons());
     });
 }
 
