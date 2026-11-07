@@ -11118,8 +11118,7 @@ bool RepinFolder(IPinManagerInterop3* manager, const std::wstring& pinnedFolder,
     return false;
 }
 
-// The taskbar reads a shortcut's icon again only when told the file changed, and a
-// notice left queued may never go out: send it now.
+// Tells the shell a shortcut file changed, at once (a notice left queued may never go out).
 void NotifyUpdated(const std::wstring& path) {
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path.c_str(), nullptr);
 }
@@ -11134,8 +11133,34 @@ void RestorePinLink(const Pin& pin, const std::wstring& folder) {
     Wh_Log(L"pin shortcut of %s restored: %d", folder.c_str(), ok);
 }
 
+std::vector<std::wstring> FolderKeys(const std::wstring& folder);
+void Regroup(const std::vector<std::wstring>& keys);
+void RegroupLoose(bool all);
+extern SRWLOCK g_looseWork;
+
+// The taskbar reads a pinned shortcut's icon as it is pinned and not again, whatever the
+// shell is told about the file: the folder is pinned anew in its own place. One pin per
+// app ID, so the old pin goes first, and the new one gets a second try.
+void RepinInPlace(const std::wstring& folder) {
+    ComPtr<IPinManagerInterop3> manager = PinManager();
+    std::vector<Pin> pins = ReadPins();
+    int index = FindFolderPin(pins, folder);
+    if (!manager || index < 0 || g_unloading) return;
+    Unpin(manager.Get(), pins[index].pidl.get());
+    Sleep(kPinSettleMs);
+    bool ok = PinAt(manager.Get(), PidlFromPath(PinLnkPath(folder)).get(), index);
+    if (!ok) ok = PinAt(manager.Get(), PidlFromPath(PinLnkPath(folder)).get(), index);
+    Wh_Log(L"repin %s at %d: %d", folder.c_str(), index, ok);
+    Regroup(FolderKeys(folder));
+    // A new pin's button comes after the buttons there are, the loose folder's too:
+    // that one goes again, to the end.
+    AcquireSRWLockExclusive(&g_looseWork);
+    RegroupLoose(true);
+    ReleaseSRWLockExclusive(&g_looseWork);
+}
+
 // The taskbar keeps one pin per app ID, so a new icon goes into the pinned shortcut
-// itself instead of through a second pin.
+// itself, and the pin is made again for the taskbar to show it.
 bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
     std::vector<Pin> pins = ReadPins();
     int index = FindFolderPin(pins, folder);
@@ -11144,7 +11169,7 @@ bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
     ComPtr<IShellLinkW> link = pinned.empty() ? nullptr : LoadShellLink(pinned);
     bool ok = link && SUCCEEDED(link->SetIconLocation(icon.path.c_str(), icon.index)) &&
               SaveShellLink(link, pinned) && WritePinLnk(folder, icon);
-    if (ok) NotifyUpdated(pinned);
+    if (ok) RepinInPlace(folder);
     Wh_Log(L"icon of %s: %d", folder.c_str(), ok);
     if (ok) bloom_link::Nudge();
     return ok;
