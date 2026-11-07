@@ -39,6 +39,7 @@
 | `values.json` | Bloom | 런타임 | 모드 설정 값의 평평한 맵 |
 | `host-state.json` | 호스트 | Bloom, 호스트 | 호스트 상태, 충돌 기록, 안전 모드 |
 | `runtime-state.json` | 런타임 | Bloom, 호스트 | explorer 안 상태 |
+| `prefs.json` | 모드, Bloom | 모드, Bloom | 모드가 쓰는 설정(아래 `prefs.json`) |
 | `offsets\<모듈 소문자>_<GUID+age>.txt` | 호스트 | 런타임 | 기호 오프셋 |
 | `symbols\<PDB>\<GUID+age>\<PDB>` | 호스트 | 호스트 | 받은 PDB(오프셋을 만든 뒤 지움) |
 | `host.log`, `runtime.log` | 각자 | 사람 | 기록. 1 MB를 넘으면 처음부터 다시 씀 |
@@ -238,6 +239,16 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 
 `error` 값: `foldersOff`(폴더 기능 꺼짐), `noFolder`, `exists`, `badName`, `notFound`(앱이나 항목 없음), `badArgs`, `failed`. 명령이 끝나면 모드는 `state.json`을 다시 쓴다. `.png` 아이콘은 Bloom이 `.ico`로 바꿔 넘긴다.
 
+### `prefs.json`
+
+```json
+{ "islandPositions": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "x": 500 } } }
+```
+
+- `islandPositions`: 모니터마다 숨김 아일랜드가 가장자리의 어디에 있는지. `x`는 0(왼쪽 끝)~1000(오른쪽 끝), 500이 가운데. 키는 모니터 장치 경로의 하드웨어·인스턴스 부분(영숫자와 `-`, 나머지는 `_`), `name`은 Bloom이 보이는 이름.
+- 모드는 아일랜드를 처음 놓는 모니터를 가운데(500)로 더하고, Ctrl을 누른 채 끌어 놓거나 Ctrl+우클릭으로 가운데로 돌릴 때 그 모니터의 항목을 쓴다. 다른 필드와 다른 모니터 항목은 그대로 둔다.
+- 모드는 데이터 폴더의 변경 알림으로 이 파일이 바뀐 것을 보고(자기 쓰기 뒤의 마지막 쓴 시각과 다를 때만) 다시 읽는다.
+
 ## 6. 설정 스키마 `settings.schema.json`
 
 `tools/make-schema.py --schema`가 모드 YAML, `Clamped` 줄, `tools/names-en.tsv`에서 만든다. 배포 폴더에 들고 `addon.json`의 `"settings"`가 이 파일을 가리킨다.
@@ -256,6 +267,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 - 그룹에도 YAML에 `$description`이 있으면 `about`(`{"ko","en"}`)이 붙는다(지금 tray, size, start).
 - `key`는 `values.json`과 같은 `그룹.키` 전체 이름. `type`은 `bool`, `int`, `choice`, `text`. `about`은 YAML에 `$description`이 있을 때만.
 - 글은 `{"ko","en"}`(일본어·중국어는 없으면 Bloom이 영어로 보인다). `en`이 빠지면 스크립트가 실패한다.
+- 모드 소스의 `==BloomFileSettings==` 블록에 적은 항목(`"file"`, `"field"`가 있는 것, 지금 `island.positions` records)은 `ADDON_FILE_SETTINGS=1`로 빌드할 때(`make-schema.py --with-files`)만 그 그룹 끝에 붙는다. Bloom이 `values.json`이 아니라 그 파일의 필드를 읽고 쓴다. 그 종류를 모르는 Bloom은 스키마 전체를 버리므로, 읽는 Bloom이 나온 뒤에 켠다.
 
 ## 7. 사용량 파일에 더하는 필드 (작업표시줄 사용량 막대)
 

@@ -7,7 +7,8 @@
 #   <name>Runtime.dll  the Windhawk API subset, MinHook, Zydis
 #   <name>.dll         the mod source unchanged, plus addon/addon_entry.cpp
 #   <name>Host.exe     symbols, injection, explorer watch
-#   symbols.txt, addon.json, THIRD_PARTY.md (and settings.schema.json with ADDON_SCHEMA=1)
+#   symbols.txt, addon.json, THIRD_PARTY.md (and settings.schema.json with ADDON_SCHEMA=1,
+#   with the mod's file-kept items too with ADDON_FILE_SETTINGS=1)
 # Usage: tools/build-addon.sh [all|runtime|mod|host|bundle]...  (default all)
 # OUT_DIR (default build/addon), MOD_SRC (default the conf's), DEBUG=1 keeps symbols in the binaries.
 set -euo pipefail
@@ -105,7 +106,11 @@ build_bundle() {
         done
     } > "$out/THIRD_PARTY_NOTICES.txt"
     if [[ "${ADDON_SCHEMA:-0}" == 1 ]]; then
-        python -I "$root/tools/make-schema.py" --schema "$out/settings.schema.json" "$mod_src"
+        # Items kept in a file (records and the like) only for a Bloom that reads them; an
+        # older Bloom drops a schema with a kind it doesn't know.
+        files=()
+        [[ "${ADDON_FILE_SETTINGS:-0}" == 1 ]] && files=(--with-files)
+        python -I "$root/tools/make-schema.py" --schema "$out/settings.schema.json" "${files[@]}" "$mod_src"
     fi
     python -I "$root/tools/make-manifest.py" "$out" "$gen/identity.json"
     echo "bundle in $out"

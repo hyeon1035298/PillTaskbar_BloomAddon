@@ -13,6 +13,8 @@
 
   --values <values.json> (with --defaults)
       A JSON object whose values replace the YAML defaults of the keys it names.
+  --with-files (with --schema)
+      Also the ==BloomFileSettings== items (below), for a Bloom that reads their kinds.
 
 The block is the small YAML subset the mod uses: groups "- group:", leaves
 "  - key: value" with $name/$description/$options under them. A leaf's kind comes
@@ -26,6 +28,12 @@ Folded text ("key: >-" and the more indented lines under it) reads as one line.
 names-en.tsv holds the English text, one "<id>\t<text>" row per Korean text:
 "group:<group>" and "group:<group>#about" for groups, "<group.key>" and
 "<group.key>#about" for leaves, "<group.key>=<option>" for option labels.
+
+An optional "==BloomFileSettings==" block after the settings holds, as a JSON list
+in a comment, items Bloom keeps in a file of the add-on's data folder rather than
+in values.json (the mod writes them too). Each is a schema item as Bloom reads it
+plus its "group", with its Korean and English text in place; the schema appends
+it to that group. They are no Windhawk settings: no defaults table, no names-en.
 """
 import argparse
 import json
@@ -82,6 +90,31 @@ def scalar(text):
     if len(text) >= 2 and text[0] == text[-1] == '"':
         return "string", text[1:-1]
     return "string", text
+
+
+FILE_ITEM_FIELDS = ("group", "key", "type", "default", "file", "field", "name")
+
+
+def file_items(source):
+    """The items of the optional ==BloomFileSettings== block."""
+    m = re.search(r"// ==BloomFileSettings==\s*/\*(.*?)\*/\s*// ==/BloomFileSettings==", source, re.S)
+    if not m:
+        return []
+    try:
+        items = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"BloomFileSettings: {e}")
+    if not isinstance(items, list):
+        raise SystemExit("BloomFileSettings: not a list")
+    for item in items:
+        missing = [f for f in FILE_ITEM_FIELDS if f not in item]
+        if missing:
+            raise SystemExit(f"BloomFileSettings: {item.get('key')!r} lacks {', '.join(missing)}")
+        texts = [item["name"]] + ([item["about"]] if "about" in item else [])
+        texts += [t for f in item.get("fields", []) for t in (f.get("name"), f.get("about")) if t]
+        if any(not (isinstance(t, dict) and t.get("ko") and t.get("en")) for t in texts):
+            raise SystemExit(f"BloomFileSettings: {item['key']}: a text without ko or en")
+    return items
 
 
 def text(raw):
@@ -195,7 +228,7 @@ def read_names(path):
     return names
 
 
-def build_schema(items, groups, found, names):
+def build_schema(items, groups, found, names, files=()):
     """The settings.schema.json object. Exits naming every English text that is
     missing and every table id that matches no YAML text."""
     used, missing = set(), []
@@ -234,6 +267,14 @@ def build_schema(items, groups, found, names):
         if "description" in item["text"]:
             entry["about"] = pair(item["text"]["description"], f"{key}#about")
         by_id[item["group"]]["items"].append(entry)
+    keys = {i["key"] for i in items}
+    for item in files:
+        if item["group"] not in by_id:
+            raise SystemExit(f"{item['key']}: no group {item['group']}")
+        if item["key"] in keys:
+            raise SystemExit(f"{item['key']}: also a YAML key")
+        keys.add(item["key"])
+        by_id[item["group"]]["items"].append({k: v for k, v in item.items() if k != "group"})
     unused = sorted(set(names) - used)
     if missing or unused:
         lines = [f"names-en.tsv: no English for {i}" for i in missing]
@@ -245,7 +286,7 @@ def build_schema(items, groups, found, names):
 def check_schema(schema, items, found):
     """Compares a schema read back from JSON with the YAML leaves and Clamped ranges."""
     problems = []
-    leaves = [e for g in schema["groups"] for e in g["items"]]
+    leaves = [e for g in schema["groups"] for e in g["items"] if "file" not in e]
     yaml = {i["key"]: i for i in items}
     if [e["key"] for e in leaves] != [i["key"] for i in items]:
         problems.append("schema keys differ from the YAML keys or their order")
@@ -338,12 +379,14 @@ def main():
     ap.add_argument("--schema")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--values")
+    ap.add_argument("--with-files", action="store_true")
     ap.add_argument("source")
     args = ap.parse_args()
     with open(args.source, encoding="utf-8") as f:
         source = f.read()
     groups = []
     items = parse(source, groups)
+    files = file_items(source)
     found = ranges(source)
     kinds = {}
     for item in items:
@@ -360,9 +403,10 @@ def main():
         problems = check(items, found)
         if problems:
             raise SystemExit("\n".join(problems))
-        schema = build_schema(items, groups, found, read_names(NAMES_EN))
+        kept = files if args.with_files else ()
+        schema = build_schema(items, groups, found, read_names(NAMES_EN), kept)
         write_schema(schema, args.schema)
-        print(f"{len(groups)} groups, {len(items)} settings -> {args.schema}")
+        print(f"{len(groups)} groups, {len(items)} settings, {len(kept)} in files -> {args.schema}")
     if args.check:
         print(f"{len(items)} settings ({summary}), {len(found)} ranges")
         for item in items:
@@ -370,7 +414,7 @@ def main():
             span = f" {found[item['key']]}" if item["key"] in found else ""
             print(f"  {item['key']} {item['kind']} = {item['default']!r}{span}{extra}")
         problems = check(items, found)
-        schema = json.loads(json.dumps(build_schema(items, groups, found, read_names(NAMES_EN))))
+        schema = json.loads(json.dumps(build_schema(items, groups, found, read_names(NAMES_EN), files)))
         problems += check_schema(schema, items, found)
         leaves = [e for g in schema["groups"] for e in g["items"]]
         counts = {t: sum(e["type"] == t for e in leaves) for t in ("bool", "int", "choice", "text")}
@@ -379,6 +423,8 @@ def main():
               f"{sum('min' in e for e in leaves)} int ranges, "
               f"{sum(len(e.get('options', [])) for e in leaves)} options, "
               f"{sum('about' in g for g in schema['groups']) + sum('about' in e for e in leaves)} abouts")
+        for item in files:
+            print(f"  {item['key']} {item['type']} in {item['file']}:{item['field']}")
         for problem in problems:
             print("PROBLEM", problem)
         return 1 if problems else 0
