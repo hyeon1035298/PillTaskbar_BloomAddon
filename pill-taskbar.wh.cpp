@@ -1265,6 +1265,9 @@ void (*g_onTaskbarMoved)(HWND) = nullptr;
 // A taskbar window changed its place in the z-order (the island keeps above it
 // while it morphs).
 void (*g_onTaskbarRestacked)(HWND) = nullptr;
+// True while a taskbar window has to stay in the topmost band: a restack that
+// would take it out of there keeps its place instead.
+bool (*g_keepsTaskbarTopmost)(HWND) = nullptr;
 // A taskbar window is going, e.g. with its monitor.
 void (*g_onTaskbarDestroyed)(HWND) = nullptr;
 // The primary taskbar turned vertical or back (F5); the shape features step
@@ -1330,6 +1333,25 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
             }
             if (drop) {
                 return 0;
+            }
+            break;
+        }
+        case WM_WINDOWPOSCHANGING: {
+            // Out of the topmost band: before HWND_NOTOPMOST or HWND_BOTTOM, or
+            // under a window that isn't topmost itself.
+            auto* pos = (WINDOWPOS*)lParam;
+            bool keep = false;
+            if (g_keepsTaskbarTopmost && pos && !(pos->flags & SWP_NOZORDER)) {
+                HWND after = pos->hwndInsertAfter;
+                bool leaves = after == HWND_NOTOPMOST || after == HWND_BOTTOM ||
+                              (after != HWND_TOP && after != HWND_TOPMOST &&
+                               !(GetWindowLongPtrW(after, GWL_EXSTYLE) & WS_EX_TOPMOST));
+                if (leaves) {
+                    Guard(L"Taskbar keeps topmost", [&] { keep = g_keepsTaskbarTopmost(hwnd); });
+                }
+            }
+            if (keep) {
+                pos->flags |= SWP_NOZORDER;
             }
             break;
         }
@@ -9612,6 +9634,15 @@ bool StandsIn(HWND hwnd) {
 
 void RecheckFullscreen(Island& g);
 
+// The taskbar StartExpand lifted over a fullscreen window stays over it until
+// it is in again (SinkLiftedTaskbar). Otherwise a click on it, with the window
+// coming back to the front after, has the shell put it back under a browser in
+// F11 for a moment.
+bool KeepsTaskbarTopmost(HWND hwnd) {
+    Island* g = OnIslandThread() ? Of(hwnd) : nullptr;
+    return g && g->liftedTaskbar;
+}
+
 // Explorer raises the taskbar as it comes out; a morph stays on top of it, and
 // so does an idle island in click mode. A fullscreen app coming or going
 // restacks it too (RecheckFullscreen).
@@ -10265,6 +10296,7 @@ void Apply(HWND taskbar) {
     autohide::g_standsIn = StandsIn;
     autohide::g_holdsHover = HoldsHover;
     core::g_onTaskbarRestacked = OnTaskbarRestacked;
+    core::g_keepsTaskbarTopmost = KeepsTaskbarTopmost;
     core::g_onTaskbarDestroyed = OnTaskbarDestroyed;
     media::g_onShow = OnMedia;
     usage::g_onModel = SyncAll;
@@ -10285,6 +10317,7 @@ void Restore() {
     autohide::g_standsIn = nullptr;
     autohide::g_holdsHover = nullptr;
     core::g_onTaskbarRestacked = nullptr;
+    core::g_keepsTaskbarTopmost = nullptr;
     core::g_onTaskbarDestroyed = nullptr;
     media::g_onShow = nullptr;
     usage::g_onModel = nullptr;
