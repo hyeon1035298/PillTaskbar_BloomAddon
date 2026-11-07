@@ -9280,6 +9280,7 @@ void Raise(Island& g) {
 // ---- morph ----------------------------------------------------------------------
 
 void SinkLiftedTaskbar(Island& g);
+bool CoversMonitor(Island const& g, HWND window);
 
 void OnMorphed(int id, int morph) {
     Island* p = FindIf([&](Island const& g) { return g.id == id; });
@@ -9309,20 +9310,24 @@ void OnMorphed(int id, int morph) {
     }
 }
 
-// The taskbar StartExpand lifted over a fullscreen window, in again: out of the
-// topmost band and right under the window in front, where the shell had it, so
-// the edge strip it leaves on the screen doesn't line that window.
+// The taskbar StartExpand lifted over a fullscreen window, in again (or the
+// island hid meanwhile): out of the topmost band and right under the window in
+// front, where the shell had it, so the edge strip it leaves on the screen
+// doesn't line that window. Only while that window still fills the monitor:
+// otherwise the taskbar is where it belongs anyway, topmost, and taking it out
+// of that band would leave it under every maximized window.
 void SinkLiftedTaskbar(Island& g) {
     if (!std::exchange(g.liftedTaskbar, false)) {
         return;
     }
+    HWND front = GetForegroundWindow();
+    if (!front || front == g.taskbar || front == g.hwnd || !CoversMonitor(g, front) ||
+        (GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        return;
+    }
     constexpr UINT kFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     SetWindowPos(g.taskbar, HWND_NOTOPMOST, 0, 0, 0, 0, kFlags);
-    HWND front = GetForegroundWindow();
-    if (front && front != g.taskbar && front != g.hwnd &&
-        !(GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-        SetWindowPos(g.taskbar, front, 0, 0, 0, 0, kFlags);
-    }
+    SetWindowPos(g.taskbar, front, 0, 0, 0, 0, kFlags);
 }
 
 // The shape toward the pill (`out`) or the island, from wherever it is now, so
@@ -9433,7 +9438,8 @@ void Hide(Island& g) {
     KillTimer(g.hwnd, kCrossingTimer);
     g.shown = g.inside = g.reaching = false;
     g.phase = Phase::kIdle;
-    g.morph++;  // a running morph's end no longer counts
+    g.morph++;  // a running morph's end no longer counts, so its sink comes here
+    SinkLiftedTaskbar(g);
     ShowWindow(g.hwnd, SW_HIDE);
     // Shown again from transparent, not with the last frame.
     core::Guard(L"Island fade", [&] {
