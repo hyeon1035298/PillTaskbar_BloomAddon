@@ -8653,8 +8653,12 @@ void ClearHover(Island& g) {
 // Idle, right under the taskbar, so the taskbar covers it when it's out. In
 // click mode over it instead: the hidden taskbar's edge strip would take the
 // island's top pixels, and a click there would land on the hidden taskbar.
+// Over it too while Windows keeps the taskbar out of the topmost band (a
+// borderless window maximized to the whole monitor looks fullscreen to it):
+// under the taskbar would then be under that window.
 void StackIdle(Island& g, UINT flags = 0) {
-    HWND after = settings::g.island.clickToReveal ? HWND_TOPMOST : g.taskbar;
+    bool taskbarOnTop = GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST;
+    HWND after = settings::g.island.clickToReveal || !taskbarOnTop ? HWND_TOPMOST : g.taskbar;
     SetWindowPos(g.hwnd, after, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | flags);
 }
@@ -9031,13 +9035,15 @@ bool CoversMonitor(Island const& g, HWND window) {
 }
 
 // A fullscreen app (a game, a video) on the monitor keeps the island away, as
-// it does the taskbar. A window activated on another monitor leaves that as it
-// is, unless the fullscreen app has gone meanwhile.
+// it does the taskbar. A maximized window is no such app, even one without a
+// frame that Windows reports as one for filling the monitor. A window activated
+// on another monitor leaves that as it is, unless the fullscreen app has gone
+// meanwhile.
 void OnActivated(Island& g, HWND window, bool rude) {
     bool here = window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) ==
                               core::MonitorOf(g.taskbar);
     if (here || !window) {
-        g.fullscreenWindow = rude && here ? window : nullptr;
+        g.fullscreenWindow = rude && here && !IsZoomed(window) ? window : nullptr;
     } else if (!CoversMonitor(g, g.fullscreenWindow)) {
         g.fullscreenWindow = nullptr;
     }
