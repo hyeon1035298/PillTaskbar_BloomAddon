@@ -7889,6 +7889,11 @@ using Color = winrt::Windows::UI::Color;
 constexpr PCWSTR kClassName = L"PillTaskbarIsland_" WH_MOD_ID;
 // From Stop: the windows go on their own thread.
 constexpr UINT kStopMsg = WM_APP + 1;
+// A pointer that comes onto an island from past its edge, where another
+// monitor lies, is most likely on its way through: it brings the taskbar out
+// only if it stays on the island this long.
+constexpr UINT_PTR kCrossingTimer = 1;
+constexpr UINT kCrossingMs = 120;
 // Album art is kept at most this big; the island never draws it larger.
 constexpr UINT kArtSize = 256;
 constexpr float kPlaceholderAlpha = 0.25f;
@@ -9338,6 +9343,13 @@ void StartExpand(Island& g) {
     g.phase = Phase::kExpanding;
     SetHover(g);
     Raise(g);
+    // Out of the topmost band (a window fills the monitor, see StackIdle) the
+    // taskbar would come out under that window: it goes over it, as the
+    // island shows it coming.
+    if (!(GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(g.taskbar, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
     SetRegion(g);
     Morph(g, true);
 }
@@ -9394,6 +9406,7 @@ void EndDrag(Island& g);
 
 void Hide(Island& g) {
     EndDrag(g);
+    KillTimer(g.hwnd, kCrossingTimer);
     g.shown = g.inside = g.reaching = false;
     g.phase = Phase::kIdle;
     g.morph++;  // a running morph's end no longer counts
@@ -9584,6 +9597,13 @@ void OnTaskbarRestacked(HWND hwnd) {
 // Ctrl held: the island is being moved, or about to be.
 bool CtrlDown() {
     return GetAsyncKeyState(VK_CONTROL) & 0x8000;
+}
+
+// The point is in the island's half at the screen edge: a pointer coming onto
+// it from the monitor past that edge shows up there first.
+bool EdgeHalf(Island const& g, POINT pt) {
+    int fromEdge = g.bottom ? g.islandRect.bottom - 1 - pt.y : pt.y - g.islandRect.top;
+    return fromEdge < (int)g.shape.height / 2;
 }
 
 // While the island shows, only the pointer at the edge over it brings the
@@ -9779,10 +9799,15 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
                 Track(g.hwnd);
                 // With Ctrl held it comes to move the island, not the taskbar.
                 if (!settings::g.island.clickToReveal && !g.ctrl) {
-                    after = Reach(g);
+                    if (g.sharedEdge && EdgeHalf(g, pt)) {
+                        SetTimer(g.hwnd, kCrossingTimer, kCrossingMs, nullptr);
+                    } else {
+                        after = Reach(g);
+                    }
                 }
             } else if (!on) {
                 g.inside = g.reaching = false;
+                KillTimer(g.hwnd, kCrossingTimer);
             }
             if (after) {
                 SetHover(*after);
@@ -9846,10 +9871,28 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
             core::DiagLine(L"Leave %d on %d at %d,%d phase %d", g.id, on, pt.x, pt.y,
                            (int)g.phase);
             g.inside = false;
+            KillTimer(g.hwnd, kCrossingTimer);
             if (!on) {
                 g.reaching = false;
             }
             SetHover(g);
+            return 0;
+        }
+        // A pointer that came from past the edge and stayed.
+        case WM_TIMER: {
+            if (wParam != kCrossingTimer) {
+                break;
+            }
+            KillTimer(g.hwnd, kCrossingTimer);
+            POINT pt;
+            core::DiagLine(L"Crossing %d inside %d", g.id, g.inside);
+            if (g.shown && g.phase == Phase::kIdle && g.inside && !g.reaching &&
+                !settings::g.island.clickToReveal && !CtrlDown() && GetCursorPos(&pt) &&
+                OnIsland(g, pt)) {
+                if (Island* after = Reach(g)) {
+                    SetHover(*after);
+                }
+            }
             return 0;
         }
         case WM_DPICHANGED:
