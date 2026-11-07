@@ -32,10 +32,11 @@
 - **미디어**: 재생 중인 곡의 앨범 아트, 제목, 이전/재생/다음 단추를 트레이 앞에 보여 줍니다.
 - **사용량**: Bloom이 내보낸 AI 사용량을 트레이 앞에 작은 막대로 보여 줍니다. Bloom 파일이 없으면
   아무것도 보이지 않습니다.
-- **숨김 아일랜드**: 위쪽 작업표시줄이 자동 숨김으로 숨어 있는 동안 모니터마다 화면 위 가운데에 작은 검은 아일랜드를 걸어 둡니다.
+- **숨김 아일랜드**: 작업표시줄이 자동 숨김으로 숨어 있는 동안 모니터마다 그 가장자리(위 또는 아래) 가운데에 작은 검은 아일랜드를 둡니다.
   아일랜드를 클릭하면(설정에 따라 포인터를 대기만 해도) 아일랜드가 작업표시줄 모양으로 커지며 작업표시줄이 나오고,
   작업표시줄이 들어가면 다시 아일랜드로 줄어듭니다. 아일랜드 위에 포인터를 올리면 아일랜드가 설정한 만큼 투명해집니다.
-  아일랜드에는 시계와 재생 중인 곡, AI 사용량 가운데 고른 것을 보여 줍니다. 자동 숨김 보조를 같이 켜야 동작합니다.
+  아일랜드에는 시계와 재생 중인 곡, AI 사용량 가운데 고른 것을 보여 줍니다. Ctrl을 누른 채 끌면 가장자리를 따라 옮겨지고
+  모니터마다 그 자리를 기억하며, Ctrl을 누른 채 우클릭하면 가운데로 돌아갑니다. 자동 숨김 보조를 같이 켜야 동작합니다.
 - **폴더**: 고정한 앱을 끌어 다른 앱 한가운데에 잠깐 두면 그 앱이 커지고, 그때 놓으면 둘이 폴더가
   됩니다. 폴더를 누르면 안의 앱이 한 줄로 뜨고, 폴더 안 앱의 창은 따로 버튼을 만들지 않고 폴더
   버튼에 묶입니다. 폴더를 오른쪽 클릭하면 이름과 아이콘을 바꾸거나 폴더를 풀 수 있습니다. 폴더는
@@ -191,7 +192,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 - island:
   - enabled: true
     $name: 숨김 아일랜드
-    $description: 위쪽 작업표시줄이 자동 숨김으로 숨어 있을 때 화면 위 가운데에 작은 검은 아일랜드를 둡니다. 아일랜드를 클릭하거나(아래 설정) 포인터를 대면 아일랜드가 커지며 작업표시줄이 나옵니다. 자동 숨김 보조도 켜져 있어야 동작합니다
+    $description: 작업표시줄이 자동 숨김으로 숨어 있을 때 그 가장자리(위 또는 아래)에 작은 검은 아일랜드를 둡니다. 아일랜드를 클릭하거나(아래 설정) 포인터를 대면 아일랜드가 커지며 작업표시줄이 나옵니다. Ctrl을 누른 채 끌면 가장자리를 따라 옮기고, Ctrl을 누른 채 우클릭하면 가운데로 돌아갑니다. 자동 숨김 보조도 켜져 있어야 동작합니다
   - color: black
     $name: 아일랜드 색
     $options:
@@ -213,7 +214,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 100% 배율 기준 아일랜드 몸통의 폭, 1200까지. 0이면 보여 주는 내용에 맞춥니다. 내용이 넘치면 곡 제목을 …로 줄입니다
   - reveal: hover
     $name: 작업표시줄 부르기
-    $description: 클릭이면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 위 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 나옵니다
+    $description: 클릭이면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 나옵니다
     $options:
     - hover: 포인터를 대면 바로
     - click: 아일랜드를 클릭해야
@@ -268,6 +269,39 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 */
 // ==/WindhawkModSettings==
 
+// Settings Bloom keeps in a file of the add-on's data folder, which the mod
+// writes too, appended to their group on Bloom's page (tools/make-schema.py).
+// ==BloomFileSettings==
+/*
+[
+  {
+    "group": "island",
+    "key": "island.positions",
+    "type": "records",
+    "default": {},
+    "file": "prefs.json",
+    "field": "islandPositions",
+    "label": "name",
+    "name": {"ko": "모니터별 아일랜드 위치", "en": "Island position per monitor"},
+    "about": {
+      "ko": "아일랜드를 Ctrl을 누른 채 끌어 옮기면 그 모니터의 자리가 여기 남습니다. 0이면 왼쪽 끝, 500이면 가운데, 1000이면 오른쪽 끝입니다",
+      "en": "Where each monitor's island sits after you drag it with Ctrl held. 0 is the left end, 500 the middle, 1000 the right end"
+    },
+    "fields": [
+      {
+        "key": "x",
+        "type": "int",
+        "default": 500,
+        "min": 0,
+        "max": 1000,
+        "name": {"ko": "가로 위치", "en": "Position along the edge"}
+      }
+    ]
+  }
+]
+*/
+// ==/BloomFileSettings==
+
 // 구역 목차 (기능마다 한 구역에 모여 있다)
 //   settings  Windhawk 설정 읽기와 theme 상수
 //   core      UI 스레드, 작업표시줄 찾기, restore 목록, XAML 도우미
@@ -279,7 +313,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   autohide  F4 위쪽 자동 숨김, 나오는 구간, 지연, 애니메이션
 //   media     F6 미디어 플레이어 (GSMTC)
 //   usage     F7 Bloom 주간 사용량
-//   island    F8 숨김 아일랜드 (숨은 위쪽 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
+//   island    F8 숨김 아일랜드 (숨은 위·아래 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
 //   folders   F9 작업표시줄 폴더 (앱 묶기, 폴더 창, 폴더 안 앱의 창 묶기), F10 실행 중 폴더
 //   hooks     켠 기능의 심볼만 훅으로 걸고 여러 기능이 쓰는 훅을 나눠 준다
 //   entry     Wh_Mod* 진입점
@@ -4960,8 +4994,14 @@ void ReleaseHeld() {
         return;
     }
     core::DiagLine(L"Bloom release %p", hwnd);
-    if (IsWindow(hwnd) && !core::IsSecondary(hwnd) && !Collapsed(hwnd)) {
-        ResumeAutoHide(hwnd);
+    if (IsWindow(hwnd) && !Collapsed(hwnd)) {
+        if (!core::IsSecondary(hwnd)) {
+            ResumeAutoHide(hwnd);
+        }
+        // The launcher is gone: the hide check (a secondary's under the same
+        // id, see DropsTimer) looks now rather than a tick later, so the
+        // taskbar goes in (and the island back) as it closes.
+        PostMessage(hwnd, WM_TIMER, kTrayHideTimer, 0);
     }
 }
 
@@ -7760,8 +7800,9 @@ void Restore() {
 // ============================================================================
 namespace island {
 // ============================================================================
-// F8: while an auto-hidden top taskbar is in, a small black island hangs from
-// the top edge of its monitor, and the pointer entering it brings the taskbar
+// F8: while an auto-hidden taskbar is in, a small black island sits on its
+// edge of its monitor (top or bottom, where the taskbar is; in the middle or
+// where it was dragged to), and the pointer entering it brings the taskbar
 // out. As the taskbar comes out the island grows into the pill's shape and
 // fades onto it; as the taskbar goes in, it shrinks back from the pill. Every
 // taskbar has an island of its own (F11). An island is a popup window drawn
@@ -7867,9 +7908,9 @@ HINSTANCE Module() {
 }
 
 // ---- shape ----------------------------------------------------------------------
-// In window pixels. The body hangs from the screen edge at y = 0 and has round
-// bottom corners of `radius`; fillets of `flare` curve its sides out into the
-// edge.
+// In window pixels, with y counted from the screen edge (a bottom island turns
+// it over). The body hangs from the edge at y = 0 and has round corners of
+// `radius` away from it; fillets of `flare` curve its sides out into the edge.
 
 struct Shape {
     float width = 0;  // fillets included
@@ -7895,23 +7936,29 @@ float LeftEdge(Shape const& s, float y) {
            std::sqrt(std::max(0.0f, s.radius * s.radius - d * d));
 }
 
+// The edge's distance of a pixel row's point nearest it: the row itself at the
+// top, the row's far side turned over at the bottom.
+float FromEdge(Shape const& s, int row, bool bottom) {
+    return (float)(bottom ? (int)s.height - 1 - row : row);
+}
+
 // True if the point, relative to the shape's top left, is in a pixel the
 // shape touches.
-bool InShape(Shape const& s, int x, int y) {
+bool InShape(Shape const& s, int x, int y, bool bottom) {
     if (y < 0 || y >= (int)s.height) {
         return false;
     }
-    int left = (int)std::floor(LeftEdge(s, (float)y));
+    int left = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
     return x >= left && x < (int)s.width - left;
 }
 
 // Every pixel the shape touches: the window region (hit-testing, and DWM's
 // clip) must not cut into the antialiased edge.
-HRGN Region(Shape const& s) {
+HRGN Region(Shape const& s, bool bottom) {
     int width = (int)s.width;
     HRGN rgn = CreateRectRgn(0, 0, 0, 0);
     for (int y = 0; rgn && y < (int)s.height; y++) {
-        int left = (int)std::floor(LeftEdge(s, (float)y));
+        int left = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
         if (HRGN row = CreateRectRgn(left, y, width - left, y + 1)) {
             CombineRgn(rgn, rgn, row, RGN_OR);
             DeleteObject(row);
@@ -7920,26 +7967,29 @@ HRGN Region(Shape const& s) {
     return rgn;
 }
 
-// A fillet in its `size` square: the square less the disc around its bottom
-// corner away from the body. The left one meets the body at its right side.
-com_ptr<ID2D1PathGeometry> Fillet(ID2D1Factory* factory, float size, bool right) {
+// A fillet in its `size` square: the square less the disc around its corner
+// away from the body and from the edge. The left one meets the body at its
+// right side; a bottom one is turned over.
+com_ptr<ID2D1PathGeometry> Fillet(ID2D1Factory* factory, float size, bool right, bool bottom) {
     com_ptr<ID2D1PathGeometry> path;
     check_hresult(factory->CreatePathGeometry(path.put()));
     com_ptr<ID2D1GeometrySink> sink;
     check_hresult(path->Open(sink.put()));
     float f = size;
-    D2D1_POINT_2F start = right ? D2D1::Point2F(f, 0) : D2D1::Point2F(0, 0);
+    auto at = [&](float x, float y) { return D2D1::Point2F(x, bottom ? f - y : y); };
+    D2D1_POINT_2F start = right ? at(f, 0) : at(0, 0);
     sink->BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
     if (right) {
-        sink->AddLine(D2D1::Point2F(0, 0));
-        sink->AddLine(D2D1::Point2F(0, f));
+        sink->AddLine(at(0, 0));
+        sink->AddLine(at(0, f));
     } else {
-        sink->AddLine(D2D1::Point2F(f, 0));
-        sink->AddLine(D2D1::Point2F(f, f));
+        sink->AddLine(at(f, 0));
+        sink->AddLine(at(f, f));
     }
     D2D1_ARC_SEGMENT arc = D2D1::ArcSegment(
         start, D2D1::SizeF(f, f), 0,
-        right ? D2D1_SWEEP_DIRECTION_CLOCKWISE : D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+        right != bottom ? D2D1_SWEEP_DIRECTION_CLOCKWISE
+                        : D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
         D2D1_ARC_SIZE_SMALL);
     sink->AddArc(&arc);
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
@@ -8014,7 +8064,16 @@ struct Island {
     bool fullscreen = false;  // a fullscreen app is active on the monitor
     HWND fullscreenWindow = nullptr;
     bool unreachable = false;  // logged that the taskbar can't be asked yet
-    bool sharedEdge = false;   // another monitor is above the island
+    bool bottom = false;       // at the bottom edge, under a bottom taskbar
+    bool sharedEdge = false;   // another monitor is past the island's edge
+    // Moved along the edge with Ctrl held: `ctrl` as the last pointer move
+    // had it, and while dragging where on the island the pointer holds it.
+    bool ctrl = false;
+    bool dragging = false;
+    int grab = 0;
+    // The monitor the island's place is kept for, as its HMONITOR last gave it.
+    HMONITOR placeMonitor = nullptr;
+    std::wstring placeId, placeName;
     Phase phase = Phase::kIdle;
     int morph = 0;  // counts morphs; only the last one's end counts
     // The clock's font for the clock and the numbers, the system UI font for
@@ -8113,11 +8172,284 @@ bool MonitorRect(Island const& g, RECT& out) {
     return true;
 }
 
-// Hidden or not, a top taskbar's window sits in the upper half.
-bool AtTop(HWND taskbar, RECT const& monitor) {
+// Hidden or not, a top taskbar's window sits in the upper half, a bottom one's
+// in the lower.
+bool AtBottom(HWND taskbar, RECT const& monitor) {
     RECT rc;
     return GetWindowRect(taskbar, &rc) &&
-           rc.top + rc.bottom < monitor.top + monitor.bottom;
+           rc.top + rc.bottom >= monitor.top + monitor.bottom;
+}
+
+// ---- place along the edge ----------------------------------------------------------
+// Where along its edge each monitor's island sits, from 0 (the left end) through
+// 500 (the middle) to 1000 (the right end), kept in prefs.json in the add-on's
+// data folder as "islandPositions": {"<monitor>": {"name": ..., "x": ...}}, where
+// Bloom shows and changes it. Other fields of the file stay as they are. Read on
+// the taskbar thread; the file is watched for changes made elsewhere.
+
+constexpr int kPlaceMiddle = 500;
+constexpr int kPlaceEnd = 1000;
+constexpr PCWSTR kPrefsFile = L"prefs.json";
+constexpr PCWSTR kPlacesField = L"islandPositions";
+constexpr DWORD kMaxPrefsBytes = 256 * 1024;
+
+// Monitor id → place, in thousandths; a place being dragged keeps its fraction.
+[[clang::no_destroy]] std::unordered_map<std::wstring, double> g_places;
+[[clang::no_destroy]] std::wstring g_prefsDir;  // empty without Bloom
+FILETIME g_prefsWritten{};  // the file's time after this side's last read or write
+HANDLE g_prefsChange = nullptr;
+HANDLE g_prefsWait = nullptr;
+bool g_placesRead = false;  // looked for the file since the islands started
+
+namespace wdj = winrt::Windows::Data::Json;
+
+// The add-on's data folder, made only while Bloom's own folder is there.
+bool PrefsDir() {
+    if (g_prefsDir.empty()) {
+        WCHAR base[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, ARRAYSIZE(base));
+        if (!n || n >= ARRAYSIZE(base)) {
+            return false;
+        }
+        std::wstring bloom = std::wstring(base) + L"\\" + usage::kBloomDirName;
+        if (!usage::IsDirectory(bloom)) {
+            return false;
+        }
+        CreateDirectoryW((bloom + L"\\addons").c_str(), nullptr);
+        CreateDirectoryW((bloom + L"\\addons\\pill-taskbar").c_str(), nullptr);
+        g_prefsDir = bloom + L"\\addons\\pill-taskbar";
+    }
+    return usage::IsDirectory(g_prefsDir);
+}
+
+std::wstring PrefsPath() {
+    return g_prefsDir + L"\\" + kPrefsFile;
+}
+
+FILETIME PrefsTime() {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(PrefsPath().c_str(), GetFileExInfoStandard, &data)) {
+        return {};
+    }
+    return data.ftLastWriteTime;
+}
+
+// The file as an object; empty if it's missing or not JSON.
+wdj::JsonObject ReadPrefs() {
+    wdj::JsonObject root;
+    winrt::file_handle file{CreateFileW(PrefsPath().c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    LARGE_INTEGER size{};
+    if (!file || !GetFileSizeEx(file.get(), &size) || size.QuadPart <= 0 ||
+        size.QuadPart > kMaxPrefsBytes) {
+        return root;
+    }
+    std::string bytes((size_t)size.QuadPart, '\0');
+    DWORD got = 0;
+    if (!ReadFile(file.get(), bytes.data(), (DWORD)bytes.size(), &got, nullptr)) {
+        return root;
+    }
+    bytes.resize(got);
+    if (bytes.starts_with("\xEF\xBB\xBF")) {
+        bytes.erase(0, 3);
+    }
+    wdj::JsonObject parsed{nullptr};
+    if (wdj::JsonObject::TryParse(usage::Widen(bytes), parsed)) {
+        root = parsed;
+    }
+    return root;
+}
+
+// Through a hidden temporary file, so Bloom never reads half of it.
+bool WritePrefs(wdj::JsonObject const& root) {
+    std::wstring text(root.Stringify());
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0,
+                                nullptr, nullptr);
+    std::string bytes(n > 0 ? n : 0, '\0');
+    if (n > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), bytes.data(), n,
+                            nullptr, nullptr);
+    }
+    std::wstring path = PrefsPath(), temp = g_prefsDir + L"\\." + kPrefsFile + L".tmp";
+    bool written = false;
+    {
+        winrt::file_handle file{CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr,
+                                            CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr)};
+        DWORD put = 0;
+        written = file && WriteFile(file.get(), bytes.data(), (DWORD)bytes.size(), &put,
+                                    nullptr) &&
+                  put == bytes.size();
+    }
+    if (written && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        g_prefsWritten = PrefsTime();
+        return true;
+    }
+    DeleteFileW(temp.c_str());
+    Wh_Log(L"Island place not saved: %u", GetLastError());
+    return false;
+}
+
+void ReadPlaces() {
+    g_prefsWritten = PrefsTime();
+    g_places.clear();
+    auto root = ReadPrefs();
+    auto places = usage::Field(root, kPlacesField, wdj::JsonValueType::Object);
+    if (!places) {
+        return;
+    }
+    for (auto const& entry : places.GetObject()) {
+        if (entry.Value().ValueType() != wdj::JsonValueType::Object) {
+            continue;
+        }
+        double x = usage::Number(entry.Value().GetObject(), L"x", kPlaceMiddle);
+        g_places[std::wstring(entry.Key())] = std::clamp(std::round(x), 0.0, (double)kPlaceEnd);
+    }
+}
+
+// The island's place as it is now, in the file with its monitor's name; the
+// rest of the file as it was.
+void SavePlace(Island const& g) {
+    if (!PrefsDir()) {
+        return;
+    }
+    auto root = ReadPrefs();
+    auto old = usage::Field(root, kPlacesField, wdj::JsonValueType::Object);
+    wdj::JsonObject places = old ? old.GetObject() : wdj::JsonObject();
+    auto it = g_places.find(g.placeId);
+    double x = it != g_places.end() ? it->second : kPlaceMiddle;
+    wdj::JsonObject record;
+    record.Insert(L"name", wdj::JsonValue::CreateStringValue(g.placeName));
+    record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(x)));
+    places.Insert(g.placeId, record);
+    root.Insert(kPlacesField, places);
+    WritePrefs(root);
+}
+
+// Taskbar thread: the file changed, from Bloom or by hand, unless it was this
+// side's own write. A drag under way keeps its island where the pointer has it.
+void OnPrefsChanged() {
+    FILETIME now = PrefsTime();
+    if (CompareFileTime(&now, &g_prefsWritten) == 0) {
+        return;
+    }
+    std::unordered_map<std::wstring, double> dragged;
+    for (auto& g : g_islands) {
+        if (g.dragging && g_places.contains(g.placeId)) {
+            dragged[g.placeId] = g_places[g.placeId];
+        }
+    }
+    ReadPlaces();
+    for (auto& [id, x] : dragged) {
+        g_places[id] = x;
+    }
+    SyncAll();
+}
+
+void CALLBACK OnPrefsFolderChanged(void*, BOOLEAN) {
+    FindNextChangeNotification(g_prefsChange);
+    core::Post(OnPrefsChanged);
+}
+
+// Once, as the first island needs a place: reads the file and starts watching
+// its folder.
+void WatchPlaces() {
+    if (std::exchange(g_placesRead, true) || !PrefsDir()) {
+        return;
+    }
+    ReadPlaces();
+    g_prefsChange = FindFirstChangeNotificationW(g_prefsDir.c_str(), FALSE,
+                                                 FILE_NOTIFY_CHANGE_LAST_WRITE |
+                                                     FILE_NOTIFY_CHANGE_FILE_NAME);
+    if (g_prefsChange == INVALID_HANDLE_VALUE) {
+        g_prefsChange = nullptr;
+        return;
+    }
+    if (!RegisterWaitForSingleObject(&g_prefsWait, g_prefsChange, OnPrefsFolderChanged,
+                                     nullptr, INFINITE, WT_EXECUTEDEFAULT)) {
+        g_prefsWait = nullptr;
+        Wh_Log(L"Island places not watched: %u", GetLastError());
+    }
+}
+
+// At restore: waits out a callback under way.
+void UnwatchPlaces() {
+    if (HANDLE wait = std::exchange(g_prefsWait, nullptr)) {
+        UnregisterWaitEx(wait, INVALID_HANDLE_VALUE);
+    }
+    if (HANDLE change = std::exchange(g_prefsChange, nullptr)) {
+        FindCloseChangeNotification(change);
+    }
+    g_places.clear();
+    g_placesRead = false;
+}
+
+// A name for the monitor that stays the same across restarts: its display's
+// hardware and instance from the device path ("DEL41D9_5_1a2b3c_0_UID4352"),
+// else its display name. A label as Bloom shows it: the model and the size.
+void NotePlaceMonitor(Island& g, HMONITOR monitor) {
+    if (monitor == g.placeMonitor && !g.placeId.empty()) {
+        return;
+    }
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return;
+    }
+    std::wstring device = info.szDevice;
+    std::wstring id = device.starts_with(L"\\\\.\\") ? device.substr(4) : device;
+    std::wstring model = id;
+    DISPLAY_DEVICEW dd{.cb = sizeof(dd)};
+    if (EnumDisplayDevicesW(info.szDevice, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)) {
+        // \\?\DISPLAY#<hardware>#<instance>#{class}
+        std::wstring path = dd.DeviceID;
+        std::vector<std::wstring> parts;
+        for (size_t start = 0, end; start <= path.size(); start = end + 1) {
+            end = path.find(L'#', start);
+            if (end == std::wstring::npos) {
+                end = path.size();
+            }
+            parts.push_back(path.substr(start, end - start));
+        }
+        if (parts.size() >= 3 && !parts[1].empty()) {
+            model = parts[1];
+            id = parts[1] + L"_" + parts[2];
+        }
+    }
+    for (wchar_t& c : id) {
+        if (!iswalnum(c) && c != L'-') {
+            c = L'_';
+        }
+    }
+    RECT const& r = info.rcMonitor;
+    g.placeMonitor = monitor;
+    g.placeId = id;
+    g.placeName = model + L" " + std::to_wstring(r.right - r.left) + L"\u00D7" +
+                  std::to_wstring(r.bottom - r.top);
+    // A monitor Bloom doesn't list yet is listed, in the middle, so its place
+    // can be set there before it's ever dragged.
+    if (g_prefsChange && !g_places.contains(id)) {
+        g_places[id] = kPlaceMiddle;
+        SavePlace(g);
+    }
+}
+
+// The island's left on the monitor, for its width.
+int PlacedLeft(Island const& g, RECT const& monitor, int width) {
+    auto it = g_places.find(g.placeId);
+    double x = it != g_places.end() ? it->second : kPlaceMiddle;
+    int room = std::max(0, (int)(monitor.right - monitor.left) - width);
+    return monitor.left + (int)std::lround(room * x / kPlaceEnd);
+}
+
+// The place for an island whose left is at `left`.
+void SetPlace(Island const& g, RECT const& monitor, int left) {
+    int width = g.islandRect.right - g.islandRect.left;
+    int room = (int)(monitor.right - monitor.left) - width;
+    g_places[g.placeId] =
+        room > 0 ? std::clamp((double)(left - monitor.left) * kPlaceEnd / room, 0.0,
+                              (double)kPlaceEnd)
+                 : kPlaceMiddle;
 }
 
 // The first of `names` that is installed.
@@ -8233,7 +8565,7 @@ com_ptr<ID2D1SolidColorBrush> Brush(ID2D1DeviceContext* dc,
 
 void DrawFillets(Island& g) {
     for (int i = 0; i < 2; i++) {
-        auto fillet = Fillet(g.d2d.get(), g.filletSize, i == 1);
+        auto fillet = Fillet(g.d2d.get(), g.filletSize, i == 1, g.bottom);
         Paint(g.filletSurfaces[i], [&](ID2D1DeviceContext* dc) {
             dc->FillGeometry(fillet.get(), Brush(dc, IslandFill()).get(), nullptr);
         });
@@ -8504,7 +8836,7 @@ using float2 = winrt::Windows::Foundation::Numerics::float2;
 using float3 = winrt::Windows::Foundation::Numerics::float3;
 
 bool OnIsland(Island const& g, POINT pt) {
-    return InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top);
+    return InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top, g.bottom);
 }
 
 // Keeps the taskbar's region box (the pill pieces with their margins) while
@@ -8518,8 +8850,9 @@ void NotePill(Island& g, RECT const& monitor) {
         box.bottom - box.top >= (window.bottom - window.top) / 2) {
         UINT dpi = GetDpiForWindow(g.taskbar);
         // The window is at the edge once it's out.
-        g.pillBox = {window.left + box.left, monitor.top + box.top,
-                     window.left + box.right, monitor.top + box.bottom};
+        LONG top = g.bottom ? monitor.bottom - (window.bottom - window.top) : monitor.top;
+        g.pillBox = {window.left + box.left, top + box.top, window.left + box.right,
+                     top + box.bottom};
         g.pillRadius = (float)settings::g.pill.cornerRadius * (dpi ? dpi : 96) / 96.0f;
         g.pillSeen = true;
         return;
@@ -8530,7 +8863,8 @@ void NotePill(Island& g, RECT const& monitor) {
     int height = hasWindow ? window.bottom - window.top : (int)(g.shape.height * 2);
     int width = (monitor.right - monitor.left) * 3 / 5;
     int left = monitor.left + (monitor.right - monitor.left - width) / 2;
-    g.pillBox = {left, monitor.top, left + width, monitor.top + height};
+    int top = g.bottom ? monitor.bottom - height : monitor.top;
+    g.pillBox = {left, top, left + width, top + height};
     g.pillRadius = height / 2.0f;
 }
 
@@ -8557,19 +8891,21 @@ struct Pose {
 Pose IslandPose(Island const& g) {
     Shape const& s = g.shape;
     float left = (float)(g.islandRect.left - g.window.left);
+    float top = (float)(g.islandRect.top - g.window.top);
     float body = s.width - 2 * s.flare;
     Pose p;
-    // The top corners round above the window, so the body meets the edge
-    // square.
-    p.offset = {left + s.flare, -s.radius};
+    // The corners at the edge round past the window, so the body meets the
+    // edge square.
+    p.offset = {left + s.flare, g.bottom ? top : top - s.radius};
     p.size = {body, s.height + s.radius};
     p.radius = {s.radius, s.radius};
-    p.fillets[0] = {left, 0, 0};
-    p.fillets[1] = {left + s.flare + body, 0, 0};
+    float fillet = g.bottom ? top + s.height - g.filletSize : top;
+    p.fillets[0] = {left, fillet, 0};
+    p.fillets[1] = {left + s.flare + body, fillet, 0};
     return p;
 }
 
-// The fillets shrink into the pill's top corners.
+// The fillets shrink into the pill's corners at the edge.
 Pose PillPose(Island const& g) {
     RECT r = PillRect(g);
     float left = (float)(r.left - g.window.left);
@@ -8581,8 +8917,9 @@ Pose PillPose(Island const& g) {
     p.offset = {left, top};
     p.size = {width, height};
     p.radius = {radius, radius};
-    p.fillets[0] = {left - g.filletSize, top, 0};
-    p.fillets[1] = {left + width, top, 0};
+    float fillet = g.bottom ? top + height - g.filletSize : top;
+    p.fillets[0] = {left - g.filletSize, fillet, 0};
+    p.fillets[1] = {left + width, fillet, 0};
     return p;
 }
 
@@ -8735,7 +9072,7 @@ void SetRegion(Island& g) {
     HRGN rgn = nullptr;
     if (g.phase == Phase::kExpanding || g.phase == Phase::kCollapsing) {
         rgn = CreateRectRgn(0, 0, width, height);
-    } else if ((rgn = Region(g.shape))) {
+    } else if ((rgn = Region(g.shape, g.bottom))) {
         OffsetRgn(rgn, g.islandRect.left - g.window.left, g.islandRect.top - g.window.top);
         if (g.phase == Phase::kOut && !g.pillSeen) {
             SetRectRgn(rgn, 0, 0, 0, 0);
@@ -8771,9 +9108,10 @@ void Resize(Island& g, Shape const& shape) {
         for (auto& fillet : g.fillets) {
             fillet.Size({f, f});
         }
-        // Each shrinks toward the corner it shares with the body.
-        g.fillets[0].CenterPoint({f, 0, 0});
-        g.fillets[1].CenterPoint({0, 0, 0});
+        // Each shrinks toward the corner it shares with the body at the edge.
+        float edge = g.bottom ? f : 0;
+        g.fillets[0].CenterPoint({f, edge, 0});
+        g.fillets[1].CenterPoint({0, edge, 0});
     }
     g.shape = shape;
 }
@@ -8786,6 +9124,8 @@ bool Layout(Island& g) {
     if (!MonitorRect(g, monitor)) {
         return false;
     }
+    WatchPlaces();
+    NotePlaceMonitor(g, core::MonitorOf(g.taskbar));
     float s = g.dpi / 96.0f;
     float height = std::round(settings::g.island.height * s);
     float pad = std::round(height * (float)theme::kIslandPadding);
@@ -8816,13 +9156,15 @@ bool Layout(Island& g) {
     }
 
     int width = (int)shape.width;
-    int x = monitor.left + (monitor.right - monitor.left - width) / 2;
-    g.islandRect = {x, monitor.top, x + width, monitor.top + (int)shape.height};
+    int x = PlacedLeft(g, monitor, width);
+    int top = g.bottom ? monitor.bottom - (int)shape.height : monitor.top;
+    g.islandRect = {x, top, x + width, top + (int)shape.height};
+    // Past the edge: the row above the top one, the row below the bottom one.
+    int beyond = g.bottom ? monitor.bottom : monitor.top - 1;
     g.sharedEdge = false;
     for (int px : {g.islandRect.left, (g.islandRect.left + g.islandRect.right) / 2,
                    g.islandRect.right - 1}) {
-        g.sharedEdge |= MonitorFromPoint({px, monitor.top - 1}, MONITOR_DEFAULTTONULL) !=
-                        nullptr;
+        g.sharedEdge |= MonitorFromPoint({px, beyond}, MONITOR_DEFAULTTONULL) != nullptr;
     }
     NotePill(g, monitor);
     RECT window;
@@ -8836,7 +9178,8 @@ bool Layout(Island& g) {
         g.root.Size(extent);
         g.bodyVisual.Size(extent);
     }
-    g.content.Offset({(float)(g.islandRect.left - g.window.left), 0, 0});
+    g.content.Offset({(float)(g.islandRect.left - g.window.left),
+                      (float)(g.islandRect.top - g.window.top), 0});
     Place(g);
     SetRegion(g);
     if (c.key != g.drawn) {
@@ -8879,10 +9222,11 @@ void FadeIn(Island& g) {
 }
 
 // Faded while the pointer rests on the island and the taskbar is in, solid
-// again as the pointer leaves or the island starts to grow.
+// again as the pointer leaves or the island starts to grow. Solid too while
+// Ctrl is held or the island is dragged, so it can be seen where it goes.
 void SetHover(Island& g) {
-    bool hover = settings::g.island.hoverTransparency > 0 && g.inside &&
-                 g.phase == Phase::kIdle && autohide::Collapsed(g.taskbar);
+    bool hover = settings::g.island.hoverTransparency > 0 && g.inside && !g.ctrl &&
+                 !g.dragging && g.phase == Phase::kIdle && autohide::Collapsed(g.taskbar);
     if (hover == g.hover) {
         return;
     }
@@ -8911,8 +9255,12 @@ void ClearHover(Island& g) {
 // Idle, right under the taskbar, so the taskbar covers it when it's out. In
 // click mode over it instead: the hidden taskbar's edge strip would take the
 // island's top pixels, and a click there would land on the hidden taskbar.
+// Over it too while Windows keeps the taskbar out of the topmost band (a
+// borderless window maximized to the whole monitor looks fullscreen to it):
+// under the taskbar would then be under that window.
 void StackIdle(Island& g, UINT flags = 0) {
-    HWND after = settings::g.island.clickToReveal ? HWND_TOPMOST : g.taskbar;
+    bool taskbarOnTop = GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST;
+    HWND after = settings::g.island.clickToReveal || !taskbarOnTop ? HWND_TOPMOST : g.taskbar;
     SetWindowPos(g.hwnd, after, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | flags);
 }
@@ -9042,7 +9390,10 @@ void Show(Island& g) {
     SetHover(g);
 }
 
+void EndDrag(Island& g);
+
 void Hide(Island& g) {
+    EndDrag(g);
     g.shown = g.inside = g.reaching = false;
     g.phase = Phase::kIdle;
     g.morph++;  // a running morph's end no longer counts
@@ -9230,10 +9581,15 @@ void OnTaskbarRestacked(HWND hwnd) {
     }
 }
 
+// Ctrl held: the island is being moved, or about to be.
+bool CtrlDown() {
+    return GetAsyncKeyState(VK_CONTROL) & 0x8000;
+}
+
 // While the island shows, only the pointer at the edge over it brings the
-// taskbar out. Under a monitor above the edge is a way through, so a pointer
-// crossing it brings nothing; only touching the island does. In click mode
-// the pointer brings nothing.
+// taskbar out. Past the edge another monitor is a way through, so a pointer
+// crossing it brings nothing; only touching the island does. In click mode,
+// and while Ctrl is held or the island is dragged, the pointer brings nothing.
 bool RevealRange(HWND hwnd, int& left, int& right) {
     Island* p = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!p || !p->shown) {
@@ -9241,16 +9597,17 @@ bool RevealRange(HWND hwnd, int& left, int& right) {
     }
     auto& g = *p;
     left = g.islandRect.left;
-    right = g.sharedEdge || settings::g.island.clickToReveal ? left : g.islandRect.right;
+    bool none = g.sharedEdge || settings::g.island.clickToReveal || g.dragging || CtrlDown();
+    right = none ? left : g.islandRect.right;
     return true;
 }
 
-// In click mode the edge strip of a hidden taskbar brings nothing while its
-// island shows, also as it shrinks back: only a click on the island does.
-// The caller checks the taskbar is hidden.
+// In click mode, or with Ctrl held, the edge strip of a hidden taskbar brings
+// nothing while its island shows, also as it shrinks back: only a click on
+// the island does. The caller checks the taskbar is hidden.
 bool HoldsHover(HWND hwnd) {
-    Island* p = settings::g.island.clickToReveal && OnIslandThread() ? Of(hwnd) : nullptr;
-    return p && p->shown;
+    Island* p = OnIslandThread() ? Of(hwnd) : nullptr;
+    return p && p->shown && (settings::g.island.clickToReveal || p->dragging || CtrlDown());
 }
 
 // As if the pointer touched the screen edge. The tray keeps the taskbar out
@@ -9292,13 +9649,15 @@ bool CoversMonitor(Island const& g, HWND window) {
 }
 
 // A fullscreen app (a game, a video) on the monitor keeps the island away, as
-// it does the taskbar. A window activated on another monitor leaves that as it
-// is, unless the fullscreen app has gone meanwhile.
+// it does the taskbar. A maximized window is no such app, even one without a
+// frame that Windows reports as one for filling the monitor. A window activated
+// on another monitor leaves that as it is, unless the fullscreen app has gone
+// meanwhile.
 void OnActivated(Island& g, HWND window, bool rude) {
     bool here = window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) ==
                               core::MonitorOf(g.taskbar);
     if (here || !window) {
-        g.fullscreenWindow = rude && here ? window : nullptr;
+        g.fullscreenWindow = rude && here && !IsZoomed(window) ? window : nullptr;
     } else if (!CoversMonitor(g, g.fullscreenWindow)) {
         g.fullscreenWindow = nullptr;
     }
@@ -9309,15 +9668,68 @@ void OnActivated(Island& g, HWND window, bool rude) {
     }
 }
 
-// Shown at its monitor's top taskbar while there is something to show;
-// invisible while the taskbar is out.
+// ---- moving along the edge -----------------------------------------------------
+// Ctrl and the left button on the idle island drag it along its edge; the
+// place is saved as it's let go. Ctrl and a right click put it back in the
+// middle.
+
+void StartDrag(Island& g, POINT pt) {
+    g.dragging = true;
+    g.grab = pt.x - g.islandRect.left;
+    SetCapture(g.hwnd);
+    SetHover(g);
+}
+
+void Drag(Island& g, POINT pt) {
+    RECT monitor;
+    if (MonitorRect(g, monitor)) {
+        SetPlace(g, monitor, pt.x - g.grab);
+        core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
+    }
+}
+
+void EndDrag(Island& g) {
+    if (!std::exchange(g.dragging, false)) {
+        return;
+    }
+    if (GetCapture() == g.hwnd) {
+        ReleaseCapture();
+    }
+    if (!g.placeId.empty()) {
+        core::Guard(L"Island place", [&] { SavePlace(g); });
+    }
+    SetHover(g);
+}
+
+void ToMiddle(Island& g) {
+    if (g.placeId.empty()) {
+        return;
+    }
+    g_places[g.placeId] = kPlaceMiddle;
+    core::Guard(L"Island place", [&] { SavePlace(g); });
+    core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
+}
+
+// Shown at its monitor's top or bottom taskbar while there is something to
+// show; invisible while the taskbar is out.
 void Sync(Island& g) {
     if (!g.ready) {
         return;
     }
     RECT monitor;
-    bool want = !core::g_vertical && !g.fullscreen && MonitorRect(g, monitor) &&
-                AtTop(g.taskbar, monitor);
+    bool want = !core::g_vertical && !g.fullscreen && MonitorRect(g, monitor);
+    if (want && AtBottom(g.taskbar, monitor) != g.bottom) {
+        // The taskbar went to the other edge: the island starts there afresh.
+        if (g.shown) {
+            Hide(g);
+        }
+        g.bottom = !g.bottom;
+        g.shape = {};
+        g.filletSize = 0;
+        g.window = {};
+        g.region = {};
+        g.pillSeen = false;
+    }
     if (want) {
         FindClock();
         bool laidOut = false;
@@ -9352,12 +9764,21 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_MOUSEMOVE: {
             // While a morph runs the window is wider than the island.
             POINT pt;
-            bool on = GetCursorPos(&pt) && OnIsland(g, pt);
+            bool got = GetCursorPos(&pt);
+            if (g.dragging) {
+                if (got) {
+                    Drag(g, pt);
+                }
+                return 0;
+            }
+            g.ctrl = wParam & MK_CONTROL;
+            bool on = got && OnIsland(g, pt);
             Island* after = &g;
             if (on && !g.inside) {
                 g.inside = true;
                 Track(g.hwnd);
-                if (!settings::g.island.clickToReveal) {
+                // With Ctrl held it comes to move the island, not the taskbar.
+                if (!settings::g.island.clickToReveal && !g.ctrl) {
                     after = Reach(g);
                 }
             } else if (!on) {
@@ -9375,12 +9796,20 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_LBUTTONDOWN: {
             POINT pt;
             if (g.shown && g.phase == Phase::kIdle && GetCursorPos(&pt) && OnIsland(g, pt)) {
+                if (wParam & MK_CONTROL) {
+                    StartDrag(g, pt);
+                    return 0;
+                }
                 g.pressed = true;
                 SetCapture(g.hwnd);
             }
             return 0;
         }
         case WM_LBUTTONUP: {
+            if (g.dragging) {
+                EndDrag(g);
+                return 0;
+            }
             if (!std::exchange(g.pressed, false)) {
                 return 0;
             }
@@ -9397,7 +9826,18 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case WM_CAPTURECHANGED:
             g.pressed = false;
+            EndDrag(g);
             return 0;
+        case WM_RBUTTONDOWN:
+            return 0;
+        case WM_RBUTTONUP: {
+            POINT pt;
+            if ((wParam & MK_CONTROL) && g.shown && g.phase == Phase::kIdle && !g.dragging &&
+                GetCursorPos(&pt) && OnIsland(g, pt)) {
+                ToMiddle(g);
+            }
+            return 0;
+        }
         case WM_MOUSELEAVE: {
             // Also when the window region goes as the taskbar arrives, with the
             // pointer still on the island.
@@ -9736,6 +10176,7 @@ void Restore() {
     g_clockText = nullptr;
     g_clock.clear();
     UnregisterClass(kClassName, Module());
+    UnwatchPlaces();
 }
 
 // Windhawk thread, at unload: the windows go on their own thread even if the
@@ -10395,8 +10836,8 @@ float SegmentDistance(float x, float y, float ex, float ey) {
 }
 
 // The loose folder's icon, drawn as the folder icon sets are: a squircle tile with a
-// diagonal gradient and one flat glyph, here a clock at three. Light or dark tile, as
-// the sets come in both.
+// diagonal gradient and one flat glyph, here a clock at three. The silver (`light`) or
+// the graphite tile, as the sets come in both.
 Pixels ClockIcon(bool light) {
     constexpr float kCenter = kIconCanvas / 2.f;
     constexpr float kTile = 102, kTileCurve = 5.9f;  // the sets' tile: 204 of 256, n = 5.9
@@ -10634,13 +11075,19 @@ bool RepinFolder(IPinManagerInterop3* manager, const std::wstring& pinnedFolder,
     return false;
 }
 
+// The taskbar reads a shortcut's icon again only when told the file changed, and a
+// notice left queued may never go out: send it now.
+void NotifyUpdated(const std::wstring& path) {
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path.c_str(), nullptr);
+}
+
 // A folder pin whose shortcut file went missing shows a blank icon and takes no new one;
 // the folder's own copy in .pins puts it back.
 void RestorePinLink(const Pin& pin, const std::wstring& folder) {
     std::wstring pinned = PathFromPidl(pin.pidl.get());
     if (pinned.empty() || GetFileAttributesW(pinned.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     bool ok = CopyFileW(PinLnkPath(folder).c_str(), pinned.c_str(), TRUE);
-    if (ok) SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, pinned.c_str(), nullptr);
+    if (ok) SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, pinned.c_str(), nullptr);
     Wh_Log(L"pin shortcut of %s restored: %d", folder.c_str(), ok);
 }
 
@@ -10654,7 +11101,7 @@ bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
     ComPtr<IShellLinkW> link = pinned.empty() ? nullptr : LoadShellLink(pinned);
     bool ok = link && SUCCEEDED(link->SetIconLocation(icon.path.c_str(), icon.index)) &&
               SaveShellLink(link, pinned) && WritePinLnk(folder, icon);
-    if (ok) SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, pinned.c_str(), nullptr);
+    if (ok) NotifyUpdated(pinned);
     Wh_Log(L"icon of %s: %d", folder.c_str(), ok);
     if (ok) bloom_link::Nudge();
     return ok;
@@ -11530,9 +11977,38 @@ void RegroupLoose(bool all) {
     Reannounce(moving);
 }
 
-// The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one.
+// The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one:
+// the silver tile stands out on a dark taskbar, the graphite one on a light taskbar.
 bool LightTaskbar() {
     return !settings::Dark();
+}
+
+// An icon in two looks is a pair of files, `<name>.dark.ico` for a dark taskbar beside
+// `<name>.light.ico` for a light one. Of the pair `path` belongs to, the file `light`
+// asks for; empty when `path` is no such pair or that file is gone.
+std::wstring ThemedTwin(const std::wstring& path, bool light) {
+    auto endsWith = [&](std::wstring_view end) {
+        return path.size() > end.size() &&
+               _wcsicmp(path.c_str() + path.size() - end.size(), end.data()) == 0;
+    };
+    constexpr std::wstring_view kDark = L".dark.ico", kLight = L".light.ico";
+    size_t cut = endsWith(kDark) ? kDark.size() : endsWith(kLight) ? kLight.size() : 0;
+    if (!cut) return {};
+    std::wstring twin = path.substr(0, path.size() - cut) + std::wstring(light ? kLight : kDark);
+    return GetFileAttributesW(twin.c_str()) != INVALID_FILE_ATTRIBUTES ? twin : L"";
+}
+
+// Pinned folders whose icon is such a pair take the look of the taskbar's theme.
+void RethemeIcons() {
+    bool light = LightTaskbar();
+    for (const Pin& pin : ReadPins()) {
+        std::wstring folder = FolderOfPin(pin);
+        if (folder.empty() || g_unloading) continue;
+        IconLocation now = PinIcon(folder);
+        std::wstring want = ThemedTwin(now.path, light);
+        if (!want.empty() && _wcsicmp(want.c_str(), now.path.c_str()) != 0)
+            SetFolderIcon(folder, {want});
+    }
 }
 
 // Deletes the files in `dir` (the loose folder's own) except `keep`, and `dir` with them
@@ -11570,14 +12046,15 @@ void PrepareLoose() {
     std::vector<std::wstring> keep;
     if (on && !dir.empty() && !g_unloading) {
         bool light = LightTaskbar();
-        // "-1": the drawing's version; a new drawing needs a new name past the icon cache.
-        std::wstring icon = dir + L"\\clock-" + (light ? L"light" : L"dark") + L"-1.ico";
+        // "-2": the drawing's version; a new drawing needs a new name past the icon cache.
+        std::wstring icon = dir + L"\\clock-" + (light ? L"light" : L"dark") + L"-2.ico";
         std::wstring lnk = dir + L"\\" + name + L".lnk";
         std::wstring appId = kLooseAppId + HashHex(name + (light ? L"\nlight" : L"\ndark"));
         CreateDirectoryW(dir.c_str(), nullptr);
         bool ok = (GetFileAttributesW(icon.c_str()) != INVALID_FILE_ATTRIBUTES ||
-                   WriteFileBytes(icon, EncodeIco(ClockIcon(light), kIconCanvas))) &&
+                   WriteFileBytes(icon, EncodeIco(ClockIcon(!light), kIconCanvas))) &&
                   WriteExplorerLnk(lnk, L"", {icon}, appId);
+        if (ok) NotifyUpdated(lnk);  // the same file now names the other tile
         if (Pidl shortcut = ok ? PidlFromPath(lnk) : nullptr) {
             folder = {appId, {shortcut.release(), PidlFree{}}};
             keep = {icon, lnk};
@@ -15185,6 +15662,7 @@ void BeginStart(bool afterUpdate) {
         RebuildMembers();
         Regroup(MemberKeys());
         UpdateLoose();
+        RethemeIcons();
     });
 }
 
@@ -15206,6 +15684,7 @@ void SettingsChanged() {
     StartJob([] {
         RebuildMembers();
         UpdateLoose();
+        RethemeIcons();
     });
 }
 
@@ -15899,7 +16378,7 @@ void WriteState() {
 // ---- commands (folder jobs) ---------------------------------------------------
 
 struct Command {
-    std::wstring id, cmd, folder, name, kind, path, app, item;
+    std::wstring id, cmd, folder, name, kind, path, dark, light, app, item;
     int index = 0;
     std::vector<std::wstring> apps, names;
     bool badArgs = false;  // a field of the wrong type or size, or no JSON object at all
@@ -16006,15 +16485,17 @@ PCWSTR Rename(const std::wstring& folder, const Command& c) {
     return folders::RenameFolderTo(folder, c.name).empty() ? kFailed : nullptr;
 }
 
-// An .ico Bloom made goes to .pins\.icons under a name of its contents, so a new
-// picture is a new file the taskbar loads afresh.
-std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
-    std::string bytes;
-    if (ReadSmallFile(path, kMaxIconBytes, &bytes) != Got::kOk || bytes.size() < 6 ||
-        bytes.compare(0, 4, std::string("\0\0\1\0", 4)) != 0)
-        return {};
+bool ReadIco(const std::wstring& path, std::string* bytes) {
+    return ReadSmallFile(path, kMaxIconBytes, bytes) == Got::kOk && bytes->size() >= 6 &&
+           bytes->compare(0, 4, std::string("\0\0\1\0", 4)) == 0;
+}
+
+// An .ico Bloom made goes to .pins\.icons as `<folder>.<key><end>`, the key a hash of
+// its contents, so a new picture is a new file the taskbar loads afresh.
+std::wstring KeepIcon(const std::wstring& folder, const std::wstring& key, PCWSTR end,
+                      const std::string& bytes) {
     std::wstring dir = folders::PinsDir() + L"\\" + kIconsDir;
-    std::wstring copy = dir + L"\\" + folders::FolderName(folder) + L"." + HashBytes(bytes) + L".ico";
+    std::wstring copy = dir + L"\\" + folders::FolderName(folder) + L"." + key + end;
     CreateDirectoryW(dir.c_str(), nullptr);
     if (GetFileAttributesW(copy.c_str()) == INVALID_FILE_ATTRIBUTES &&
         !folders::WriteFileBytes(copy, {bytes.begin(), bytes.end()}))
@@ -16022,7 +16503,32 @@ std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
     return copy;
 }
 
+std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
+    std::string bytes;
+    return ReadIco(path, &bytes) ? KeepIcon(folder, HashBytes(bytes), L".ico", bytes) : L"";
+}
+
+// Two .ico files, one for a dark taskbar and one for a light one, kept as a pair whose
+// file follows the taskbar's theme (folders::RethemeIcons).
+PCWSTR ThemedIcon(const std::wstring& folder, const Command& c) {
+    for (const std::wstring* path : {&c.dark, &c.light}) {
+        if (path->empty() || PathIsRelativeW(path->c_str())) return kBadArgs;
+        if (GetFileAttributesW(path->c_str()) == INVALID_FILE_ATTRIBUTES) return kNotFound;
+    }
+    std::string dark, light;
+    if (!ReadIco(c.dark, &dark) || !ReadIco(c.light, &light)) return kBadArgs;
+    std::wstring key = HashBytes(dark + light);
+    std::wstring darkCopy = KeepIcon(folder, key, L".dark.ico", dark);
+    std::wstring lightCopy = KeepIcon(folder, key, L".light.ico", light);
+    if (darkCopy.empty() || lightCopy.empty() ||
+        !folders::SetFolderIcon(folder, {folders::LightTaskbar() ? lightCopy : darkCopy}))
+        return kFailed;
+    folders::DeletePreviewIcons(folder, L"");
+    return nullptr;
+}
+
 PCWSTR Icon(const std::wstring& folder, const Command& c) {
+    if (c.kind == L"themed") return ThemedIcon(folder, c);
     if (c.kind == L"auto") {
         folders::IconLocation preview{folders::MakePreviewIcon(folder)};
         if (preview.path.empty()) return kFailed;
@@ -16103,12 +16609,16 @@ PCWSTR Delete(const std::wstring& folder) {
     return folders::FindFolderPin(folders::ReadPins(), folder) < 0 ? nullptr : kFailed;
 }
 
-// Icon files Bloom handed over stay while a folder's pin shortcut points at them.
+// Icon files Bloom handed over stay while a folder's pin shortcut points at them, the
+// other file of a pair with them.
 void PruneIcons() {
     std::wstring root = folders::Root(), dir = folders::PinsDir() + L"\\" + kIconsDir;
     std::vector<std::wstring> keep;
-    for (const folders::Entry& entry : folders::ListEntries(root))
-        if (entry.isDir) keep.push_back(folders::PinIcon(root + L"\\" + entry.name).path);
+    for (const folders::Entry& entry : folders::ListEntries(root)) {
+        if (!entry.isDir) continue;
+        std::wstring icon = folders::PinIcon(root + L"\\" + entry.name).path;
+        keep.insert(keep.end(), {icon, folders::ThemedTwin(icon, true), folders::ThemedTwin(icon, false)});
+    }
     WIN32_FIND_DATAW fd;
     HANDLE find = FindFirstFileW((dir + L"\\*.ico").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) return;
@@ -16188,7 +16698,8 @@ bool ParseCommand(const std::wstring& text, Command* c) {
     };
     const std::pair<PCWSTR, std::wstring*> texts[] = {
         {L"folder", &c->folder}, {L"name", &c->name}, {L"kind", &c->kind},
-        {L"path", &c->path},     {L"app", &c->app},   {L"item", &c->item}};
+        {L"path", &c->path},     {L"dark", &c->dark}, {L"light", &c->light},
+        {L"app", &c->app},       {L"item", &c->item}};
     for (auto [key, out] : texts)
         if (auto v = value(key)) readText(v, out);
     const std::tuple<PCWSTR, std::vector<std::wstring>*, size_t> lists[] = {
