@@ -4360,6 +4360,29 @@ bool IsPointerReason(int reason) {
     return reason == kReasonPointerOver || reason == kReasonScreenEdge;
 }
 
+// A program's window that sits over a hidden taskbar's edge or its island
+// (Bloom's screen-recording bar grows out of them) asks with this window
+// property, on its top-level window, that the pointer on it doesn't bring the
+// taskbar out over it. The ask ends with the window or the property.
+constexpr wchar_t kHoldRevealProp[] = L"PillTaskbar.HoldReveal";
+
+bool PointerOnHolder() {
+    POINT pt;
+    if (!GetCursorPos(&pt)) {
+        return false;
+    }
+    HWND h = WindowFromPoint(pt);
+    h = h ? GetAncestor(h, GA_ROOT) : nullptr;
+    return h && GetPropW(h, kHoldRevealProp);
+}
+
+// A pointer request to bring a hidden taskbar out while the pointer is on such
+// a window: dropped.
+bool HeldByWindow(void* coordinator, HWND hwnd, int reason) {
+    return IsPointerReason(reason) && ViewCoordinator_IsExpanded_Original &&
+           !ViewCoordinator_IsExpanded_Original(coordinator, hwnd) && PointerOnHolder();
+}
+
 // True if the pointer asking to show the taskbar is beside the reveal zone:
 // the island while it shows, else the set part of the edge.
 bool OutsideZone(HWND hwnd, int reason) {
@@ -4495,7 +4518,10 @@ void WINAPI ViewCoordinator_UpdateIsExpanded_Hook(void* pThis,
                                                   HWND hwnd,
                                                   int reason) {
     bool handled = false;
-    if (IsPointerReason(reason) && Ready()) {
+    if (Active()) {
+        core::Guard(L"Expand hold", [&] { handled = HeldByWindow(pThis, hwnd, reason); });
+    }
+    if (!handled && IsPointerReason(reason) && Ready()) {
         core::Guard(L"Expand request",
                     [&] { handled = Decide(pThis, hwnd, reason); });
     }
@@ -4511,7 +4537,10 @@ void WINAPI ViewCoordinator_UpdateIsExpandedAfterHoverDelay_Hook(
     bool isPointerOver,
     int reason) {
     bool handled = false;
-    if (IsPointerReason(reason) && Ready()) {
+    if (Active()) {
+        core::Guard(L"Hover hold", [&] { handled = HeldByWindow(pThis, hwnd, reason); });
+    }
+    if (!handled && IsPointerReason(reason) && Ready()) {
         core::Guard(L"Hover request",
                     [&] { handled = Decide(pThis, hwnd, reason); });
     }
@@ -4906,6 +4935,9 @@ HWND TrayTaskbar(int tray, void* pThis) {
 // Only while the island can ask the tray itself (a secondary tray found is
 // one it can ask), so the taskbar can't end up with no way out.
 bool HeldHover(int tray, void* pThis, int request) {
+    if (request == kUnhideHover && PointerOnHolder()) {
+        return true;  // a window that asks to hold is under the pointer
+    }
     if (request != kUnhideHover || !g_holdsHover ||
         ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000)) {
         return false;
