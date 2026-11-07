@@ -8068,6 +8068,7 @@ struct Island {
     bool dropTarget = false;  // its window is registered for drags
     bool fullscreen = false;  // a fullscreen app is active on the monitor
     HWND fullscreenWindow = nullptr;
+    bool liftedTaskbar = false;  // made topmost to come out over a fullscreen window
     bool unreachable = false;  // logged that the taskbar can't be asked yet
     bool bottom = false;       // at the bottom edge, under a bottom taskbar
     bool sharedEdge = false;   // another monitor is past the island's edge
@@ -9278,6 +9279,8 @@ void Raise(Island& g) {
 
 // ---- morph ----------------------------------------------------------------------
 
+void SinkLiftedTaskbar(Island& g);
+
 void OnMorphed(int id, int morph) {
     Island* p = FindIf([&](Island const& g) { return g.id == id; });
     if (!p || p->morph != morph) {
@@ -9300,8 +9303,25 @@ void OnMorphed(int id, int morph) {
         Sync(g);
     } else if (g.phase == Phase::kCollapsing) {
         g.phase = Phase::kIdle;
+        SinkLiftedTaskbar(g);
         Sync(g);
         SetHover(g);
+    }
+}
+
+// The taskbar StartExpand lifted over a fullscreen window, in again: out of the
+// topmost band and right under the window in front, where the shell had it, so
+// the edge strip it leaves on the screen doesn't line that window.
+void SinkLiftedTaskbar(Island& g) {
+    if (!std::exchange(g.liftedTaskbar, false)) {
+        return;
+    }
+    constexpr UINT kFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    SetWindowPos(g.taskbar, HWND_NOTOPMOST, 0, 0, 0, 0, kFlags);
+    HWND front = GetForegroundWindow();
+    if (front && front != g.taskbar && front != g.hwnd &&
+        !(GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(g.taskbar, front, 0, 0, 0, 0, kFlags);
     }
 }
 
@@ -9345,9 +9365,13 @@ void StartExpand(Island& g) {
     Raise(g);
     // Out of the topmost band (a window fills the monitor, see StackIdle) the
     // taskbar would come out under that window: it goes over it, as the
-    // island shows it coming.
+    // island shows it coming. Into the topmost band, not just to the top: a
+    // browser in F11 marks its window fullscreen with the shell, which then
+    // keeps the taskbar under it, so the taskbar came out unseen behind it.
+    // Back under the window in front as it goes in (SinkLiftedTaskbar).
     if (!(GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-        SetWindowPos(g.taskbar, HWND_TOP, 0, 0, 0, 0,
+        g.liftedTaskbar = true;
+        SetWindowPos(g.taskbar, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
     SetRegion(g);
@@ -9681,6 +9705,15 @@ bool CoversMonitor(Island const& g, HWND window) {
 // frame that Windows reports as one for filling the monitor. A window activated
 // on another monitor leaves that as it is, unless the fullscreen app has gone
 // meanwhile.
+// A browser's window (Chromium's, which Edge and Electron apps share, or
+// Firefox's): in F11 or a fullscreen video it fills the monitor as a game does,
+// but the island stays and brings the taskbar out over it (StartExpand).
+bool IsBrowserWindow(HWND window) {
+    WCHAR name[64];
+    return GetClassNameW(window, name, ARRAYSIZE(name)) &&
+           (wcscmp(name, L"Chrome_WidgetWin_1") == 0 || wcscmp(name, L"MozillaWindowClass") == 0);
+}
+
 void SetFullscreen(Island& g, HWND window) {
     g.fullscreenWindow = window;
     bool fullscreen = window != nullptr;
@@ -9694,7 +9727,7 @@ void OnActivated(Island& g, HWND window, bool rude) {
     bool here = window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) ==
                               core::MonitorOf(g.taskbar);
     if (here || !window) {
-        SetFullscreen(g, rude && here && !IsZoomed(window) ? window : nullptr);
+        SetFullscreen(g, rude && here && !IsZoomed(window) && !IsBrowserWindow(window) ? window : nullptr);
     } else if (!CoversMonitor(g, g.fullscreenWindow)) {
         SetFullscreen(g, nullptr);
     }
@@ -9718,7 +9751,7 @@ void RecheckFullscreen(Island& g) {
     HWND front = GetForegroundWindow();
     if (!front || front == g.hwnd || front == g.taskbar ||
         MonitorFromWindow(front, MONITOR_DEFAULTTONULL) != core::MonitorOf(g.taskbar) ||
-        !CoversMonitor(g, front)) {
+        !CoversMonitor(g, front) || IsBrowserWindow(front)) {
         return;
     }
     QUERY_USER_NOTIFICATION_STATE state{};
