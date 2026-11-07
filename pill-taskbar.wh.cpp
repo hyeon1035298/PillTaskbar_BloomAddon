@@ -4805,8 +4805,14 @@ void ReleaseHeld() {
         return;
     }
     core::DiagLine(L"Bloom release %p", hwnd);
-    if (IsWindow(hwnd) && !core::IsSecondary(hwnd) && !Collapsed(hwnd)) {
-        ResumeAutoHide(hwnd);
+    if (IsWindow(hwnd) && !Collapsed(hwnd)) {
+        if (!core::IsSecondary(hwnd)) {
+            ResumeAutoHide(hwnd);
+        }
+        // The launcher is gone: the hide check (a secondary's under the same
+        // id, see DropsTimer) looks now rather than a tick later, so the
+        // taskbar goes in (and the island back) as it closes.
+        PostMessage(hwnd, WM_TIMER, kTrayHideTimer, 0);
     }
 }
 
