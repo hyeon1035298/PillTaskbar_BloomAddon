@@ -10332,13 +10332,19 @@ bool RepinFolder(IPinManagerInterop3* manager, const std::wstring& pinnedFolder,
     return false;
 }
 
+// The taskbar reads a shortcut's icon again only when told the file changed, and a
+// notice left queued may never go out: send it now.
+void NotifyUpdated(const std::wstring& path) {
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path.c_str(), nullptr);
+}
+
 // A folder pin whose shortcut file went missing shows a blank icon and takes no new one;
 // the folder's own copy in .pins puts it back.
 void RestorePinLink(const Pin& pin, const std::wstring& folder) {
     std::wstring pinned = PathFromPidl(pin.pidl.get());
     if (pinned.empty() || GetFileAttributesW(pinned.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     bool ok = CopyFileW(PinLnkPath(folder).c_str(), pinned.c_str(), TRUE);
-    if (ok) SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, pinned.c_str(), nullptr);
+    if (ok) SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, pinned.c_str(), nullptr);
     Wh_Log(L"pin shortcut of %s restored: %d", folder.c_str(), ok);
 }
 
@@ -10352,7 +10358,7 @@ bool SetFolderIcon(const std::wstring& folder, const IconLocation& icon) {
     ComPtr<IShellLinkW> link = pinned.empty() ? nullptr : LoadShellLink(pinned);
     bool ok = link && SUCCEEDED(link->SetIconLocation(icon.path.c_str(), icon.index)) &&
               SaveShellLink(link, pinned) && WritePinLnk(folder, icon);
-    if (ok) SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, pinned.c_str(), nullptr);
+    if (ok) NotifyUpdated(pinned);
     Wh_Log(L"icon of %s: %d", folder.c_str(), ok);
     if (ok) bloom_link::Nudge();
     return ok;
@@ -11305,6 +11311,7 @@ void PrepareLoose() {
         bool ok = (GetFileAttributesW(icon.c_str()) != INVALID_FILE_ATTRIBUTES ||
                    WriteFileBytes(icon, EncodeIco(ClockIcon(!light), kIconCanvas))) &&
                   WriteExplorerLnk(lnk, L"", {icon}, appId);
+        if (ok) NotifyUpdated(lnk);  // the same file now names the other tile
         if (Pidl shortcut = ok ? PidlFromPath(lnk) : nullptr) {
             folder = {appId, {shortcut.release(), PidlFree{}}};
             keep = {icon, lnk};
