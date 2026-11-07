@@ -10093,8 +10093,8 @@ float SegmentDistance(float x, float y, float ex, float ey) {
 }
 
 // The loose folder's icon, drawn as the folder icon sets are: a squircle tile with a
-// diagonal gradient and one flat glyph, here a clock at three. Light or dark tile, as
-// the sets come in both.
+// diagonal gradient and one flat glyph, here a clock at three. The silver (`light`) or
+// the graphite tile, as the sets come in both.
 Pixels ClockIcon(bool light) {
     constexpr float kCenter = kIconCanvas / 2.f;
     constexpr float kTile = 102, kTileCurve = 5.9f;  // the sets' tile: 204 of 256, n = 5.9
@@ -11228,9 +11228,38 @@ void RegroupLoose(bool all) {
     Reannounce(moving);
 }
 
-// The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one.
+// The taskbar's theme picks the tile, as the folder icon sets have a light and a dark one:
+// the silver tile stands out on a dark taskbar, the graphite one on a light taskbar.
 bool LightTaskbar() {
     return !settings::Dark();
+}
+
+// An icon in two looks is a pair of files, `<name>.dark.ico` for a dark taskbar beside
+// `<name>.light.ico` for a light one. Of the pair `path` belongs to, the file `light`
+// asks for; empty when `path` is no such pair or that file is gone.
+std::wstring ThemedTwin(const std::wstring& path, bool light) {
+    auto endsWith = [&](std::wstring_view end) {
+        return path.size() > end.size() &&
+               _wcsicmp(path.c_str() + path.size() - end.size(), end.data()) == 0;
+    };
+    constexpr std::wstring_view kDark = L".dark.ico", kLight = L".light.ico";
+    size_t cut = endsWith(kDark) ? kDark.size() : endsWith(kLight) ? kLight.size() : 0;
+    if (!cut) return {};
+    std::wstring twin = path.substr(0, path.size() - cut) + std::wstring(light ? kLight : kDark);
+    return GetFileAttributesW(twin.c_str()) != INVALID_FILE_ATTRIBUTES ? twin : L"";
+}
+
+// Pinned folders whose icon is such a pair take the look of the taskbar's theme.
+void RethemeIcons() {
+    bool light = LightTaskbar();
+    for (const Pin& pin : ReadPins()) {
+        std::wstring folder = FolderOfPin(pin);
+        if (folder.empty() || g_unloading) continue;
+        IconLocation now = PinIcon(folder);
+        std::wstring want = ThemedTwin(now.path, light);
+        if (!want.empty() && _wcsicmp(want.c_str(), now.path.c_str()) != 0)
+            SetFolderIcon(folder, {want});
+    }
 }
 
 // Deletes the files in `dir` (the loose folder's own) except `keep`, and `dir` with them
@@ -11268,13 +11297,13 @@ void PrepareLoose() {
     std::vector<std::wstring> keep;
     if (on && !dir.empty() && !g_unloading) {
         bool light = LightTaskbar();
-        // "-1": the drawing's version; a new drawing needs a new name past the icon cache.
-        std::wstring icon = dir + L"\\clock-" + (light ? L"light" : L"dark") + L"-1.ico";
+        // "-2": the drawing's version; a new drawing needs a new name past the icon cache.
+        std::wstring icon = dir + L"\\clock-" + (light ? L"light" : L"dark") + L"-2.ico";
         std::wstring lnk = dir + L"\\" + name + L".lnk";
         std::wstring appId = kLooseAppId + HashHex(name + (light ? L"\nlight" : L"\ndark"));
         CreateDirectoryW(dir.c_str(), nullptr);
         bool ok = (GetFileAttributesW(icon.c_str()) != INVALID_FILE_ATTRIBUTES ||
-                   WriteFileBytes(icon, EncodeIco(ClockIcon(light), kIconCanvas))) &&
+                   WriteFileBytes(icon, EncodeIco(ClockIcon(!light), kIconCanvas))) &&
                   WriteExplorerLnk(lnk, L"", {icon}, appId);
         if (Pidl shortcut = ok ? PidlFromPath(lnk) : nullptr) {
             folder = {appId, {shortcut.release(), PidlFree{}}};
@@ -14858,6 +14887,7 @@ void BeginStart(bool afterUpdate) {
         RebuildMembers();
         Regroup(MemberKeys());
         UpdateLoose();
+        RethemeIcons();
     });
 }
 
@@ -14879,6 +14909,7 @@ void SettingsChanged() {
     StartJob([] {
         RebuildMembers();
         UpdateLoose();
+        RethemeIcons();
     });
 }
 
@@ -15569,7 +15600,7 @@ void WriteState() {
 // ---- commands (folder jobs) ---------------------------------------------------
 
 struct Command {
-    std::wstring id, cmd, folder, name, kind, path, app, item;
+    std::wstring id, cmd, folder, name, kind, path, dark, light, app, item;
     int index = 0;
     std::vector<std::wstring> apps, names;
     bool badArgs = false;  // a field of the wrong type or size, or no JSON object at all
@@ -15676,15 +15707,17 @@ PCWSTR Rename(const std::wstring& folder, const Command& c) {
     return folders::RenameFolderTo(folder, c.name).empty() ? kFailed : nullptr;
 }
 
-// An .ico Bloom made goes to .pins\.icons under a name of its contents, so a new
-// picture is a new file the taskbar loads afresh.
-std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
-    std::string bytes;
-    if (ReadSmallFile(path, kMaxIconBytes, &bytes) != Got::kOk || bytes.size() < 6 ||
-        bytes.compare(0, 4, std::string("\0\0\1\0", 4)) != 0)
-        return {};
+bool ReadIco(const std::wstring& path, std::string* bytes) {
+    return ReadSmallFile(path, kMaxIconBytes, bytes) == Got::kOk && bytes->size() >= 6 &&
+           bytes->compare(0, 4, std::string("\0\0\1\0", 4)) == 0;
+}
+
+// An .ico Bloom made goes to .pins\.icons as `<folder>.<key><end>`, the key a hash of
+// its contents, so a new picture is a new file the taskbar loads afresh.
+std::wstring KeepIcon(const std::wstring& folder, const std::wstring& key, PCWSTR end,
+                      const std::string& bytes) {
     std::wstring dir = folders::PinsDir() + L"\\" + kIconsDir;
-    std::wstring copy = dir + L"\\" + folders::FolderName(folder) + L"." + HashBytes(bytes) + L".ico";
+    std::wstring copy = dir + L"\\" + folders::FolderName(folder) + L"." + key + end;
     CreateDirectoryW(dir.c_str(), nullptr);
     if (GetFileAttributesW(copy.c_str()) == INVALID_FILE_ATTRIBUTES &&
         !folders::WriteFileBytes(copy, {bytes.begin(), bytes.end()}))
@@ -15692,7 +15725,32 @@ std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
     return copy;
 }
 
+std::wstring CopyIcon(const std::wstring& folder, const std::wstring& path) {
+    std::string bytes;
+    return ReadIco(path, &bytes) ? KeepIcon(folder, HashBytes(bytes), L".ico", bytes) : L"";
+}
+
+// Two .ico files, one for a dark taskbar and one for a light one, kept as a pair whose
+// file follows the taskbar's theme (folders::RethemeIcons).
+PCWSTR ThemedIcon(const std::wstring& folder, const Command& c) {
+    for (const std::wstring* path : {&c.dark, &c.light}) {
+        if (path->empty() || PathIsRelativeW(path->c_str())) return kBadArgs;
+        if (GetFileAttributesW(path->c_str()) == INVALID_FILE_ATTRIBUTES) return kNotFound;
+    }
+    std::string dark, light;
+    if (!ReadIco(c.dark, &dark) || !ReadIco(c.light, &light)) return kBadArgs;
+    std::wstring key = HashBytes(dark + light);
+    std::wstring darkCopy = KeepIcon(folder, key, L".dark.ico", dark);
+    std::wstring lightCopy = KeepIcon(folder, key, L".light.ico", light);
+    if (darkCopy.empty() || lightCopy.empty() ||
+        !folders::SetFolderIcon(folder, {folders::LightTaskbar() ? lightCopy : darkCopy}))
+        return kFailed;
+    folders::DeletePreviewIcons(folder, L"");
+    return nullptr;
+}
+
 PCWSTR Icon(const std::wstring& folder, const Command& c) {
+    if (c.kind == L"themed") return ThemedIcon(folder, c);
     if (c.kind == L"auto") {
         folders::IconLocation preview{folders::MakePreviewIcon(folder)};
         if (preview.path.empty()) return kFailed;
@@ -15773,12 +15831,16 @@ PCWSTR Delete(const std::wstring& folder) {
     return folders::FindFolderPin(folders::ReadPins(), folder) < 0 ? nullptr : kFailed;
 }
 
-// Icon files Bloom handed over stay while a folder's pin shortcut points at them.
+// Icon files Bloom handed over stay while a folder's pin shortcut points at them, the
+// other file of a pair with them.
 void PruneIcons() {
     std::wstring root = folders::Root(), dir = folders::PinsDir() + L"\\" + kIconsDir;
     std::vector<std::wstring> keep;
-    for (const folders::Entry& entry : folders::ListEntries(root))
-        if (entry.isDir) keep.push_back(folders::PinIcon(root + L"\\" + entry.name).path);
+    for (const folders::Entry& entry : folders::ListEntries(root)) {
+        if (!entry.isDir) continue;
+        std::wstring icon = folders::PinIcon(root + L"\\" + entry.name).path;
+        keep.insert(keep.end(), {icon, folders::ThemedTwin(icon, true), folders::ThemedTwin(icon, false)});
+    }
     WIN32_FIND_DATAW fd;
     HANDLE find = FindFirstFileW((dir + L"\\*.ico").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) return;
@@ -15858,7 +15920,8 @@ bool ParseCommand(const std::wstring& text, Command* c) {
     };
     const std::pair<PCWSTR, std::wstring*> texts[] = {
         {L"folder", &c->folder}, {L"name", &c->name}, {L"kind", &c->kind},
-        {L"path", &c->path},     {L"app", &c->app},   {L"item", &c->item}};
+        {L"path", &c->path},     {L"dark", &c->dark}, {L"light", &c->light},
+        {L"app", &c->app},       {L"item", &c->item}};
     for (auto [key, out] : texts)
         if (auto v = value(key)) readText(v, out);
     const std::tuple<PCWSTR, std::vector<std::wstring>*, size_t> lists[] = {

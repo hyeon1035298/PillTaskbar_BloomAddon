@@ -219,6 +219,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 | `rename` | `folder`, `name` | `RenameFolderTo` |
 | `icon` | `folder`, `kind: "auto"` | 미리보기 아이콘 다시 만들기 |
 | `icon` | `folder`, `kind: "file"`, `path`, `index` | `.pins\.icons\<폴더>.<hash>.ico`로 복사(`.ico`가 아니면 그대로 경로)하고 `SetFolderIcon` |
+| `icon` | `folder`, `kind: "themed"`, `dark`, `light`(`.ico` 경로 둘: 어두운 작업표시줄용, 밝은 작업표시줄용) | `.pins\.icons\<폴더>.<hash>.dark.ico`·`.light.ico`로 복사하고 지금 테마 쪽을 `SetFolderIcon`. 설정이 바뀔 때와 시작할 때 `<이름>.dark.ico`·`<이름>.light.ico` 쌍인 폴더 아이콘은 테마 쪽 파일로 바뀜(`RethemeIcons`) |
 | `add` | `folder`, `app`(바로 가기 경로) | 바로 가기 복사, 순서 끝, 그 앱이 고정돼 있었으면 고정 풀기 |
 | `takeOut` | `folder`, `item`(파일 이름) | `TakeOut`(폴더 옆에 고정) |
 | `order` | `folder`, `names[]`(파일 이름) | `.order` 쓰기 |
