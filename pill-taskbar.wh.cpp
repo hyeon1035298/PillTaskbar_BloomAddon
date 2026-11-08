@@ -18169,8 +18169,19 @@ void AgentsIn(std::wstring const& dir, int depth, std::vector<Found>& out) {
     }
 }
 
+// Subagents of the last hour per session, by its log's id in lower case, all of
+// them: only the newest kAgentsPerSession are read, so a swarm's list says how
+// many more there are. Under g_lock.
+[[clang::no_destroy]] std::unordered_map<std::wstring, size_t> g_agentTotals;
+
+std::wstring Lower(std::wstring text) {
+    for (auto& c : text) c = towlower(c);
+    return text;
+}
+
 std::vector<Found> FindClaude(int64_t now) {
     std::vector<Found> found;
+    g_agentTotals.clear();
     for (auto const& root : ClaudeRoots()) {
         for (auto const& project : Dirs(root)) {
             FilesIn(Source::kClaude, project, L"*.jsonl", found, [](std::wstring_view name) {
@@ -18185,6 +18196,10 @@ std::vector<Found> FindClaude(int64_t now) {
         std::vector<Found> own;
         AgentsIn(f.path.substr(0, f.path.size() - 6) + L"\\subagents", 2, own);
         std::erase_if(own, [&](Found const& a) { return now - a.written > kAgentSeconds; });
+        if (!own.empty()) {
+            size_t name = f.path.find_last_of(L'\\') + 1;
+            g_agentTotals[Lower(f.path.substr(name, f.path.size() - 6 - name))] = own.size();
+        }
         std::ranges::sort(own, std::greater{}, &Found::written);
         if (own.size() > kAgentsPerSession) {
             own.resize(kAgentsPerSession);
@@ -18328,7 +18343,10 @@ struct Row {
     std::wstring sessionId, projectPath;  // for its details
     bool subagent = false;
     std::wstring agentId, role, parentId;
-    std::vector<Row> agents;  // a session's subagents, live first
+    std::vector<Row> agents;    // a session's subagents, live first
+    std::vector<Row> children;  // sessions it started (the desktop app's side sessions)
+    size_t agentsTotal = 0;     // its subagents of the last hour, read or not
+    std::wstring spawnedBy;     // the log id of the session that started it
     int64_t liveAt = 0, turnStartedAt = 0, lastOutputAt = 0;
     int lastOutputDelta = 0, lastTurnOutput = 0;
     std::optional<int> turnOutput;
@@ -18356,6 +18374,87 @@ std::atomic<bool> g_wanted;  // the details are open
 [[clang::no_destroy]] std::shared_ptr<const Snapshot> g_snapshot;  // taskbar thread
 void (*g_onRows)() = nullptr;  // taskbar thread
 
+// ---- sessions another session started (worker) -------------------------------
+// The Claude desktop app keeps a record per session in %APPDATA%\Claude\
+// claude-code-sessions\<account>\<org>\local_<id>.json: its log's id
+// ("cliSessionId") and, for one another session started, "spawnedFrom":
+// {"sessionId":"local_…"}. Only those two are looked for, in the bytes of the
+// records written in the last day; a record is read again only when it changes.
+
+struct Spawn {
+    int64_t written = 0;
+    std::wstring log, parent;  // its log's id, and the record id of the session that started it
+};
+[[clang::no_destroy]] std::unordered_map<std::wstring, Spawn> g_spawns;  // by record id; under g_lock
+constexpr size_t kMaxRecordBytes = 512 * 1024;
+
+// The string after `"key":` from `from` on; empty when there is none.
+std::string JsonString(std::string const& bytes, std::string_view key, size_t from = 0) {
+    std::string needle = "\"" + std::string(key) + "\"";
+    size_t at = bytes.find(needle, from);
+    if (at == std::string::npos) return {};
+    at = bytes.find_first_not_of(" \t\r\n:", at + needle.size());
+    if (at == std::string::npos || bytes[at] != '"') return {};
+    size_t end = bytes.find('"', at + 1);
+    return end == std::string::npos || end - at > 128 ? std::string() : bytes.substr(at + 1, end - at - 1);
+}
+
+std::wstring Ascii(std::string const& text) {
+    return std::wstring(text.begin(), text.end());
+}
+
+void FindSpawns(int64_t now) {
+    std::wstring app = Env(L"APPDATA");
+    if (app.empty()) {
+        return;
+    }
+    std::vector<Found> records;
+    for (auto const& account : Dirs(app + L"\\Claude\\claude-code-sessions")) {
+        for (auto const& org : Dirs(account)) {
+            FilesIn(Source::kClaude, org, L"local_*.json", records);
+        }
+    }
+    std::unordered_map<std::wstring, Spawn> next;
+    for (auto const& f : records) {
+        if (now - f.written > kRecentSeconds || f.size > kMaxRecordBytes) {
+            continue;
+        }
+        std::wstring name = f.path.substr(f.path.find_last_of(L'\\') + 1);
+        std::wstring id = name.substr(0, name.size() - 5);  // less ".json"
+        if (auto old = g_spawns.find(id); old != g_spawns.end() && old->second.written == f.written) {
+            next.emplace(id, std::move(old->second));
+            continue;
+        }
+        winrt::file_handle file{CreateFileW(f.path.c_str(), GENERIC_READ,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        std::string bytes;
+        if (!file || !ReadAt(file.get(), 0, (size_t)f.size, bytes)) {
+            continue;
+        }
+        Spawn spawn{f.written, Ascii(JsonString(bytes, "cliSessionId")), {}};
+        if (size_t from = bytes.find("\"spawnedFrom\""); from != std::string::npos) {
+            spawn.parent = Ascii(JsonString(bytes, "sessionId", from));
+        }
+        if (!spawn.log.empty()) {
+            next.emplace(id, std::move(spawn));
+        }
+    }
+    g_spawns = std::move(next);
+}
+
+// The log id of the session that started the one whose log id is `log`; empty
+// when none did or it isn't known.
+std::wstring SpawnedBy(std::wstring const& log) {
+    for (auto const& [id, spawn] : g_spawns) {
+        if (_wcsicmp(spawn.log.c_str(), log.c_str()) == 0) {
+            auto parent = g_spawns.find(spawn.parent);
+            return parent == g_spawns.end() ? std::wstring() : parent->second.log;
+        }
+    }
+    return {};
+}
+
 Row RowOf(Log const& g, int64_t now) {
     Row r;
     r.source = g.source;
@@ -18374,6 +18473,12 @@ Row RowOf(Log const& g, int64_t now) {
     r.agentId = g.agentId;
     r.role = g.role;
     r.parentId = g.subagent && g.source == Source::kClaude ? g.sessionId : g.parentId;
+    if (!g.subagent && g.source == Source::kClaude) {
+        r.spawnedBy = SpawnedBy(g.sessionId);
+        if (auto total = g_agentTotals.find(Lower(g.sessionId)); total != g_agentTotals.end()) {
+            r.agentsTotal = total->second;
+        }
+    }
     r.model = g.model;
     r.effort = g.effort;
     r.liveAt = g.LiveAt();
@@ -18392,6 +18497,7 @@ void Look() {
     int64_t now = usage::Now();
     if (g_findNow.exchange(false) || ++g_looks % kFindEvery == 0) {
         g_found = FindClaude(now);
+        FindSpawns(now);
         std::vector<Found> codex = FindCodex(now);
         g_found.insert(g_found.end(), codex.begin(), codex.end());
         std::wstring home = CodexHome();
@@ -18465,6 +18571,26 @@ void Look() {
         }
     }
     std::ranges::sort(snapshot->rows, order);
+    // A session another one started goes under it, deepest first, so a chain
+    // ends under its first session; one whose starter isn't read stays a row.
+    for (bool moved = true; moved;) {
+        moved = false;
+        auto& rows = snapshot->rows;
+        auto starts = [&](Row const& parent, Row const& child) {
+            return !child.spawnedBy.empty() && _wcsicmp(parent.sessionId.c_str(), child.spawnedBy.c_str()) == 0;
+        };
+        for (size_t i = 0; i < rows.size() && !moved; i++) {
+            bool leaf = std::ranges::none_of(rows, [&](Row const& other) { return starts(rows[i], other); });
+            auto parent = std::ranges::find_if(rows, [&](Row const& p) { return &p != &rows[i] && starts(p, rows[i]); });
+            if (leaf && parent != rows.end()) {
+                Row child = std::move(rows[i]);
+                Row& to = *parent;
+                to.children.push_back(std::move(child));
+                rows.erase(rows.begin() + i);
+                moved = true;
+            }
+        }
+    }
     snapshot->at = now;
     core::Post([snapshot] {
         if (!g_wanted) {
@@ -18487,6 +18613,8 @@ void Forget() {
             return;
         }
         std::unordered_map<std::wstring, Log>().swap(g_logs);
+        std::unordered_map<std::wstring, Spawn>().swap(g_spawns);
+        std::unordered_map<std::wstring, size_t>().swap(g_agentTotals);
         g_names = Names{};
         std::vector<Found>().swap(g_found);
         g_looks = 0;
@@ -19314,6 +19442,55 @@ FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
     return line;
 }
 
+// A session this one started: "└ ◯ title · 진행 … 2분 전  1,234 tok", outlined
+// under the pointer; a click opens its details under it.
+FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int64_t now);
+
+FrameworkElement ChildLine(ai_sessions::Row const& c, int64_t now) {
+    std::wstring key = KeyOf(c);
+    std::wstring tag = key.empty() ? L"" : L"row|" + key;
+    auto what = Figures();
+    what.Inlines().Append(Span(c.title.empty() ? L"제목 없는 세션" : c.title, kSmallSize, C().text, true));
+    what.Inlines().Append(Span(L" · " + StateWords(c), kSmallSize, c.state == ai_sessions::State::kInput ? C().warn : C().faint));
+    int tokens = c.Live() ? c.turnOutput.value_or(0) : c.lastTurnOutput;
+    auto when = Figures();
+    when.Inlines().Append(Span(Ago(now - c.liveAt), kSmallSize, C().faint));
+    if (tokens > 0) {
+        auto figure = Span(L"  " + Tokens(tokens), kSmallSize, C().text);
+        figure.FontWeight(Semi());
+        when.Inlines().Append(figure);
+        when.Inlines().Append(Span(L" tok", kSmallSize, C().dim));
+    }
+    Controls::Border elbow;
+    elbow.Width(7);
+    elbow.Height(10);
+    elbow.BorderThickness({1, 0, 0, 1});
+    elbow.BorderBrush(Brush(C().edge));
+    elbow.CornerRadius({0, 0, 0, 3});
+    elbow.VerticalAlignment(VerticalAlignment::Top);
+    elbow.Margin({0, 0, 5, 0});
+    auto mark = StateMark(c, 8);
+    mark.Margin({0, 0, 7, 0});
+    Controls::Border line;
+    line.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    line.Padding({4, 3, 0, 3});
+    line.Margin({0, 2, 0, 0});
+    line.Background(Brush(!tag.empty() && g_open->hover == tag ? C().hover : 0));
+    line.Child(Columns(Across({elbow, mark}), what, when));
+    Controls::ToolTipService::SetToolTip(line, winrt::box_value(L"이 세션이 띄운 하위 세션"));
+    if (!tag.empty()) {
+        SetTag(line, tag);
+        Automation::AutomationProperties::SetName(line, c.title);
+    }
+    if (key.empty() || g_open->expanded != key) {
+        return line;
+    }
+    Controls::StackPanel open;
+    open.Children().Append(line);
+    open.Children().Append(Details(c, key, now));
+    return open;
+}
+
 // The details under an open session: its id (copied by the button beside it),
 // model, tool and when its log is written, then the two buttons.
 FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int64_t now) {
@@ -19476,19 +19653,29 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
     for (size_t i = 0; i < shown; i++) {
         stack.Children().Append(AgentLine(r.agents[i], now));
     }
-    if (shown < r.agents.size()) {
+    // a swarm: more ran in the last hour than were read
+    size_t total = std::max(r.agentsTotal, r.agents.size());
+    if (shown < total) {
         int64_t last = 0;
         for (size_t i = shown; i < r.agents.size(); i++) {
             last = std::max(last, r.agents[i].liveAt);
         }
-        auto more = Text(L"+" + std::to_wstring(r.agents.size() - shown) + L"개 더 · 마지막 기록 " +
-                             Ago(now - last) + L"  ",
-                         kSmallSize, C().faint);
+        std::wstring words = L"+" + std::to_wstring(total - shown) + L"개 더";
+        if (last) {
+            words += L" · 마지막 기록 " + Ago(now - last);
+        }
+        if (total > r.agents.size()) {
+            words += L" · 최근 1시간 " + std::to_wstring(total) + L"개";
+        }
+        auto more = Text(words + L"  ", kSmallSize, C().faint);
         auto chevron = Text(L"\xE70D", 9, C().faint);
         chevron.FontFamily(Media::FontFamily{kIconFont});
         auto line = Across({more, chevron});
         line.Margin({kIndent + 4, 4, 0, 0});
         stack.Children().Append(line);
+    }
+    for (auto const& c : r.children) {
+        stack.Children().Append(ChildLine(c, now));
     }
 
     Controls::Border item;
@@ -19519,18 +19706,22 @@ std::wstring Summary(std::vector<ai_sessions::Row> const& rows) {
     using ai_sessions::State;
     int input = 0, running = 0, tools = 0, agents = 0;
     auto busy = [](ai_sessions::Row const& r) { return r.Live() && r.state != State::kStale; };
-    for (auto const& r : rows) {
-        if (r.state == State::kInput) {
-            input++;
-        } else if (busy(r)) {
-            running++;
+    std::function<void(std::vector<ai_sessions::Row> const&)> count = [&](std::vector<ai_sessions::Row> const& list) {
+        for (auto const& r : list) {
+            if (r.state == State::kInput) {
+                input++;
+            } else if (busy(r)) {
+                running++;
+            }
+            tools += r.state == State::kTool;
+            for (auto const& a : r.agents) {
+                agents += busy(a);
+                tools += a.state == State::kTool;
+            }
+            count(r.children);
         }
-        tools += r.state == State::kTool;
-        for (auto const& a : r.agents) {
-            agents += busy(a);
-            tools += a.state == State::kTool;
-        }
-    }
+    };
+    count(rows);
     auto n = [](int v) { return std::to_wstring(v); };
     return Joined({input ? L"입력 필요 " + n(input) : L"", running ? L"세션 " + n(running) + L"개 진행 중" : L"",
                    tools ? L"도구 실행 " + n(tools) : L"", agents ? L"하위 " + n(agents) : L""});
@@ -19557,12 +19748,19 @@ ai_sessions::Row const* RowByKey(ai_sessions::Snapshot const* snapshot, std::wst
     if (!snapshot || key.empty()) {
         return nullptr;
     }
-    for (auto const& r : snapshot->rows) {
-        if (KeyOf(r) == key) {
-            return &r;
+    std::function<ai_sessions::Row const*(std::vector<ai_sessions::Row> const&)> in =
+        [&](std::vector<ai_sessions::Row> const& rows) -> ai_sessions::Row const* {
+        for (auto const& r : rows) {
+            if (KeyOf(r) == key) {
+                return &r;
+            }
+            if (auto const* child = in(r.children)) {
+                return child;
+            }
         }
-    }
-    return nullptr;
+        return nullptr;
+    };
+    return in(snapshot->rows);
 }
 
 // A click on the list, by the tag it landed on.
