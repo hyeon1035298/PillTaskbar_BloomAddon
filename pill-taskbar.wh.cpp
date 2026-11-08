@@ -26,6 +26,7 @@
   Windows 설정은 바꾸지 않아서 끄면 Windows 설정 위치로 돌아갑니다.
 - **트레이**: 볼륨, 네트워크 같은 시스템 아이콘과 알림 벨을 숨기고, 시계를 시간만 보이게 합니다.
   빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)은 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 열립니다.
+  작업표시줄이 위에 있으면 알림 센터도 아래로 내려가지 않고 위쪽에 붙습니다.
   빠른 설정은 ShellHost.exe가 띄우므로 모드가 그 프로세스에도 올라갑니다(거기서는 패널 자리만 정합니다).
   알림 센터는 오른쪽에서 밀려 들어오지 않고 제자리에 나타납니다. ShellExperienceHost.exe에는 모드를 넣지 않고,
   explorer가 그 프로세스의 슬라이드 식 문자열 두 개만 같은 길이로 바꿔 두었다가 끌 때 되돌립니다.
@@ -139,7 +140,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - h12: 12시간 (오후 6:24)
   - panelsNearTray: true
     $name: Windows 패널을 트레이 쪽에 열기
-    $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 끄면 Windows가 정한 자리에 열립니다
+    $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 작업표시줄이 위에 있으면 알림 센터도 위쪽에 붙습니다. 끄면 Windows가 정한 자리에 열립니다
   - centerStill: true
     $name: 알림 센터 슬라이드 끄기
     $description: 알림 센터·달력(Win+N, 시계)이 화면 오른쪽에서 밀려 들어오지 않고 제자리에 바로 나타납니다. 끄면 Windows 애니메이션 그대로입니다
@@ -16041,7 +16042,10 @@ namespace panels {
 // area. Explorer keeps each taskbar's tray span on the taskbar window. Each panel is
 // placed before it shows, by the process that places it: Quick Settings places its
 // own window in ShellHost.exe (SetWindowPos), and explorer places the notification
-// center's window and then uncloaks it (DwmSetWindowAttribute).
+// center's window and then uncloaks it (DwmSetWindowAttribute). Quick Settings opens
+// at a top taskbar by itself; the notification center stays at the bottom, so under
+// a top taskbar explorer moves it up, by the region it cuts the window to
+// (SetWindowRgn).
 
 // Screen x of the tray's left and right edges, packed into a window property (left
 // in the low half). ShellHost reads it too.
@@ -16163,12 +16167,37 @@ void Apply(HWND hwnd) {
 
 using DwmSetWindowAttribute_t = decltype(&DwmSetWindowAttribute);
 DwmSetWindowAttribute_t DwmSetWindowAttribute_Original;
+using SetWindowRgn_t = decltype(&SetWindowRgn);
+SetWindowRgn_t SetWindowRgn_Original;
 
 // The notification center's window, where Windows had it and where it was put, so it
 // can go back when the mod stops. Explorer may leave it where it was between openings.
 std::mutex g_centerLock;
 HWND g_center;
-LONG g_centerDefaultX, g_centerX;
+POINT g_centerDefault, g_centerAt;
+
+// The gap Windows leaves between a panel and a bottom taskbar, at 100%.
+constexpr int kPanelGap = 12;
+
+// Screen y for the top of a panel's shown part (on screen) under a top taskbar: the
+// gap below the taskbar, a hidden one's height counted as Quick Settings counts it,
+// kept inside the work area. Its own top where the monitor's taskbar is not at the
+// top. A hidden top taskbar lies mostly above the monitor and counts all the same.
+LONG PlaceTop(const RECT& shown) {
+    HMONITOR monitor = MonitorFromRect(&shown, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarOn(monitor);
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    RECT bar;
+    if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
+        bar.right - bar.left <= bar.bottom - bar.top ||
+        bar.top + bar.bottom >= mi.rcMonitor.top + mi.rcMonitor.bottom) {
+        return shown.top;
+    }
+    UINT dpi = GetDpiForWindow(taskbar);  // explorer's, on that monitor
+    LONG top = std::max<LONG>(mi.rcWork.top, mi.rcMonitor.top + (bar.bottom - bar.top)) +
+               MulDiv(kPanelGap, dpi ? dpi : 96, 96);
+    return std::min<LONG>(top, mi.rcWork.bottom - (shown.bottom - shown.top));
+}
 
 bool HasName(PCWSTR path, PCWSTR name) {
     PCWSTR slash = wcsrchr(path, L'\\');
@@ -16207,24 +16236,50 @@ bool IsNotificationCenter(HWND hwnd) {
     return center;
 }
 
-void PlaceNotificationCenter(HWND hwnd) {
+// The window is as tall as the work area; Windows shows only the panel through the
+// window's region, at the bottom. The panel goes to the tray and, under a top taskbar,
+// to the top. region: the one being set, or null for the window's own.
+void PlaceNotificationCenter(HWND hwnd, HRGN region) {
     RECT rc;
     if (!IsNotificationCenter(hwnd) || !GetWindowRect(hwnd, &rc)) {
         return;
     }
-    int x = PlaceX(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+    RECT panel;  // in the window
+    int kind = region ? GetRgnBox(region, &panel) : GetWindowRgnBox(hwnd, &panel);
+    if (kind == NULLREGION) {
+        return;
+    }
+    bool cut = kind != ERROR;
+    if (!cut) {
+        panel = {0, 0, rc.right - rc.left, rc.bottom - rc.top};  // no region: y stays
+    }
+    if (panel.right - panel.left <= 1 || panel.bottom - panel.top <= 1) {
+        return;  // a placeholder while ShellExperienceHost builds its views
+    }
+    LONG x, y;
     {
         std::lock_guard lock(g_centerLock);
-        if (hwnd != g_center || rc.left != g_centerX) {
+        // Where explorer put it, kept per coordinate it set this time.
+        if (hwnd != g_center) {
             g_center = hwnd;
-            g_centerDefaultX = rc.left;  // where explorer put it this time
+            g_centerDefault = {rc.left, rc.top};
+        } else {
+            if (rc.left != g_centerAt.x) g_centerDefault.x = rc.left;
+            if (rc.top != g_centerAt.y) g_centerDefault.y = rc.top;
         }
-        g_centerX = x;
+        // The panel where explorer put the window picks the monitor. Where the window is
+        // now won't do: moved up for a short panel, the panel's next, taller region can
+        // reach mostly into the monitor above.
+        RECT shown = panel;
+        OffsetRect(&shown, g_centerDefault.x, g_centerDefault.y);
+        x = PlaceX(shown.left, shown.top, shown.right - shown.left, shown.bottom - shown.top) -
+            panel.left;
+        y = cut ? PlaceTop(shown) - panel.top : rc.top;
+        g_centerAt = {x, y};
     }
-    if (x != rc.left) {
-        Wh_Log(L"Notification center %ld -> %d", rc.left, x);
-        SetWindowPos(hwnd, nullptr, x, rc.top, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (x != rc.left || y != rc.top) {
+        Wh_Log(L"Notification center %ld,%ld -> %ld,%ld", rc.left, rc.top, x, y);
+        SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -16233,9 +16288,19 @@ HRESULT WINAPI DwmSetWindowAttribute_Hook(HWND hwnd, DWORD attribute, LPCVOID va
                                           DWORD size) {
     if (attribute == DWMWA_CLOAK && size == sizeof(BOOL) && value &&
         !*(const BOOL*)value && !core::g_unloading) {
-        PlaceNotificationCenter(hwnd);
+        PlaceNotificationCenter(hwnd, nullptr);
     }
     return DwmSetWindowAttribute_Original(hwnd, attribute, value, size);
+}
+
+// Explorer cuts the window to the panel as it lays it out, and again whenever the
+// panel's height changes (a notification comes or goes, the calendar folds): the
+// panel's top stays under a top taskbar. The move comes before the new region.
+int WINAPI SetWindowRgn_Hook(HWND hwnd, HRGN region, BOOL redraw) {
+    if (region && !core::g_unloading) {
+        PlaceNotificationCenter(hwnd, region);
+    }
+    return SetWindowRgn_Original(hwnd, region, redraw);
 }
 
 bool HookExplorer() {
@@ -16246,6 +16311,9 @@ bool HookExplorer() {
                                                        &DwmSetWindowAttribute_Original);
     if (!ok) {
         Wh_Log(L"No DwmSetWindowAttribute hook: the notification center stays at the right");
+    } else if (!WindhawkUtils::SetFunctionHook(SetWindowRgn, SetWindowRgn_Hook,
+                                               &SetWindowRgn_Original)) {
+        Wh_Log(L"No SetWindowRgn hook: under a top taskbar the panel keeps its first top");
     }
     return ok;
 }
@@ -16260,17 +16328,22 @@ void Restore() {
     }
     g_bars.clear();
     HWND center;
-    LONG defaultX, x;
+    POINT home, at;
     {
         std::lock_guard lock(g_centerLock);
         center = std::exchange(g_center, nullptr);
-        defaultX = g_centerDefaultX;
-        x = g_centerX;
+        home = g_centerDefault;
+        at = g_centerAt;
     }
     RECT rc;
-    if (center && defaultX != x && IsWindow(center) && GetWindowRect(center, &rc) &&
-        rc.left == x) {
-        SetWindowPos(center, nullptr, defaultX, rc.top, 0, 0,
+    if (!center || !IsWindow(center) || !GetWindowRect(center, &rc)) {
+        return;
+    }
+    // Only a coordinate that still has the mod's value goes back.
+    LONG x = rc.left == at.x ? home.x : rc.left;
+    LONG y = rc.top == at.y ? home.y : rc.top;
+    if (x != rc.left || y != rc.top) {
+        SetWindowPos(center, nullptr, x, y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
     }
 }

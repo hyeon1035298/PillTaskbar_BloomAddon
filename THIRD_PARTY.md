@@ -21,13 +21,14 @@ PillTaskbar(`pill-taskbar.wh.cpp`)는 GNU General Public License v3.0으로 공�
 
 라이선스 표기가 없는 모드의 코드는 옮기지 않았다.
 
-시작 버튼 기능(`start`)은 아래 두 모드의 방식만 보고 새로 썼다. 코드는 옮기지 않았다.
+시작 버튼 기능(`start`)과 위쪽 작업표시줄에서 알림 센터를 위로 올리는 부분(`panels`)은 아래 모드의 방식만 보고 새로 썼다. 코드는 옮기지 않았다.
 
 | 출처 | 판 | 작성자 | 라이선스 | 참고한 방식 |
 |---|---|---|---|---|
 | [start-button-replacer](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/start-button-replacer.wh.cpp) | 0.12.4 | Ender | GPL-3.0-only | 순정 아이콘(`AnimatedVisualPlayer#Icon`)을 투명하게 하고 그 부모 Panel에 그림을 얹기, `ExperienceToggleButton::UpdateButtonPadding`에서 다시 붙이기 |
 | [hide-start-button](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/hide-start-button.wh.cpp) | 1.0 | ptrkhh | 표기 없음 | 시작 버튼을 폭 0으로 배치해 자리를 없애기 |
 | [taskbar-elastic-pill](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-elastic-pill.wh.cpp) | 2.0.1 | Lockframe | 표기 없음 | 실행 중 표시(`Rectangle#RunningIndicator`)를 `TaskListButton::UpdateVisualStates` 뒤마다 Opacity로 숨기기 |
+| [notification-center-follows-taskbar](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/notification-center-follows-taskbar.wh.cpp) | 1.1.0 | Asteski | 표기 없음 | explorer에서 `SetWindowRgn`을 가로채 알림 센터 창의 영역(보이는 패널)을 읽고, 위쪽 작업표시줄이면 그 위끝이 작업 영역 위에서 12px(100% 기준) 떨어지게 창을 옮기기(여기서는 숨은 작업표시줄의 높이도 빼서 빠른 설정과 맞춤). 창을 풀기 직전(`DWMWA_CLOAK`)에도 같은 계산 |
 
 ## 로고
 

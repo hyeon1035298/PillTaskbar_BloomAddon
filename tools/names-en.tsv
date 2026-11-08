@@ -49,7 +49,7 @@ tray.clockFormat	Time format
 tray.clockFormat=h24	24-hour (18:24)
 tray.clockFormat=h12	12-hour (6:24 PM)
 tray.panelsNearTray	Open Windows panels at the tray
-tray.panelsNearTray#about	Quick Settings (Win+A) and the notification center and calendar (Win+N, the clock) open at the pill's tray instead of the right end of the screen. When off, they open where Windows puts them
+tray.panelsNearTray#about	Quick Settings (Win+A) and the notification center and calendar (Win+N, the clock) open at the pill's tray instead of the right end of the screen. With the taskbar at the top, the notification center opens at the top too. When off, they open where Windows puts them
 tray.centerStill	Notification center without the slide
 tray.centerStill#about	The notification center and calendar (Win+N, the clock) appear in place instead of sliding in from the right of the screen. When off, Windows' animation stays
 group:size	Size
