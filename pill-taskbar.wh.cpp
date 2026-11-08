@@ -1342,6 +1342,13 @@ int (*g_forcedEdge)() = nullptr;
 // lParam. The Settings app sends it after storing the location.
 constexpr UINT kSettingChangeMsg = 0x5CA;
 constexpr WPARAM kLocationSetting = 6;
+// Another add-on's island beside this taskbar's was clicked (docs/addon-protocol.md):
+// the island brings the taskbar out as for a click of its own.
+void (*g_onRevealAsked)(HWND) = nullptr;
+UINT RevealAskedMsg() {
+    static UINT msg = RegisterWindowMessage(L"PillTaskbar.IslandReveal");
+    return msg;
+}
 
 
 
@@ -1374,6 +1381,12 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
             (*(std::function<void()>*)lParam)();
         } catch (...) {
             Wh_Log(L"Taskbar work failed: %08X", winrt::to_hresult());
+        }
+        return 0;
+    }
+    if (msg == RevealAskedMsg()) {
+        if (g_onRevealAsked) {
+            Guard(L"Island reveal asked", [&] { g_onRevealAsked(hwnd); });
         }
         return 0;
     }
@@ -8465,6 +8478,9 @@ struct Island {
     bool pillSeen = false;
     RegionKey region;
 
+    // The place on the taskbar window for other add-ons' islands (Publish), 0 if none.
+    ULONG_PTR published = 0;
+
     bool mediaVisible = false;
     std::wstring title;
     com_ptr<IWICBitmap> art;
@@ -8842,6 +8858,40 @@ Color PillColor() {
     Color c = settings::Dark() ? theme::kIslandPillDark : theme::kIslandPillLight;
     c.A = settings::g.pill.glass ? (uint8_t)std::lround(settings::g.pill.tintOpacity * 2.55) : 255;
     return c;
+}
+
+// ---- for other add-ons ------------------------------------------------------------
+// Another add-on may put an island of its own beside this one (docs/addon-protocol.md):
+// while the island shows with the taskbar in, the taskbar window carries its place, and
+// a note goes to the window each time that changes.
+
+constexpr WCHAR kPlaceProp[] = L"PillTaskbar.Island";
+
+UINT PlaceChangedMsg() {
+    static UINT msg = RegisterWindowMessage(L"PillTaskbar.IslandChanged");
+    return msg;
+}
+
+// Bits 0-15 the left, 16-31 the right, 32-47 the screen edge's y (screen pixels, signed),
+// 48-59 the height, 60 at the bottom edge, 61 white.
+void Publish(Island& g, bool gone = false) {
+    ULONG_PTR value = 0;
+    if (!gone && g.ready && g.shown && g.phase == Phase::kIdle) {
+        RECT const& r = g.islandRect;
+        auto bits = [](LONG v) { return (ULONG_PTR)(uint16_t)(int16_t)v; };
+        value = bits(r.left) | bits(r.right) << 16 | bits(g.bottom ? r.bottom : r.top) << 32 |
+                (ULONG_PTR)std::clamp<LONG>(r.bottom - r.top, 0, 0xFFF) << 48 |
+                (ULONG_PTR)g.bottom << 60 | (ULONG_PTR)!DarkIsland() << 61;
+    }
+    if (value == g.published || !g.taskbar) {
+        return;
+    }
+    if (value ? !SetProp(g.taskbar, kPlaceProp, (HANDLE)value)
+              : !RemoveProp(g.taskbar, kPlaceProp) && IsWindow(g.taskbar)) {
+        return;
+    }
+    g.published = value;
+    PostMessage(g.taskbar, PlaceChangedMsg(), 0, 0);
 }
 
 // ---- devices --------------------------------------------------------------------
@@ -9537,6 +9587,7 @@ bool Layout(Island& g) {
         DrawContent(g, c);
         g.drawn = c.key;
     }
+    Publish(g);
     return true;
 }
 
@@ -9711,6 +9762,7 @@ void StartExpand(Island& g) {
         core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
     }
     g.phase = Phase::kExpanding;
+    Publish(g);
     SetHover(g);
     Raise(g);
     // Out of the topmost band (a window fills the monitor, see StackIdle) the
@@ -9739,6 +9791,7 @@ void StartCollapse(Island& g) {
         core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
     }
     g.phase = Phase::kCollapsing;
+    Publish(g);
     // A pointer already on the island has to leave and come back, so a
     // taskbar that went in with the pointer there doesn't bounce out again.
     POINT pt;
@@ -9783,6 +9836,7 @@ void Hide(Island& g) {
     KillTimer(g.hwnd, kCrossingTimer);
     g.shown = g.inside = g.reaching = false;
     g.phase = Phase::kIdle;
+    Publish(g);
     g.morph++;  // a running morph's end no longer counts, so its sink comes here
     SinkLiftedTaskbar(g);
     ShowWindow(g.hwnd, SW_HIDE);
@@ -10200,6 +10254,20 @@ void Sync(Island& g) {
         // shows would put it over every other topmost window too.
         StackIdle(g);
     }
+    Publish(g);
+}
+
+// Another add-on's island beside this one was clicked: as if this one were. Later,
+// from the queue: the tray's slide runs inside.
+void OnRevealAsked(HWND taskbar) {
+    core::Post([taskbar] {
+        autohide::InFlight counted;
+        Island* g = Of(taskbar);
+        if (g && g->shown && g->phase == Phase::kIdle && !g->dragging) {
+            core::DiagLine(L"Reveal asked %d", g->id);
+            Reach(*g);
+        }
+    });
 }
 
 std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -10514,6 +10582,7 @@ void Build(Island& g, HWND taskbar) {
 
 // Lets go of all the island holds; the caller drops it from the list.
 void Teardown(Island& g) {
+    Publish(g, true);
     g.ready = false;
     if (g.batch) {
         g.batch.Completed(g.batchDone);
@@ -10621,6 +10690,7 @@ void Apply(HWND taskbar) {
     core::g_onTaskbarRestacked = OnTaskbarRestacked;
     core::g_keepsTaskbarTopmost = KeepsTaskbarTopmost;
     core::g_onTaskbarDestroyed = OnTaskbarDestroyed;
+    core::g_onRevealAsked = OnRevealAsked;
     media::g_onShow = OnMedia;
     usage::g_onModel = SyncAll;
     core::Guard(L"Island show", [&] { Sync(*it); });
@@ -10642,6 +10712,7 @@ void Restore() {
     core::g_onTaskbarRestacked = nullptr;
     core::g_keepsTaskbarTopmost = nullptr;
     core::g_onTaskbarDestroyed = nullptr;
+    core::g_onRevealAsked = nullptr;
     media::g_onShow = nullptr;
     usage::g_onModel = nullptr;
     g_window = nullptr;
