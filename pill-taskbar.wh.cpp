@@ -9159,23 +9159,21 @@ MeterOutline const& OutlineOf(int kind) {
         }
         return o;
     }();
-    // The processor's pins end where the module's body and feet do, so both stand as tall
-    // and as wide.
+    // The processor's body is as tall as the module's and in the same place, so the numbers
+    // of the two stand at one height; its side pins end where the module's body does and its
+    // legs where the module's feet do.
     static const MeterOutline cpu = [] {
         Box4 b = ram.body;
-        float bottom = ram.pins[0].y + ram.pins[0].h;
-        float reach = 1.8f;  // how far the pins stand out of the body
-        MeterOutline o{{b.x + reach, b.y + reach, b.w - 2 * reach, bottom - b.y - 2 * reach}, 2.8f, {}};
+        float reach = 1.8f;  // how far the side pins stand out of the body
+        MeterOutline o{{b.x + reach, b.y, b.w - 2 * reach, b.h}, 3.2f, {}};
         float cx = o.body.x + o.body.w / 2, cy = o.body.y + o.body.h / 2;
-        float lower = o.body.y + o.body.h - kMeterStroke / 2;
         float right = o.body.x + o.body.w - kMeterStroke / 2;
-        for (float x : {-5.2f, 0.0f, 5.2f}) {
-            o.pins.push_back({cx + x - kPinW / 2, o.body.y - reach, kPinW, reach + kMeterStroke / 2});
-            o.pins.push_back({cx + x - kPinW / 2, lower, kPinW, reach + kMeterStroke / 2});
-        }
-        for (float y : {-2.6f, 2.6f}) {
+        for (float y : {-2.8f, 2.8f}) {
             o.pins.push_back({o.body.x - reach, cy + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
             o.pins.push_back({right, cy + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
+        }
+        for (float x : {-5.4f, 0.0f, 5.4f}) {
+            o.pins.push_back({cx + x - kPinW / 2, ram.pins[0].y, kPinW, ram.pins[0].h});
         }
         return o;
     }();
