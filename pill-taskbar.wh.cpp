@@ -22,6 +22,8 @@
 
 - **알약**: 작업 영역과 트레이를 가운데로 모아 유리 배경(블러, 옅은 틴트, 빛을 받는
   가장자리, 위 반사광과 아래 집광) 하나로 이어 붙입니다. 알약 양옆의 빈 곳은 클릭이 바탕 화면으로 통과합니다.
+- **위치**: 작업표시줄을 화면 위나 아래에 두고, 알약을 가장자리의 왼쪽, 가운데, 오른쪽에 붙입니다.
+  Windows 설정은 바꾸지 않아서 끄면 Windows 설정 위치로 돌아갑니다.
 - **트레이**: 볼륨, 네트워크 같은 시스템 아이콘과 알림 벨을 숨기고, 시계를 시간만 보이게 합니다.
   빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)은 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 열립니다.
   빠른 설정은 ShellHost.exe가 띄우므로 모드가 그 프로세스에도 올라갑니다(거기서는 패널 자리만 정합니다).
@@ -58,6 +60,20 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - enabled: true
     $name: 알약 모양
     $description: 끄면 Windows 기본 작업표시줄 모양으로 돌아갑니다
+  - edge: windows
+    $name: 작업표시줄 위치
+    $description: 화면 위나 아래. 레지스트리의 Windows 설정은 바꾸지 않아서, 이 기능을 끄거나 모드를 끄면 Windows 설정 위치로 돌아갑니다. 위에 두고 자동 숨김을 쓰려면 자동 숨김 보조도 켜 두세요
+    $options:
+    - windows: Windows 설정 따름
+    - top: 위
+    - bottom: 아래
+  - align: center
+    $name: 알약 정렬
+    $description: 펼친 알약을 가장자리의 어디에 둘지
+    $options:
+    - left: 왼쪽
+    - center: 가운데
+    - right: 오른쪽
   - style: bloom
     $name: 모양
     $options:
@@ -153,7 +169,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 자동 숨김을 켜고 끄는 것은 Windows 설정(작업 표시줄 동작)에서 합니다. 이 기능은 위쪽 작업표시줄도 숨게 하고 아래 값을 적용합니다
   - revealZone: 100
     $name: 나오는 구간 (%)
-    $description: 가장자리 가운데 이만큼에서만 마우스로 나옵니다. 100이면 가장자리 전체
+    $description: 가장자리 가운데(알약을 왼쪽이나 오른쪽에 붙였으면 그쪽 끝)에서 이만큼에서만 마우스로 나옵니다. 100이면 가장자리 전체
   - showDelay: -1
     $name: 나오기 지연 (ms)
     $description: -1이면 Windows 기본(마우스 호버 시간, 보통 400)
@@ -321,12 +337,14 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   usage     F7 Bloom 주간 사용량
 //   island    F8 숨김 아일랜드 (숨은 위·아래 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
 //   folders   F9 작업표시줄 폴더 (앱 묶기, 폴더 창, 폴더 안 앱의 창 묶기), F10 실행 중 폴더
+//   position  F11 작업표시줄 위·아래 (Windows 자체 위치 기능, 레지스트리는 읽기만)
 //   hooks     켠 기능의 심볼만 훅으로 걸고 여러 기능이 쓰는 훅을 나눠 준다
 //   entry     Wh_Mod* 진입점
 // 의존 방향: hooks → 기능 구역 → core, settings. 기능 구역끼리는 region만 pill이 부르고,
 // island는 autohide, media, usage의 상태를 쓰고, autohide는 island가 알려 주는 범위와
 // start의 Bloom 런처 확인(LauncherAhead)을 쓴다.
 // folders는 settings만 쓰고 작업 스레드와 작업표시줄 큐를 스스로 둔다.
+// 알약 정렬(settings::PillAlign)은 pill, island, autohide가 같이 읽는다.
 
 #include <windhawk_utils.h>
 
@@ -410,10 +428,14 @@ enum class Clock { kTimeDate, kTime, kHidden };
 enum class FolderSide { kAuto, kAbove, kBelow };
 enum class LogoColor { kMono, kBrand };
 enum class StartMode { kWindows, kHidden, kBloom };
+enum class Edge { kWindows, kTop, kBottom };
+enum class Align { kCenter, kLeft, kRight };  // an unknown value reads as the first
 
 struct Settings {
     struct {
         bool enabled;
+        Edge edge;
+        Align align;
         Style style;
         Theme theme;
         bool glass;  // else an opaque fill in the theme's color, no blur
@@ -508,6 +530,8 @@ std::wstring Text(PCWSTR name) {
 
 void Load() {
     g.pill.enabled = Wh_GetIntSetting(L"pill.enabled");
+    g.pill.edge = (Edge)Choice(L"pill.edge", {L"windows", L"top", L"bottom"});
+    g.pill.align = (Align)Choice(L"pill.align", {L"center", L"left", L"right"});
     g.pill.style = (Style)Choice(L"pill.style", {L"bloom", L"glass", L"windowGlass"});
     g.pill.theme = (Theme)Choice(L"pill.theme", {L"system", L"dark", L"light"});
     g.pill.glass = Wh_GetIntSetting(L"pill.glass");
@@ -740,6 +764,21 @@ constexpr winrt::Windows::UI::Color kIslandPillLight{255, 0xE6, 0xE6, 0xE6};
 // Ease-out (the Fluent decelerate curve).
 constexpr float kIslandEase[4] = {0.1f, 0.9f, 0.2f, 1.0f};
 }  // namespace theme
+
+// Where the pill sits along the edge: only the pill shape moves it off the middle.
+Align PillAlign() {
+    return g.pill.enabled ? g.pill.align : Align::kCenter;
+}
+
+// The tray piece's margin. A pill set against the right side keeps as far off it
+// as its apps piece keeps off the left one (kAppsMargin).
+Thickness TrayMargin() {
+    Thickness m = theme::kTrayMargin;
+    if (PillAlign() == Align::kRight) {
+        m.Right = theme::kAppsMargin.Left;
+    }
+    return m;
+}
 
 }  // namespace settings
 
@@ -1286,6 +1325,13 @@ void (*g_onOrientationChanged)() = nullptr;
 bool (*g_dropsTimer)(HWND, UINT_PTR id) = nullptr;
 // The same for the folders, whose popup keeps its taskbar out under it.
 bool (*g_popupDropsTimer)(HWND, UINT_PTR id) = nullptr;
+// The screen edge (ABE_*) a taskbar setting change has to move the taskbar to
+// instead of the one it names, or -1 to leave it (F11).
+int (*g_forcedEdge)() = nullptr;
+// That change: a taskbar setting (wParam), the location being 6, now set to
+// lParam. The Settings app sends it after storing the location.
+constexpr UINT kSettingChangeMsg = 0x5CA;
+constexpr WPARAM kLocationSetting = 6;
 
 
 
@@ -1322,6 +1368,15 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
         return 0;
     }
     switch (msg) {
+        case kSettingChangeMsg:
+            if (wParam == kLocationSetting && g_forcedEdge) {
+                int edge = -1;
+                Guard(L"Taskbar location", [&] { edge = g_forcedEdge(); });
+                if (edge >= 0) {
+                    lParam = edge;
+                }
+            }
+            break;
         case WM_NCHITTEST:
             if (IsSecondary(hwnd)) {
                 g_lastHitTest = {hwnd, GetTickCount(),
@@ -2048,7 +2103,7 @@ void StyleTray(FrameworkElement const& trayFrame) {
               box_value(Thickness{}));
     if (auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid")) {
         double r = settings::g.pill.cornerRadius;
-        StylePiece(grid, theme::kTrayMargin, theme::kTrayPadding,
+        StylePiece(grid, settings::TrayMargin(), theme::kTrayPadding,
                    theme::kTrayBorder, Corners(0, r));
     } else {
         Wh_Log(L"No SystemTrayFrameGrid");
@@ -2282,8 +2337,9 @@ double FrameMaxWidth(FrameworkElement const& container) {
                      : theme::kFrameMaxWidth;
 }
 
-// The taskbar frame and the tray sit side by side in the two Auto columns in
-// the middle of the full-width content grid.
+// The taskbar frame and the tray sit side by side in the two Auto columns of
+// the full-width content grid. The free columns around them put the pill in the
+// middle, or one of them closes to set it against that side.
 void StyleFrame(FrameworkElement const& frame, HWND hwnd) {
     auto container = core::Parent(frame);
     auto grid = container.try_as<Controls::Grid>();
@@ -2297,10 +2353,14 @@ void StyleFrame(FrameworkElement const& frame, HWND hwnd) {
            winrt::get_class_name(container).c_str(),
            (int)grid.ColumnDefinitions().Size(), tray ? L"beside" : L"none");
 
-    core::SetColumns(grid, {GridLength{1, GridUnitType::Star},
+    auto align = settings::PillAlign();
+    auto side = [](bool open) {
+        return open ? GridLength{1, GridUnitType::Star} : GridLength{0, GridUnitType::Pixel};
+    };
+    core::SetColumns(grid, {side(align != settings::Align::kLeft),
                             GridLength{1, GridUnitType::Auto},
                             GridLength{1, GridUnitType::Auto},
-                            GridLength{1, GridUnitType::Star}});
+                            side(align != settings::Align::kRight)});
     core::Set(frame, Controls::Grid::ColumnProperty(), box_value(1));
     // Explorer gives a secondary taskbar's frame the width the tray leaves
     // again later (as the clock's width changes), which stretches the pill.
@@ -2423,7 +2483,7 @@ void OnIconLoaded(FrameworkElement const& icon) {
     });
     auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid");
     if (!grid || core::SameValue(grid.ReadLocalValue(FrameworkElement::MarginProperty()),
-                                 box_value(theme::kTrayMargin))) {
+                                 box_value(settings::TrayMargin()))) {
         return;  // styled already
     }
     StyleTray(trayFrame);
@@ -4601,7 +4661,8 @@ bool HeldByWindow(void* coordinator, HWND hwnd, int reason) {
 }
 
 // True if the pointer asking to show the taskbar is beside the reveal zone:
-// the island while it shows, else the set part of the edge.
+// the island while it shows, else the set part of the edge, around the middle
+// or from the side the pill is set against.
 bool OutsideZone(HWND hwnd, int reason) {
     int zone = settings::g.autohide.revealZone;
     RECT rc;
@@ -4621,8 +4682,17 @@ bool OutsideZone(HWND hwnd, int reason) {
     if (zone >= 100) {
         return false;
     }
-    int margin = MulDiv(rc.right - rc.left, 100 - zone, 200);
-    return pt.x < rc.left + margin || pt.x >= rc.right - margin;
+    int width = rc.right - rc.left;
+    switch (settings::PillAlign()) {
+        case settings::Align::kLeft:
+            return pt.x >= rc.right - MulDiv(width, 100 - zone, 100);
+        case settings::Align::kRight:
+            return pt.x < rc.left + MulDiv(width, 100 - zone, 100);
+        default: {
+            int margin = MulDiv(width, 100 - zone, 200);
+            return pt.x < rc.left + margin || pt.x >= rc.right - margin;
+        }
+    }
 }
 
 void Cancel(HWND hwnd) {
@@ -8876,7 +8946,7 @@ bool OnIsland(Island const& g, POINT pt) {
 }
 
 // Keeps the taskbar's region box (the pill pieces with their margins) while
-// the taskbar is out; until one is seen, a centered stand-in.
+// the taskbar is out; until one is seen, a stand-in where the pill is aligned.
 void NotePill(Island& g, RECT const& monitor) {
     RECT window, box;
     bool hasWindow = GetWindowRect(g.taskbar, &window);
@@ -8899,6 +8969,9 @@ void NotePill(Island& g, RECT const& monitor) {
     int height = hasWindow ? window.bottom - window.top : (int)(g.shape.height * 2);
     int width = (monitor.right - monitor.left) * 3 / 5;
     int left = monitor.left + (monitor.right - monitor.left - width) / 2;
+    if (auto align = settings::PillAlign(); align != settings::Align::kCenter) {
+        left = align == settings::Align::kLeft ? monitor.left : monitor.right - width;
+    }
     int top = g.bottom ? monitor.bottom - height : monitor.top;
     g.pillBox = {left, top, left + width, top + height};
     g.pillRadius = height / 2.0f;
@@ -8912,7 +8985,7 @@ RECT PillRect(Island const& g) {
         double s = (dpi ? dpi : 96) / 96.0;
         r.left += (LONG)std::lround(theme::kAppsMargin.Left * s);
         r.top += (LONG)std::lround(theme::kAppsMargin.Top * s);
-        r.right -= (LONG)std::lround(theme::kTrayMargin.Right * s);
+        r.right -= (LONG)std::lround(settings::TrayMargin().Right * s);
         r.bottom -= (LONG)std::lround(theme::kAppsMargin.Bottom * s);
     }
     return r;
@@ -16246,6 +16319,191 @@ bool InstallShellHost() {
 
 }  // namespace panels
 
+// ============================================================================
+namespace position {
+// ============================================================================
+// The taskbar at the top or bottom edge whatever Windows' setting says, through
+// the location Windows has of its own on newer builds (native): each taskbar
+// reads the location from the registry as it sets itself up, and its content
+// asks TaskbarSettings::Location. Both get the set edge. Nothing is written, so
+// turning this off or unloading puts the taskbar back where Windows' setting
+// has it. A build without the native location is left alone.
+
+using SH = WindhawkUtils::SYMBOL_HOOK;
+
+constexpr WCHAR kAdvancedKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+constexpr WCHAR kLocationValue[] = L"TaskbarLocation";
+
+bool g_native;  // set while the mod initializes
+// True on a thread while a taskbar reads its own location there.
+thread_local bool g_reading;
+// The edge the taskbars were told, -1 if none: unloading tells them Windows' again.
+std::atomic<int> g_told{-1};
+
+bool Active() {
+    return g_native && !core::g_unloading &&
+           settings::g.pill.edge != settings::Edge::kWindows;
+}
+
+// The TaskbarLocation values are the screen edges (ABE_*).
+int SetEdge() {
+    return settings::g.pill.edge == settings::Edge::kTop ? ABE_TOP : ABE_BOTTOM;
+}
+
+int ForcedEdge() {
+    return Active() ? SetEdge() : -1;
+}
+
+// Windows' own setting.
+int StoredEdge() {
+    DWORD edge = ABE_BOTTOM, size = sizeof(edge);
+    if (RegGetValueW(HKEY_CURRENT_USER, kAdvancedKey, kLocationValue, RRF_RT_REG_DWORD,
+                     nullptr, &edge, &size) != ERROR_SUCCESS ||
+        edge > ABE_BOTTOM) {
+        edge = ABE_BOTTOM;
+    }
+    return (int)edge;
+}
+
+using RegGetValueW_t = decltype(&RegGetValueW);
+RegGetValueW_t RegGetValueW_Original;
+LONG WINAPI RegGetValueW_Hook(HKEY key,
+                              LPCWSTR subKey,
+                              LPCWSTR value,
+                              DWORD flags,
+                              LPDWORD type,
+                              PVOID data,
+                              LPDWORD size) {
+    DWORD room = size ? *size : 0;
+    LONG ret = RegGetValueW_Original(key, subKey, value, flags, type, data, size);
+    if (!g_reading || key != HKEY_CURRENT_USER || !subKey || !value || !data ||
+        !size || !(flags & RRF_RT_REG_DWORD) || room < sizeof(DWORD) ||
+        _wcsicmp(subKey, kAdvancedKey) != 0 || _wcsicmp(value, kLocationValue) != 0 ||
+        !Active()) {
+        return ret;
+    }
+    *(DWORD*)data = (DWORD)SetEdge();
+    *size = sizeof(DWORD);
+    if (type) {
+        *type = REG_DWORD;
+    }
+    return ERROR_SUCCESS;
+}
+
+using TrayUI__GetSaveStateAndInitRects_t = void(WINAPI*)(void* pThis);
+TrayUI__GetSaveStateAndInitRects_t TrayUI__GetSaveStateAndInitRects_Original;
+void WINAPI TrayUI__GetSaveStateAndInitRects_Hook(void* pThis) {
+    bool was = std::exchange(g_reading, true);
+    TrayUI__GetSaveStateAndInitRects_Original(pThis);
+    g_reading = was;
+}
+
+using CSecondaryTray__LoadSettings_t = HRESULT(WINAPI*)(void* pThis);
+CSecondaryTray__LoadSettings_t CSecondaryTray__LoadSettings_Original;
+HRESULT WINAPI CSecondaryTray__LoadSettings_Hook(void* pThis) {
+    bool was = std::exchange(g_reading, true);
+    HRESULT ret = CSecondaryTray__LoadSettings_Original(pThis);
+    g_reading = was;
+    return ret;
+}
+
+using TaskbarSettings_Location_t = int(WINAPI*)(void* pThis);
+TaskbarSettings_Location_t TaskbarSettings_Location_Original;
+int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
+    return Active() ? SetEdge() : TaskbarSettings_Location_Original(pThis);
+}
+
+// wil's state of the native location feature, and its check.
+void* g_feature;
+using FeatureIsEnabled_t = bool(WINAPI*)(void* pThis, int reportingKind);
+FeatureIsEnabled_t g_featureIsEnabled;
+// Overloads only builds from before the native location have.
+void* g_oldVerifySize;
+void* g_oldHandleSizing;
+
+void CollectTaskbarDll(std::vector<SH>& list) {
+    list.push_back({{LR"(class wil::details::FeatureImpl<struct __WilFeatureTraits_Feature_59213768> `private: static class wil::details::FeatureImpl<struct __WilFeatureTraits_Feature_59213768> & __cdecl wil::Feature<struct __WilFeatureTraits_Feature_59213768>::GetImpl(void)'::`2'::impl)",
+                     LR"(class wil::details::FeatureImpl<struct __WilExternalFeatureTraits_Feature_59213768> `private: static class wil::details::FeatureImpl<struct __WilExternalFeatureTraits_Feature_59213768> & __cdecl wil::Feature<struct __WilExternalFeatureTraits_Feature_59213768>::GetImpl(void)'::`2'::impl)"},
+                    &g_feature, nullptr, true});
+    list.push_back({{LR"(public: bool __cdecl wil::details::FeatureImpl<struct __WilFeatureTraits_Feature_59213768>::__private_IsEnabled(enum wil::ReportingKind))",
+                     LR"(public: bool __cdecl wil::details::FeatureImpl<struct __WilExternalFeatureTraits_Feature_59213768>::__private_IsEnabled(enum wil::ReportingKind))"},
+                    &g_featureIsEnabled, nullptr, true});
+    list.push_back({{LR"(public: virtual void __cdecl TrayUI::VerifySize(bool,bool))"},
+                    &g_oldVerifySize, nullptr, true});
+    list.push_back({{LR"(public: int __cdecl TrayUI::_HandleSizing(unsigned __int64,struct tagRECT *,unsigned int,bool))"},
+                    &g_oldHandleSizing, nullptr, true});
+    list.push_back({{LR"(public: void __cdecl TrayUI::_GetSaveStateAndInitRects(void))"},
+                    &TrayUI__GetSaveStateAndInitRects_Original,
+                    TrayUI__GetSaveStateAndInitRects_Hook, true});
+    list.push_back({{LR"(private: long __cdecl CSecondaryTray::_LoadSettings(void))"},
+                    &CSecondaryTray__LoadSettings_Original,
+                    CSecondaryTray__LoadSettings_Hook, true});
+    list.push_back({{LR"(public: enum winrt::WindowsUdk::UI::Shell::TaskbarLocation __cdecl winrt::WindowsUdk::UI::Shell::implementation::TaskbarSettings::Location(void))"},
+                    &TaskbarSettings_Location_Original, TaskbarSettings_Location_Hook,
+                    true});
+}
+
+// After taskbar.dll is hooked, in Wh_ModInit: whether this build has the
+// location of its own, and if so the registry read is caught too.
+void TaskbarDllHooked() {
+    bool native;
+    if (g_feature && g_featureIsEnabled) {
+        constexpr int kReportingKindNone = 0;
+        native = g_featureIsEnabled(g_feature, kReportingKindNone);
+    } else {
+        // The native location gave these a monitor parameter.
+        native = !g_oldVerifySize && !g_oldHandleSizing;
+    }
+    g_native = native && TrayUI__GetSaveStateAndInitRects_Original &&
+               TaskbarSettings_Location_Original;
+    Wh_Log(L"Taskbar location: native %d (flag %d), primary %d, secondary %d, content %d",
+           native, g_feature && g_featureIsEnabled,
+           TrayUI__GetSaveStateAndInitRects_Original != nullptr,
+           CSecondaryTray__LoadSettings_Original != nullptr,
+           TaskbarSettings_Location_Original != nullptr);
+    if (!g_native) {
+        return;
+    }
+    auto regGetValue = (RegGetValueW_t)GetProcAddress(GetModuleHandle(L"kernelbase.dll"),
+                                                      "RegGetValueW");
+    if (!regGetValue ||
+        !WindhawkUtils::SetFunctionHook(regGetValue, RegGetValueW_Hook,
+                                        &RegGetValueW_Original)) {
+        Wh_Log(L"RegGetValueW not hooked");
+        g_native = false;
+        return;
+    }
+    core::g_forcedEdge = ForcedEdge;
+}
+
+// Moves the taskbars to the set edge, or back to Windows' one once unloading.
+void Apply() {
+    if (!g_native) {
+        return;
+    }
+    int edge = ForcedEdge();
+    if (edge < 0) {
+        if (g_told.exchange(-1) < 0) {
+            return;
+        }
+        edge = StoredEdge();
+    } else if (g_told.exchange(edge) == edge) {
+        return;
+    }
+    HWND taskbar = core::PrimaryTaskbar();
+    if (!taskbar) {
+        return;
+    }
+    Wh_Log(L"Taskbar to edge %d", edge);
+    // The primary moves with the change the Settings app sends, which has its
+    // content read the location again too; the secondaries read theirs again.
+    SendMessage(taskbar, core::kSettingChangeMsg, core::kLocationSetting, edge);
+    SendMessage(taskbar, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+}
+
+}  // namespace position
+
 namespace entry {
 void ApplyNew();
 }
@@ -16265,6 +16523,7 @@ struct Features {
     bool folders;
     bool start;
     bool panels;
+    bool position;
     bool operator==(const Features&) const = default;
 };
 
@@ -16282,7 +16541,8 @@ Features Wanted() {
             .folders = settings::g.folders.enabled,
             .start = settings::g.start.mode != settings::StartMode::kWindows,
             // The stock tray is at the right end already.
-            .panels = settings::g.pill.enabled && settings::g.tray.panelsNearTray};
+            .panels = settings::g.pill.enabled && settings::g.tray.panelsNearTray,
+            .position = settings::g.pill.edge != settings::Edge::kWindows};
 }
 
 // ---- shared hooks -------------------------------------------------------------
@@ -16452,9 +16712,15 @@ bool HookTaskbarDll() {
     if (g_features.folders) {
         folders::CollectTaskbarDll(hooks);
     }
+    if (g_features.position) {
+        position::CollectTaskbarDll(hooks);
+    }
     bool ok = WindhawkUtils::HookSymbols(module, hooks.data(), hooks.size());
     if (ok && g_features.folders) {
         folders::TaskbarDllHooked();
+    }
+    if (ok && g_features.position) {
+        position::TaskbarDllHooked();
     }
     return ok;
 }
@@ -17621,6 +17887,9 @@ void Wh_ModAfterInit() {
         return;
     }
     hooks::AfterInit();
+    if (hooks::g_features.position) {
+        position::Apply();
+    }
     core::RunOn(core::PrimaryTaskbar(), entry::ApplyAll);
     if (hooks::g_features.size) {
         size::ApplySettings();
@@ -17665,6 +17934,9 @@ void Wh_ModBeforeUninit() {
         hooks::g_iconLoads.clear();
         hooks::g_frameLoads.clear();
     });
+    if (hooks::g_features.position) {
+        position::Apply();  // back to Windows' edge
+    }
     core::DetachAll();
 }
 
@@ -17691,6 +17963,9 @@ BOOL Wh_ModSettingsChanged(BOOL* bReload) {
     if (hooks::Wanted() != hooks::g_features) {
         *bReload = TRUE;
         return TRUE;
+    }
+    if (hooks::g_features.position) {
+        position::Apply();
     }
     core::RunOn(core::PrimaryTaskbar(), [] {
         entry::RestoreAll();

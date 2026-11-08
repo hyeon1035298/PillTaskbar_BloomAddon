@@ -1,6 +1,16 @@
 group:pill	Pill
 pill.enabled	Pill shape
 pill.enabled#about	When off, the taskbar goes back to the default Windows look
+pill.edge	Taskbar position
+pill.edge#about	Top or bottom of the screen. Windows' setting in the registry is not changed, so turning this off or turning the mod off puts the taskbar back where Windows has it. To auto-hide a taskbar at the top, keep the auto-hide helper on as well
+pill.edge=windows	Follow Windows settings
+pill.edge=top	Top
+pill.edge=bottom	Bottom
+pill.align	Pill alignment
+pill.align#about	Where along the edge the expanded pill sits
+pill.align=left	Left
+pill.align=center	Center
+pill.align=right	Right
 pill.style	Style
 pill.style=bloom	Bloom (glass with a faint outline)
 pill.style=glass	Glassmorphism (lit edges, top reflection and bottom glow)
@@ -59,7 +69,7 @@ group:autohide	Auto-hide
 autohide.enabled	Auto-hide helper
 autohide.enabled#about	Turn auto-hide on or off in Windows Settings (Taskbar behaviors). This feature also lets a taskbar at the top hide, and applies the values below
 autohide.revealZone	Reveal zone (%)
-autohide.revealZone#about	The mouse brings the taskbar out only in this middle part of the edge. 100 means the whole edge
+autohide.revealZone#about	The mouse brings the taskbar out only in this part of the edge, around its middle (or from the end the pill is set against, when it is aligned left or right). 100 means the whole edge
 autohide.showDelay	Show delay (ms)
 autohide.showDelay#about	-1 uses the Windows default (mouse hover time, usually 400)
 autohide.hideDelay	Hide delay (ms)
