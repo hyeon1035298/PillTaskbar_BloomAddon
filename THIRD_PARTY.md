@@ -11,6 +11,7 @@ PillTaskbar(`pill-taskbar.wh.cpp`)는 GNU General Public License v3.0으로 공�
 | [taskbar-auto-hide-speed](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-auto-hide-speed.wh.cpp) | 1.1 | m417z | GPL-3.0 | `SharedAnimations`의 펼치기/접기 `KeyFrameAnimation.Duration` 바꾸기 |
 | [taskbar-on-top](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-on-top.wh.cpp) / [taskbar-vertical](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-vertical.wh.cpp) | 1.3 / 1.5 | m417z | GPL-3.0 | wil 기능 `Feature_61970341` 끄기 훅(위쪽 작업표시줄의 자동 숨김 허용). taskbar-on-top의 네이티브 위치 경로(`position` 구역): 작업표시줄이 자기 위치를 읽는 동안만 `RegGetValueW`의 `TaskbarLocation`을 바꿔 주기, `TaskbarSettings::Location`, `Feature_59213768`과 옛 오버로드로 네이티브 판정, `0x5CA`(6) 메시지와 `WM_SETTINGCHANGE "TraySettings"`로 옮기기 |
 | [taskbar-ai-quota](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-ai-quota.wh.cpp) | 1.6.5 | Cleroth | MIT | 보조 작업표시줄(`CSecondaryTaskBand`)의 XamlRoot 얻는 경로 |
+| [TokenCat](https://github.com/SeuPut0705/TokenCat) | 3c6a21e (2026-10-23) | TokenCat contributors | MIT | 사용량 자세한 창의 세션 목록(`ai_sessions` 구역): Claude Code·Codex 세션 기록의 위치와 고르는 범위, 기록 끝부분만 읽기, 턴 상태(진행·도구 실행·입력 대기·완료·중단)와 살아 있다고 보는 시간, 턴 출력 토큰, 컨텍스트 계산, 상태 이름과 숫자 서식. Windows판(C#)의 `TokenLogParser`, `TokenTracker`, `SessionTitle`, `SessionPresentation`, `Lang`을 C++로 줄여 옮겼다 |
 | taskbar-folders(공개하지 않은 모드) | 3.15 | PillTaskbar 작성자 | 자작, 이 저장소에서 GPL-3.0으로 공개 | 모드 전체를 `folders` 구역으로 옮김(앱 끌어 합치기, 폴더 창과 메뉴, 폴더 안 앱의 창 묶기, 탐색기에서 넣기, 미리보기 아이콘). 작업표시줄 스레드 `DispatcherQueue`를 훅에서 기억해 두는 방식도 여기서 왔다. 아래 다섯 줄은 taskbar-folders가 다른 곳에서 가져온 것 |
 | [taskbar-grouping](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-grouping.wh.cpp) | 1.3.12 | m417z | GPL-3.0 | `RESOLVEDWINDOW` 구조체 배치, `CTaskBand::_HandleItemResolved`에서 앱 ID를 바꿔 창을 다른 버튼으로 보내는 방식, 스냅 그룹 항목을 건너뛰는 이유(탐색기 충돌) |
 | [taskbar-icon-separators](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-icon-separators.wh.cpp) | 1.0.33 | meteoni | GPL-3.0 | `IPinnedList3`, `IPinManagerInterop2/3` 인터페이스 배치와 CLSID/IID, `PINNEDLISTMODIFYCALLER` 값 |
@@ -76,6 +77,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## TokenCat (MIT)
+
+사용량 자세한 창의 세션 목록을 옮겼다. 원본 `LICENSE`의 저작권 표시는 아래와 같고, MIT 문구는 위 taskbar-ai-quota 절과 같다.
+
+```
+Copyright (c) 2026 TokenCat contributors
 ```
 
 

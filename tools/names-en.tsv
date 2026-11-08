@@ -89,7 +89,7 @@ media.maxWidth	Max title width (px)
 media.maxWidth#about	Longer titles are shortened with …
 group:usage	Usage
 usage.enabled	Show Bloom usage
-usage.enabled#about	Reads the AI usage file Bloom exports and shows each account's weekly usage % with a bar in the tray. Turn on file export under Home > AI usage in Bloom settings. Nothing is created if the export folder doesn't exist
+usage.enabled#about	Reads the AI usage file Bloom exports and shows each account's weekly usage % with a bar in the tray. The numbers follow Bloom's used / left setting; a right-click turns them the other way. A click opens the details of every limit. Turn on file export under Home > AI usage in Bloom settings. Nothing is created if the export folder doesn't exist
 usage.logoColor	Logo color
 usage.logoColor#about	The account icons in the tray and the island (files picked in Bloom Settings › AI accounts, or else the Anthropic and OpenAI logos Bloom carries)
 usage.logoColor=mono	Mono (dim text color)
@@ -98,6 +98,8 @@ usage.gapBefore	Gap from apps (px)
 usage.gapBefore#about	Space added between the last app button and the usage
 usage.gapAfter	Right gap (px)
 usage.gapAfter#about	Space from the end of the usage to the tray icons on the right
+usage.sessions	Show sessions in the details
+usage.sessions#about	The window a click on the usage opens lists this PC's Claude Code and Codex sessions (state, this turn's tokens, context). The end of each tool's session logs is read only while the window is open, and never what was said
 group:island	Auto-hide island
 island.enabled	Auto-hide island
 island.enabled#about	While the taskbar is hidden by auto-hide, puts a small black island on its edge (top or bottom). Clicking the island (setting below) or pointing at it expands the island and brings out the taskbar. Drag it with Ctrl held to move it along the edge; Ctrl and a right click put it back in the middle. Auto-hide helper must also be on
