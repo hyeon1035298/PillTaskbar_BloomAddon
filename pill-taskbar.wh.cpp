@@ -18656,7 +18656,7 @@ Media::SolidColorBrush Brush(uint32_t argb) {
 
 // The popup's folder name: '|' never is in a folder's path.
 constexpr PCWSTR kKey = L"|usage";
-constexpr double kWidth = 340;
+constexpr double kWidth = 360;
 constexpr double kPadding = 14;       // inside the surface
 constexpr double kCardPadX = 14, kCardPadY = 12;  // Bloom's home cards
 constexpr double kGap = 8;            // between cards
@@ -18712,6 +18712,16 @@ Controls::TextBlock Text(std::wstring const& text, double size, uint32_t color,
 
 auto Semi() {
     return winrt::Windows::UI::Text::FontWeights::SemiBold();
+}
+
+// Numbers that keep their width as they count.
+Controls::TextBlock Figures() {
+    Controls::TextBlock t;
+    t.FontFamily(Media::FontFamily{kFont});
+    t.VerticalAlignment(VerticalAlignment::Center);
+    t.TextTrimming(TextTrimming::CharacterEllipsis);
+    Documents::Typography::SetNumeralAlignment(t, FontNumeralAlignment::Tabular);
+    return t;
 }
 
 auto Medium() {
@@ -18879,9 +18889,9 @@ FrameworkElement Mark(usage::Account const& a, usage::Label const& label) {
     }
 }
 
-// A limit as Bloom's home shows it: its name, then "68%" (" 남음") and the time
-// to its reset; under them its bar. The reset's date is in the tooltip. The
-// numbers count the way Bloom shows them, whichever way the meter was turned.
+// A limit as TokenCat shows one: "주간  68% 남음" and the time to its reset at the
+// end; under them its bar. The reset's date is in the tooltip. The numbers
+// count the way Bloom shows them, whichever way the meter was turned.
 FrameworkElement LimitRow(usage::Model const& m, usage::Account const& a, usage::Limit const& l,
                           int64_t now) {
     usage::Value v = usage::Evaluate(m, a, &l, now);
@@ -18890,30 +18900,26 @@ FrameworkElement LimitRow(usage::Model const& m, usage::Account const& a, usage:
     bool hot = number && v.percent >= settings::theme::kUsageDangerPercent;
     Controls::StackPanel row;
     row.Margin({0, 2, 0, 0});
-    Controls::TextBlock right;
-    right.FontFamily(Media::FontFamily{kFont});
-    right.VerticalAlignment(VerticalAlignment::Center);
-    Documents::Typography::SetNumeralAlignment(right, FontNumeralAlignment::Tabular);
+    auto left = Figures();
+    left.Inlines().Append(Span((l.name.empty() ? usage::WindowName(l.mins) : l.name) + L"  ", kSmallSize, C().dim));
     if (hot) {  // a mark as well as the colour
         auto mark = Span(L"\xE7BA ", 10.5, C().danger);
         mark.FontFamily(Media::FontFamily{kIconFont});
-        right.Inlines().Append(mark);
+        left.Inlines().Append(mark);
     }
-    auto figure = Span(v.Figure() + (number ? L"%" : L""), kTextSize, hot ? C().danger : C().text, !hot);
-    if (hot) {
-        figure.FontWeight(Semi());
+    auto figure = Span(v.Figure() + (number ? L"%" : L""), kNameSize, hot ? C().danger : C().text);
+    figure.FontWeight(Semi());
+    left.Inlines().Append(figure);
+    if (number) {
+        left.Inlines().Append(Span(v.left ? L" 남음" : L" 사용", kSmallSize, C().dim));
     }
-    right.Inlines().Append(figure);
-    if (number && v.left) {
-        right.Inlines().Append(Span(L" 남음", kSmallSize, C().dim));
-    }
+    FrameworkElement right{nullptr};
     if (number && l.resetsAt > now) {
-        right.Inlines().Append(Span(L"  " + usage::Duration(l.resetsAt - now), kSmallSize, C().faint));
+        right = Text(usage::Duration(l.resetsAt - now) + L" 후 초기화", kSmallSize, C().faint);
     }
-    row.Children().Append(
-        Line(Text(l.name.empty() ? usage::WindowName(l.mins) : l.name, kSmallSize, C().dim), right));
+    row.Children().Append(Line(left, right));
     auto bar = Bar(number ? v.Shown() / 100.0 : 0, hot ? C().danger : C().accent);
-    bar.Margin({0, 3, 0, 2});
+    bar.Margin({0, 4, 0, 3});
     row.Children().Append(bar);
     if (std::wstring at = LocalTime(l.resetsAt); !at.empty()) {
         Controls::ToolTipService::SetToolTip(row, winrt::box_value(at + L" 초기화"));
@@ -19147,14 +19153,25 @@ uint32_t DotColor(ai_sessions::Row const& r) {
     }
 }
 
-Controls::Border Dot(uint32_t color, double size) {
-    Controls::Border dot;
-    dot.Width(size);
-    dot.Height(size);
-    dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(size / 2));
-    dot.Background(Brush(color));
-    dot.VerticalAlignment(VerticalAlignment::Center);
-    return dot;
+// The state's mark as TokenCat draws it: a ring while the model works, a square
+// while a tool runs, a dot else; in DotColor's colour.
+Controls::Border StateMark(ai_sessions::Row const& r, double size) {
+    using ai_sessions::State;
+    uint32_t color = DotColor(r);
+    Controls::Border mark;
+    mark.Width(size);
+    mark.Height(size);
+    mark.VerticalAlignment(VerticalAlignment::Center);
+    if (r.state == State::kWorking || r.state == State::kOutput || r.state == State::kStale) {
+        double ring = std::max(1.5, size / 5);
+        mark.CornerRadius(CornerRadiusHelper::FromUniformRadius(size / 2));
+        mark.BorderThickness({ring, ring, ring, ring});
+        mark.BorderBrush(Brush(color));
+    } else {
+        mark.CornerRadius(CornerRadiusHelper::FromUniformRadius(r.state == State::kTool ? 2 : size / 2));
+        mark.Background(Brush(color));
+    }
+    return mark;
 }
 
 // `lead` at its size, `main` taking the rest, `end` at its size.
@@ -19180,16 +19197,6 @@ Controls::Grid Columns(FrameworkElement const& lead, FrameworkElement const& mai
         grid.Children().Append(end);
     }
     return grid;
-}
-
-// Numbers that keep their width as they count.
-Controls::TextBlock Figures() {
-    Controls::TextBlock t;
-    t.FontFamily(Media::FontFamily{kFont});
-    t.VerticalAlignment(VerticalAlignment::Center);
-    t.TextTrimming(TextTrimming::CharacterEllipsis);
-    Documents::Typography::SetNumeralAlignment(t, FontNumeralAlignment::Tabular);
-    return t;
 }
 
 void SetTag(FrameworkElement const& e, std::wstring const& tag) {
@@ -19271,10 +19278,10 @@ bool CopyText(std::wstring const& text) {
     return ok;
 }
 
-// "Explore a3e6d1ab · 파일 작업 … 1.2k tok · 2분 전"
+// "└ ■ Explore  a3e6d1ab · 파일 작업 … 2분 전  1,234 tok"
 FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
     auto what = Figures();
-    what.Inlines().Append(Span(a.role.empty() ? L"Subagent" : a.role, kSmallSize, C().dim, true));
+    what.Inlines().Append(Span(a.role.empty() ? L"Subagent" : a.role, kSmallSize, C().text, true));
     std::wstring id = a.agentId.size() > 8 && a.source == ai_sessions::Source::kClaude
                           ? a.agentId.substr(a.agentId.size() > 9 && a.agentId[0] == L'a' ? 1 : 0, 8)
                           : a.agentId;
@@ -19283,12 +19290,27 @@ FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
     }
     what.Inlines().Append(Span(L" · " + StateWords(a), kSmallSize, C().faint));
     int tokens = a.Live() && a.turnOutput ? *a.turnOutput : a.lastTurnOutput;
-    auto when = Text(Joined({tokens > 0 ? Compact(tokens) + L" tok" : L"", Ago(now - a.liveAt)}),
-                     kSmallSize, C().faint);
-    auto dot = Dot(DotColor(a), 5);
-    dot.Margin({0, 0, 7, 0});
-    auto line = Columns(dot, what, when);
-    line.Margin({kIndent, 3, 0, 0});
+    auto when = Figures();
+    when.Inlines().Append(Span(Ago(now - a.liveAt), kSmallSize, C().faint));
+    if (tokens > 0) {
+        auto figure = Span(L"  " + Tokens(tokens), kSmallSize, C().text);
+        figure.FontWeight(Semi());
+        when.Inlines().Append(figure);
+        when.Inlines().Append(Span(L" tok", kSmallSize, C().dim));
+    }
+    // └ from the session's mark down to this one
+    Controls::Border elbow;
+    elbow.Width(7);
+    elbow.Height(10);
+    elbow.BorderThickness({1, 0, 0, 1});
+    elbow.BorderBrush(Brush(C().edge));
+    elbow.CornerRadius({0, 0, 0, 3});
+    elbow.VerticalAlignment(VerticalAlignment::Top);
+    elbow.Margin({0, -3, 5, 0});
+    auto mark = StateMark(a, 7);
+    mark.Margin({0, 0, 7, 0});
+    auto line = Columns(Across({elbow, mark}), what, when);
+    line.Margin({4, 4, 0, 0});
     return line;
 }
 
@@ -19296,7 +19318,7 @@ FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
 // model, tool and when its log is written, then the two buttons.
 FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int64_t now) {
     Controls::StackPanel panel;
-    panel.Margin({kIndent, 8, 0, 2});
+    panel.Margin({28, 8, 10, 4});
     panel.Spacing(3);
     panel.Background(Brush(0));  // a click here leaves it open
     SetTag(panel, L"none|");
@@ -19345,64 +19367,111 @@ FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int
     return panel;
 }
 
-// ● title … 4,020 tok · 0:41
-//   명령 실행 · Bash · model · +1,120 tok · 1분 전 … ▬ 61%
-// then its subagents, and its details when open.
+// TokenCat's row: its mark, the title, under it the state and model, then
+// "+1,120 tok · 1분 전"; at the end the turn's tokens large, its time and the
+// context used. A session not running is one line: "마지막 턴 1.5k · 2시간 전".
+// Then its subagents; an open one is outlined in the accent with its details
+// under it.
 FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
+    using ai_sessions::State;
     std::wstring key = KeyOf(r);
     bool open = !key.empty() && g_open->expanded == key;
-    Controls::StackPanel stack;
+    bool live = r.Live() || r.state == State::kInput;
 
-    auto dot = Dot(DotColor(r), 6);
-    dot.VerticalAlignment(VerticalAlignment::Top);
-    dot.Margin({1, 6, 7, 0});
+    Controls::Grid grid;
+    for (int c = 0; c < 3; c++) {
+        Controls::ColumnDefinition column;
+        column.Width(c == 1 ? GridLength{1, GridUnitType::Star} : GridLengthHelper::Auto());
+        grid.ColumnDefinitions().Append(column);
+    }
+    auto put = [&](FrameworkElement const& e, int row, int column) {
+        if (!e) return;
+        while ((int)grid.RowDefinitions().Size() <= row) {
+            Controls::RowDefinition line;
+            line.Height(GridLengthHelper::Auto());
+            grid.RowDefinitions().Append(line);
+        }
+        Controls::Grid::SetRow(e, row);
+        Controls::Grid::SetColumn(e, column);
+        if (column == 2) {
+            e.HorizontalAlignment(HorizontalAlignment::Right);
+            e.Margin({10, e.Margin().Top, 0, 0});
+        }
+        grid.Children().Append(e);
+    };
+
+    auto mark = StateMark(r, 9);
+    mark.VerticalAlignment(VerticalAlignment::Top);
+    mark.Margin({1, live ? 5.0 : 4.0, 9, 0});
+    put(mark, 0, 0);
     std::wstring name = !r.title.empty() ? r.title
                         : !r.subagent    ? L"제목 없는 세션"
                                          : (r.role.empty() ? L"" : r.role + L" ") + L"하위 에이전트";
-    auto title = Text(name, kNameSize, C().text, Semi());
-    title.TextWrapping(TextWrapping::Wrap);
-    title.MaxLines(2);
+    auto title = Text(name, live ? kTitleSize - 0.5 : kNameSize, live ? C().text : C().dim,
+                      live ? Semi() : Medium());
+    if (live) {
+        title.TextWrapping(TextWrapping::Wrap);
+        title.MaxLines(2);
+    }
     title.VerticalAlignment(VerticalAlignment::Top);
-    auto figures = Figures();
-    figures.VerticalAlignment(VerticalAlignment::Top);
-    figures.Margin({0, 1, 0, 0});
+    put(title, 0, 1);
+
     int tokens = r.Live() ? r.turnOutput.value_or(0) : r.lastTurnOutput;
-    if (tokens > 0) {
-        figures.Inlines().Append(Span(Tokens(tokens), kTextSize, C().text, true));
-        figures.Inlines().Append(Span(L" tok", kSmallSize, C().dim));
-    }
-    std::wstring timer;
-    if (r.state == ai_sessions::State::kInput) {
-        timer = L"대기 " + Elapsed(now - r.liveAt);
-    } else if (r.Live() && r.state != ai_sessions::State::kStale && r.turnStartedAt) {
-        timer = Elapsed(now - r.turnStartedAt);
-    }
-    if (!timer.empty()) {
-        figures.Inlines().Append(Span((tokens > 0 ? L" · " : L"") + timer, kSmallSize, C().faint));
-    }
-    stack.Children().Append(Columns(dot, title, figures));
+    if (!live) {
+        auto last = Figures();
+        if (tokens > 0) {
+            last.Inlines().Append(Span(L"마지막 턴 " + Compact(tokens) + L"  ", kSmallSize, C().faint));
+        }
+        last.Inlines().Append(Span(Ago(now - r.liveAt), kSmallSize, C().faint));
+        last.VerticalAlignment(VerticalAlignment::Top);
+        last.Margin({0, 1, 0, 0});
+        put(last, 0, 2);
+    } else {
+        auto figures = Figures();
+        figures.VerticalAlignment(VerticalAlignment::Top);
+        if (tokens > 0) {
+            auto figure = Span(Tokens(tokens), kTitleSize + 2, C().text);
+            figure.FontWeight(Semi());
+            figures.Inlines().Append(figure);
+            figures.Inlines().Append(Span(L" tok", kSmallSize, C().dim));
+        }
+        put(figures, 0, 2);
 
-    bool output = r.lastOutputDelta > 0 && r.lastOutputAt;
-    std::wstring state = Joined({StateWords(r), r.state == ai_sessions::State::kTool ? r.tool : L"",
-                                 ModelWords(r),
-                                 output ? L"+" + Tokens(r.lastOutputDelta) + L" tok" : L"",
-                                 Ago(now - r.liveAt)});
-    FrameworkElement context{nullptr};
-    if (r.contextUsed >= 0 && r.contextWindow > 0) {
-        int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
-        bool full = percent >= 85;
-        auto bar = Bar((double)r.contextUsed / r.contextWindow, full ? C().warn : C().accent, 32);
-        bar.Margin({0, 0, 5, 0});
-        bar.VerticalAlignment(VerticalAlignment::Center);
-        context = Across({bar, Text(std::to_wstring(percent) + L"%", kSmallSize,
-                                    full ? C().warn : C().faint)});
-        Controls::ToolTipService::SetToolTip(context, winrt::box_value(L"컨텍스트 " + Compact(r.contextUsed) +
-                                                                            L" / " + Compact(r.contextWindow)));
-    }
-    auto second = Columns(nullptr, Text(state, kSmallSize, C().dim), context);
-    second.Margin({kIndent, 2, 0, 0});
-    stack.Children().Append(second);
+        std::wstring state = Joined({StateWords(r), r.state == State::kTool ? r.tool : L"", ModelWords(r)});
+        auto second = Text(state, kSmallSize, r.state == State::kInput ? C().warn : C().dim, Medium());
+        second.Margin({0, 2, 0, 0});
+        put(second, 1, 1);
+        std::wstring timer;
+        if (r.state == State::kInput) {
+            timer = L"대기 " + Elapsed(now - r.liveAt);
+        } else if (r.state != State::kStale && r.turnStartedAt) {
+            timer = L"턴 " + Elapsed(now - r.turnStartedAt);
+        }
+        if (!timer.empty()) {
+            auto turn = Figures();
+            turn.Inlines().Append(Span(timer, kSmallSize, C().faint));
+            turn.Margin({0, 2, 0, 0});
+            put(turn, 1, 2);
+        }
 
+        bool output = r.lastOutputDelta > 0 && r.lastOutputAt;
+        auto third = Text(Joined({output ? L"+" + Tokens(r.lastOutputDelta) + L" tok" : L"", Ago(now - r.liveAt)}),
+                          kSmallSize, C().faint);
+        third.Margin({0, 2, 0, 0});
+        put(third, 2, 1);
+        if (r.contextUsed >= 0 && r.contextWindow > 0) {
+            int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
+            auto context = Text(L"컨텍스트 " + std::to_wstring(percent) + L"% 사용", kSmallSize,
+                                percent >= 85 ? C().warn : C().faint);
+            context.Margin({0, 2, 0, 0});
+            Controls::ToolTipService::SetToolTip(context, winrt::box_value(L"컨텍스트 " + Compact(r.contextUsed) +
+                                                                                L" / " + Compact(r.contextWindow)));
+            put(context, 2, 2);
+        }
+    }
+
+    Controls::StackPanel stack;
+    stack.Children().Append(grid);
     size_t shown = open ? r.agents.size() : std::min(r.agents.size(), kAgentsShown);
     for (size_t i = 0; i < shown; i++) {
         stack.Children().Append(AgentLine(r.agents[i], now));
@@ -19413,18 +19482,20 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
             last = std::max(last, r.agents[i].liveAt);
         }
         auto more = Text(L"+" + std::to_wstring(r.agents.size() - shown) + L"개 더 · 마지막 기록 " +
-                             Ago(now - last),
+                             Ago(now - last) + L"  ",
                          kSmallSize, C().faint);
-        more.Margin({kIndent + 12, 3, 0, 0});
-        stack.Children().Append(more);
-    }
-    if (open) {
-        stack.Children().Append(Details(r, key, now));
+        auto chevron = Text(L"\xE70D", 9, C().faint);
+        chevron.FontFamily(Media::FontFamily{kIconFont});
+        auto line = Across({more, chevron});
+        line.Margin({kIndent + 4, 4, 0, 0});
+        stack.Children().Append(line);
     }
 
     Controls::Border item;
     item.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
-    item.Padding({8, 7, 8, 8});
+    item.Padding({9, 8, 10, 8});
+    item.BorderThickness({1, 1, 1, 1});
+    item.BorderBrush(Brush(open ? C().accent : 0));
     std::wstring tag = key.empty() ? L"" : L"row|" + key;
     item.Background(Brush(open                                    ? C().accentSoft
                           : !tag.empty() && g_open->hover == tag ? C().hover
@@ -19434,25 +19505,35 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
         SetTag(item, tag);
         Automation::AutomationProperties::SetName(item, name);
     }
-    return item;
+    if (!open) {
+        return item;
+    }
+    Controls::StackPanel withDetails;
+    withDetails.Children().Append(item);
+    withDetails.Children().Append(Details(r, key, now));
+    return withDetails;
 }
 
-// "입력 필요 2 · 진행 1 · 에이전트 3", else nothing running.
+// "입력 필요 1 · 세션 2개 진행 중 · 도구 실행 2 · 하위 4", else nothing running.
 std::wstring Summary(std::vector<ai_sessions::Row> const& rows) {
-    int input = 0, running = 0, agents = 0;
+    using ai_sessions::State;
+    int input = 0, running = 0, tools = 0, agents = 0;
+    auto busy = [](ai_sessions::Row const& r) { return r.Live() && r.state != State::kStale; };
     for (auto const& r : rows) {
-        if (r.state == ai_sessions::State::kInput) {
+        if (r.state == State::kInput) {
             input++;
-        } else if (r.Live() && r.state != ai_sessions::State::kStale) {
+        } else if (busy(r)) {
             running++;
         }
-        agents += (int)std::ranges::count_if(r.agents, [](ai_sessions::Row const& a) {
-            return a.Live() && a.state != ai_sessions::State::kStale;
-        });
+        tools += r.state == State::kTool;
+        for (auto const& a : r.agents) {
+            agents += busy(a);
+            tools += a.state == State::kTool;
+        }
     }
-    return Joined({input ? L"입력 필요 " + std::to_wstring(input) : L"",
-                   running ? L"진행 " + std::to_wstring(running) : L"",
-                   agents ? L"에이전트 " + std::to_wstring(agents) : L""});
+    auto n = [](int v) { return std::to_wstring(v); };
+    return Joined({input ? L"입력 필요 " + n(input) : L"", running ? L"세션 " + n(running) + L"개 진행 중" : L"",
+                   tools ? L"도구 실행 " + n(tools) : L"", agents ? L"하위 " + n(agents) : L""});
 }
 
 // The tag of what the pointer is on: the nearest tagged element up from it.
@@ -19654,13 +19735,17 @@ void DrawSessions() {
         }
     }
     for (size_t g = 0; g < groups.size(); g++) {
-        auto icon = Text(L"\xE8B7", 11, C().faint);
-        icon.FontFamily(Media::FontFamily{kIconFont});
-        icon.Margin({0, 0, 6, 0});
-        auto name = Text(groups[g].first, kSmallSize, C().dim, Semi());
-        auto number = Text(std::to_wstring(groups[g].second.size()), kSmallSize, C().faint);
-        auto head = Columns(icon, name, number);
-        head.Margin({8, g ? 10.0 : 2.0, 8, 2});
+        if (g) {
+            Controls::Border rule;
+            rule.Height(1);
+            rule.Background(Brush(C().line));
+            rule.Margin({4, 8, 4, 2});
+            list.Children().Append(rule);
+        }
+        auto name = Text(groups[g].first, kNameSize, C().text, Semi());
+        auto number = Text(std::to_wstring(groups[g].second.size()) + L"개", kSmallSize, C().faint);
+        auto head = Columns(nullptr, name, number);
+        head.Margin({9, g ? 4.0 : 2.0, 10, 2});
         list.Children().Append(head);
         for (size_t i : groups[g].second) {
             list.Children().Append(SessionItem(rows[i], now));
