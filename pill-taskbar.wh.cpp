@@ -238,6 +238,43 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - showUsage: true
     $name: AI 사용량 보이기
     $description: Bloom 사용량 표시가 켜져 있고 Bloom 파일이 있을 때 보여 줍니다
+  - showMemory: false
+    $name: 메모리 사용률 보이기
+    $description: 메모리 정리 애드온이 켜져 있을 때 그 작업표시줄 아이콘과 같은 모양으로 보여 줍니다
+  - showCpu: false
+    $name: CPU 사용률 보이기
+    $description: 메모리 정리 애드온이 켜져 있을 때 보여 줍니다
+  - clockAt: center
+    $name: 시계 자리
+    $description: 가운데 아일랜드, 또는 화면 왼쪽·오른쪽 모서리에 붙는 아일랜드
+    $options:
+    - center: 가운데
+    - left: 왼쪽
+    - right: 오른쪽
+  - mediaAt: center
+    $name: 재생 중인 곡 자리
+    $options:
+    - center: 가운데
+    - left: 왼쪽
+    - right: 오른쪽
+  - usageAt: center
+    $name: AI 사용량 자리
+    $options:
+    - center: 가운데
+    - left: 왼쪽
+    - right: 오른쪽
+  - memoryAt: right
+    $name: 메모리 사용률 자리
+    $options:
+    - center: 가운데
+    - left: 왼쪽
+    - right: 오른쪽
+  - cpuAt: right
+    $name: CPU 사용률 자리
+    $options:
+    - center: 가운데
+    - left: 왼쪽
+    - right: 오른쪽
   - height: 35
     $name: 높이 (px)
     $description: 100% 배율 기준, 20에서 60까지
@@ -441,6 +478,7 @@ enum class LogoColor { kMono, kBrand };
 enum class StartMode { kWindows, kHidden, kBloom };
 enum class Edge { kWindows, kTop, kBottom };
 enum class Align { kCenter, kLeft, kRight };  // an unknown value reads as the first
+enum class Slot { kCenter, kLeft, kRight };   // the same
 
 struct Settings {
     struct {
@@ -495,7 +533,10 @@ struct Settings {
         struct {
             bool enabled;
             bool white;  // else black
-            bool showClock, showMedia, showUsage;
+            bool showClock, showMedia, showUsage, showMemory, showCpu;
+            // Which island each item is on: the middle one, or the one in the left
+            // or right corner.
+            Slot clockAt, mediaAt, usageAt, memoryAt, cpuAt;
             int height;  // px at 100% scale
             int width;   // body, px at 100% scale; 0 = fits the content
             bool clickToReveal;     // else the pointer entering it brings the taskbar out
@@ -599,6 +640,14 @@ void Load() {
     g.island.showClock = Wh_GetIntSetting(L"island.showClock");
     g.island.showMedia = Wh_GetIntSetting(L"island.showMedia");
     g.island.showUsage = Wh_GetIntSetting(L"island.showUsage");
+    g.island.showMemory = Wh_GetIntSetting(L"island.showMemory");
+    g.island.showCpu = Wh_GetIntSetting(L"island.showCpu");
+    auto slot = [](PCWSTR name) { return (Slot)Choice(name, {L"center", L"left", L"right"}); };
+    g.island.clockAt = slot(L"island.clockAt");
+    g.island.mediaAt = slot(L"island.mediaAt");
+    g.island.usageAt = slot(L"island.usageAt");
+    g.island.memoryAt = slot(L"island.memoryAt");
+    g.island.cpuAt = slot(L"island.cpuAt");
     g.island.height = Clamped(L"island.height", 20, 60);
     g.island.width = Clamped(L"island.width", 0, 1200);
     g.island.clickToReveal = Choice(L"island.reveal", {L"hover", L"click"}) == 1;
@@ -744,11 +793,13 @@ constexpr int kIslandFlare = 8;           // the fillets into the screen edge
 constexpr double kIslandPadding = 0.4;    // body sides, times the height
 constexpr double kIslandTextSize = 0.43;  // times the height
 constexpr double kIslandArtSize = 0.7;    // times the height
+constexpr double kIslandSystemSize = 0.6;  // memory and CPU icons, times the height
 constexpr double kIslandGap = 10;
 constexpr double kIslandArtGap = 6;
 constexpr double kIslandMeterGap = 4;   // a usage logo to its number
 constexpr double kIslandUsageLead = 8;  // more before the usage, a group of its own
 constexpr double kIslandMinWidth = 64;
+constexpr double kIslandApart = 4;  // the middle island kept this far from a corner one
 constexpr int kIslandFadeMs = 150;
 constexpr int kIslandFadeDelayMs = 200;  // waits out the taskbar's slide
 // The hover transparency comes in slowly and goes a little quicker, eased at
@@ -1347,6 +1398,13 @@ int (*g_forcedEdge)() = nullptr;
 // lParam. The Settings app sends it after storing the location.
 constexpr UINT kSettingChangeMsg = 0x5CA;
 constexpr WPARAM kLocationSetting = 6;
+// The memory add-on's readings on the primary taskbar window changed
+// (docs/addon-protocol.md); the island shows them.
+void (*g_onFiguresChanged)() = nullptr;
+UINT FiguresChangedMsg() {
+    static UINT msg = RegisterWindowMessage(L"MemoryClean.FiguresChanged");
+    return msg;
+}
 
 
 
@@ -1379,6 +1437,12 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
             (*(std::function<void()>*)lParam)();
         } catch (...) {
             Wh_Log(L"Taskbar work failed: %08X", winrt::to_hresult());
+        }
+        return 0;
+    }
+    if (msg == FiguresChangedMsg()) {
+        if (g_onFiguresChanged) {
+            Guard(L"Figures changed", [] { g_onFiguresChanged(); });
         }
         return 0;
     }
@@ -4625,10 +4689,10 @@ std::unordered_map<HWND, bool> g_collapsed;
 // Out when the mod started, for the tray's hide check once the apply is done.
 [[clang::no_destroy]] std::vector<HWND> g_outAtApply;
 // For the island (F8), set between its Apply and Restore: told when a
-// taskbar's collapsed state changed, and, while it shows, asked for the screen
-// x range [left, right) the pointer at the edge may bring the taskbar out from.
+// taskbar's collapsed state changed, and, while it shows, asked whether the
+// pointer at the edge at screen x may bring the taskbar out (over an island).
 void (*g_onCollapsedChanged)(HWND) = nullptr;
-bool (*g_revealRange)(HWND, int& left, int& right) = nullptr;
+bool (*g_revealsAt)(HWND, int x, bool& reveals) = nullptr;
 // Also the island's: told as the taskbar starts to show itself expanded or
 // collapsed, before it draws that, and asked whether it stands in for the
 // taskbar's slide.
@@ -4644,7 +4708,7 @@ bool g_expandUnderIsland;
 bool Customized() {
     auto& s = settings::g.autohide;
     return s.revealZone < 100 || s.showDelay >= 0 || s.hideDelay >= 0 ||
-           g_revealRange;
+           g_revealsAt;
 }
 
 bool Ready() {
@@ -4695,9 +4759,9 @@ bool OutsideZone(HWND hwnd, int reason) {
     if (reason == kReasonPointerOver && !PtInRect(&rc, pt)) {
         return false;
     }
-    int left, right;
-    if (g_revealRange && g_revealRange(hwnd, left, right)) {
-        return pt.x < left || pt.x >= right;
+    bool reveals;
+    if (g_revealsAt && g_revealsAt(hwnd, pt.x, reveals)) {
+        return !reveals;
     }
     if (zone >= 100) {
         return false;
@@ -8415,6 +8479,9 @@ struct Shape {
     float height = 0;
     float flare = 0;
     float radius = 0;
+    // A corner island's side at the screen's side: straight and square, with
+    // no fillet or round corner there.
+    bool flushLeft = false, flushRight = false;
     bool operator==(Shape const&) const = default;
 };
 
@@ -8442,22 +8509,27 @@ float FromEdge(Shape const& s, int row, bool bottom) {
 
 // True if the point, relative to the shape's top left, is in a pixel the
 // shape touches.
+// The pixel row's covered span [left, right).
+std::pair<int, int> RowSpan(Shape const& s, int y, bool bottom) {
+    int in = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
+    return {s.flushLeft ? 0 : in, (int)s.width - (s.flushRight ? 0 : in)};
+}
+
 bool InShape(Shape const& s, int x, int y, bool bottom) {
     if (y < 0 || y >= (int)s.height) {
         return false;
     }
-    int left = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
-    return x >= left && x < (int)s.width - left;
+    auto [left, right] = RowSpan(s, y, bottom);
+    return x >= left && x < right;
 }
 
 // Every pixel the shape touches: the window region (hit-testing, and DWM's
 // clip) must not cut into the antialiased edge.
 HRGN Region(Shape const& s, bool bottom) {
-    int width = (int)s.width;
     HRGN rgn = CreateRectRgn(0, 0, 0, 0);
     for (int y = 0; rgn && y < (int)s.height; y++) {
-        int left = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
-        if (HRGN row = CreateRectRgn(left, y, width - left, y + 1)) {
+        auto [left, right] = RowSpan(s, y, bottom);
+        if (HRGN row = CreateRectRgn(left, y, right, y + 1)) {
             CombineRgn(rgn, rgn, row, RGN_OR);
             DeleteObject(row);
         }
@@ -8524,6 +8596,11 @@ struct Content {
     Text title;
     std::vector<Meter> meters;
     float usageLead = 0;  // before the meters, past the gap
+    // Memory and CPU use as the memory add-on's taskbar icons, `unit` pixels a
+    // unit of their 25 x 18 box.
+    std::vector<std::pair<int, int>> system;  // kind (0 memory, 1 CPU), percent
+    int systemStyle = 1;
+    float unit = 0;
     float width = 0;
     std::wstring key;  // all that's drawn, to skip redraws that change nothing
 };
@@ -8538,11 +8615,31 @@ enum class Phase {
 // What the window region was made from.
 struct RegionKey {
     Phase phase = Phase::kIdle;
-    RECT window{}, island{}, pill{};
+    RECT window{}, island{}, pill{}, sides[2]{};
     bool operator==(RegionKey const& o) const {
         return phase == o.phase && EqualRect(&window, &o.window) &&
-               EqualRect(&island, &o.island) && EqualRect(&pill, &o.pill);
+               EqualRect(&island, &o.island) && EqualRect(&pill, &o.pill) &&
+               EqualRect(&sides[0], &o.sides[0]) && EqualRect(&sides[1], &o.sides[1]);
     }
+};
+
+// An island against the left or right corner of the screen, in the same window
+// as the middle one: its side there meets the screen's side square, the other
+// curves into the edge. It doesn't grow into the pill; it fades as the middle
+// one starts to.
+struct Side {
+    bool on = false;  // has something to show
+    Shape shape;
+    RECT rect{};  // screen pixels
+    std::wstring drawn;
+    wuc::ContainerVisual root{nullptr};
+    wuc::CompositionRoundedRectangleGeometry body{nullptr};
+    wuc::ShapeVisual bodyVisual{nullptr};
+    wuc::SpriteVisual fillet{nullptr};
+    wuc::SpriteVisual content{nullptr};
+    wuc::CompositionDrawingSurface filletSurface{nullptr};
+    wuc::CompositionDrawingSurface surface{nullptr};
+    float filletSize = 0;
 };
 
 struct Island {
@@ -8615,6 +8712,10 @@ struct Island {
     float pillRadius = 0;
     bool pillSeen = false;
     RegionKey region;
+    // The middle island has something to show. Without, it is still laid out,
+    // the morph's start, but not drawn, hit or revealing.
+    bool centerOn = true;
+    Side sides[2];  // the left and the right corner's
 
     bool mediaVisible = false;
     std::wstring title;
@@ -8995,6 +9096,90 @@ Color PillColor() {
     return c;
 }
 
+// ---- memory and CPU, from the memory add-on --------------------------------------
+// Memory Clean keeps its readings on the primary taskbar window and posts a note
+// there as they change (docs/addon-protocol.md). Nothing is read here but that.
+
+constexpr WCHAR kFiguresProp[] = L"MemoryClean.Figures";
+constexpr int kMemory = 0, kCpu = 1;
+
+struct Figures {
+    bool known = false;  // the add-on runs
+    int memory = 0, cpu = 0;
+    int style = 1;  // its icon: 0 line, 1 fill, 2 solid
+};
+
+// Bits 0-7 memory use, 8-15 CPU use, 16-17 the icon style, 24 set while it runs.
+Figures ReadFigures() {
+    HWND primary = FindWindow(L"Shell_TrayWnd", nullptr);
+    auto v = primary ? (ULONG_PTR)GetProp(primary, kFiguresProp) : 0;
+    Figures f;
+    f.known = (v >> 24) & 1;
+    f.memory = std::min<int>(v & 0xFF, 100);
+    f.cpu = std::min<int>((v >> 8) & 0xFF, 100);
+    f.style = std::min<int>((v >> 16) & 3, 2);
+    return f;
+}
+
+bool ShowsSystem() {
+    auto const& set = settings::g.island;
+    return set.showMemory || set.showCpu;
+}
+
+// The add-on's icons in their 25 x 18 box, as it draws them on the taskbar: a RAM
+// module on six feet, the middle one left out for the key notch; a processor with
+// pins on all four sides.
+constexpr float kMeterW = 25, kMeterH = 18, kMeterStroke = 1.3f, kPinW = 1.7f;
+
+struct Box4 {
+    float x, y, w, h;
+};
+struct MeterOutline {
+    Box4 body;
+    float radius;
+    std::vector<Box4> pins;
+};
+
+MeterOutline const& OutlineOf(int kind) {
+    static const MeterOutline ram = [] {
+        MeterOutline o{{1.15f, 0.95f, kMeterW - 2.3f, 13.3f}, 3.6f, {}};
+        float top = o.body.y + o.body.h - kMeterStroke / 2;
+        for (float x : {-7.0f, -4.4f, -1.8f, 1.8f, 4.4f, 7.0f}) {
+            o.pins.push_back({kMeterW / 2 + x - kPinW / 2, top, kPinW, 2.9f + kMeterStroke / 2});
+        }
+        return o;
+    }();
+    static const MeterOutline cpu = [] {
+        MeterOutline o{{3.1f, 2.6f, kMeterW - 6.2f, kMeterH - 5.2f}, 2.8f, {}};
+        float reach = 2.3f;
+        float bottom = o.body.y + o.body.h - kMeterStroke / 2;
+        float right = o.body.x + o.body.w - kMeterStroke / 2;
+        for (float x : {-5.2f, 0.0f, 5.2f}) {
+            o.pins.push_back({kMeterW / 2 + x - kPinW / 2, o.body.y - reach, kPinW, reach + kMeterStroke / 2});
+            o.pins.push_back({kMeterW / 2 + x - kPinW / 2, bottom, kPinW, reach + kMeterStroke / 2});
+        }
+        for (float y : {-2.6f, 2.6f}) {
+            o.pins.push_back({o.body.x - reach, kMeterH / 2 + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
+            o.pins.push_back({right, kMeterH / 2 + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
+        }
+        return o;
+    }();
+    return kind == kCpu ? cpu : ram;
+}
+
+// The add-on's colours (Bloom's tokens), the dark theme's on the black island and the
+// light one's on white: its ink, amber from 80 %, red from 90 %.
+Color SystemColor(int percent) {
+    bool dark = DarkIsland();
+    if (percent >= 90) {
+        return dark ? Color{255, 0xE5, 0x48, 0x4D} : Color{255, 0xDC, 0x3E, 0x42};
+    }
+    if (percent >= 80) {
+        return dark ? Color{255, 0xF7, 0xB7, 0x50} : Color{255, 0xB7, 0x79, 0x1F};
+    }
+    return dark ? Color{255, 0xEC, 0xED, 0xEE} : Color{255, 0x11, 0x18, 0x1C};
+}
+
 // ---- devices --------------------------------------------------------------------
 
 void CreateDevice(Island& g) {
@@ -9099,10 +9284,70 @@ void DrawArt(Island& g,
     dc->PopLayer();
 }
 
-void DrawContent(Island& g, Content const& c) {
-    Paint(g.surface, [&](ID2D1DeviceContext* dc) {
+// One of the memory add-on's icons as it draws it on the taskbar, its box's top
+// left at (x, y), `u` pixels a unit of the box.
+void DrawSystem(Island& g, ID2D1DeviceContext* dc, int kind, int percent, int style, float x,
+                float y, float u) {
+    MeterOutline const& o = OutlineOf(kind);
+    Color color = SystemColor(percent);
+    auto ink = Brush(dc, color);
+    auto box = [&](Box4 const& b, float inset) {
+        return D2D1::RectF(x + b.x * u + inset, y + b.y * u + inset, x + (b.x + b.w) * u - inset,
+                           y + (b.y + b.h) * u - inset);
+    };
+    D2D1_RECT_F body = box(o.body, 0);
+    float radius = o.radius * u;
+    if (style != 0) {
+        D2D1_RECT_F clip = body;
+        if (style == 1) {
+            clip.right = body.left + (body.right - body.left) * std::clamp(percent, 0, 100) / 100.0f;
+        }
+        dc->PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        D2D1_ROUNDED_RECT fill{body, radius, radius};
+        dc->FillRoundedRectangle(&fill, Brush(dc, color, style == 2 ? 1.0f : 0x47 / 255.0f).get());
+        dc->PopAxisAlignedClip();
+    }
+    for (auto const& p : o.pins) {
+        auto pin = box(p, 0);
+        dc->FillRectangle(&pin, ink.get());
+    }
+    // Stroked inside its bounds, as XAML strokes a Rectangle.
+    float stroke = kMeterStroke * u, inner = std::max(0.0f, radius - stroke / 2);
+    D2D1_ROUNDED_RECT outline{box(o.body, stroke / 2), inner, inner};
+    dc->DrawRoundedRectangle(&outline, ink.get(), stroke, nullptr);
+
+    std::wstring number = std::to_wstring(percent);
+    com_ptr<IDWriteTextFormat> format;
+    com_ptr<IDWriteTextLayout> layout;
+    DWRITE_OVERHANG_METRICS over{};
+    if (FAILED(g.dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
+                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                          (percent >= 100 ? 7.8f : 10.0f) * u, L"",
+                                          format.put())) ||
+        FAILED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)) ||
+        FAILED(g.dwrite->CreateTextLayout(number.c_str(), (UINT32)number.size(), format.get(), 0,
+                                          0, layout.put())) ||
+        FAILED(layout->GetOverhangMetrics(&over))) {
+        return;
+    }
+    // The ink, not the line box, in the middle of the body.
+    float cx = (body.left + body.right) / 2, cy = (body.top + body.bottom) / 2;
+    Color win = DarkIsland() ? Color{255, 0x18, 0x18, 0x1B} : Color{255, 0xF4, 0xF4, 0xF5};
+    dc->DrawTextLayout({std::round(cx - (over.right - over.left) / 2),
+                        std::round(cy - (over.bottom - over.top) / 2)},
+                       layout.get(), Brush(dc, style == 2 ? win : color).get(),
+                       D2D1_DRAW_TEXT_OPTIONS_NONE);
+}
+
+// What `c` holds, in the body of `shape` on `surface`: the middle island's or a
+// corner one's.
+void DrawContent(Island& g,
+                 Content const& c,
+                 wuc::CompositionDrawingSurface const& surface,
+                 Shape const& shape) {
+    Paint(surface, [&](ID2D1DeviceContext* dc) {
         float s = g.dpi / 96.0f;
-        float h = g.shape.height;
+        float h = shape.height;
         float gap = std::round((float)theme::kIslandGap * s);
         Color textColor = IslandText(false);
         Color dimColor = IslandText(true);
@@ -9112,10 +9357,11 @@ void DrawContent(Island& g, Content const& c) {
                                D2D1_DRAW_TEXT_OPTIONS_NONE);
         };
         // A set width narrower than the content cuts it at the body.
-        D2D1_RECT_F bodyRect{g.shape.flare, 0, g.shape.width - g.shape.flare, h};
+        D2D1_RECT_F bodyRect{shape.flushLeft ? 0 : shape.flare, 0,
+                             shape.width - (shape.flushRight ? 0 : shape.flare), h};
         dc->PushAxisAlignedClip(&bodyRect, D2D1_ANTIALIAS_MODE_ALIASED);
 
-        float x = std::round((g.shape.width - c.width) / 2);
+        float x = std::round(bodyRect.left + (bodyRect.right - bodyRect.left - c.width) / 2);
         if (c.clock.layout) {
             put(c.clock, x, (h - c.clock.height) / 2, text.get());
             x += c.clock.width + gap;
@@ -9176,6 +9422,12 @@ void DrawContent(Island& g, Content const& c) {
             }
             x = left + m.width + gap;
         }
+        float boxGap = std::round(4 * c.unit);
+        for (auto [kind, percent] : c.system) {
+            DrawSystem(g, dc, kind, percent, c.systemStyle, x, std::round((h - kMeterH * c.unit) / 2),
+                       c.unit);
+            x += kMeterW * c.unit + boxGap;
+        }
         dc->PopAxisAlignedClip();
     });
 }
@@ -9222,10 +9474,11 @@ Text MakeText(Island& g,
     return t;
 }
 
-// `room`, if set, is the width the content must fit: the title gives way
-// first, down to an ellipsis, then goes.
-Content Measure(Island& g, float height, float room) {
+// The items set to the island at `slot`. `room`, if set, is the width the
+// content must fit: the title gives way first, down to an ellipsis, then goes.
+Content Measure(Island& g, float height, float room, settings::Slot slot) {
     auto const& set = settings::g.island;
+    auto here = [&](bool show, settings::Slot at) { return show && at == slot; };
     float s = g.dpi / 96.0f;
     float size = std::round(height * (float)theme::kIslandTextSize);
     float gap = std::round((float)theme::kIslandGap * s);
@@ -9234,13 +9487,13 @@ Content Measure(Island& g, float height, float room) {
     Content c;
     auto add = [&](float width) { c.width += (c.width > 0 ? gap : 0) + width; };
 
-    if (set.showClock && !g_clock.empty()) {
+    if (here(set.showClock, set.clockAt) && !g_clock.empty()) {
         c.clock = MakeText(g, g_clock, size, DWRITE_FONT_WEIGHT_NORMAL, 0, true);
         add(c.clock.width);
         c.key += g_clock;
     }
     c.key += kSeparator;
-    if (set.showMedia && g.mediaVisible) {
+    if (here(set.showMedia, set.mediaAt) && g.mediaVisible) {
         c.media = true;
         c.art = std::round(height * (float)theme::kIslandArtSize);
         float width = c.art;
@@ -9255,7 +9508,7 @@ Content Measure(Island& g, float height, float room) {
     c.key += kSeparator;
     // Staleness is judged with the current time, as the widget does.
     auto model = usage::g_model;
-    if (set.showUsage && model) {
+    if (here(set.showUsage, set.usageAt) && model) {
         auto labels = usage::Labels(*model);
         int64_t now = usage::Now();
         float logoGap = std::round((float)theme::kIslandMeterGap * s);
@@ -9312,6 +9565,28 @@ Content Measure(Island& g, float height, float room) {
                  std::to_wstring(usage::g_iconsRead);
     }
 
+    c.key += kSeparator;
+    // Memory and CPU at the height the island gives its art, less a little.
+    if (here(set.showMemory, set.memoryAt) || here(set.showCpu, set.cpuAt)) {
+        Figures f = ReadFigures();
+        if (f.known) {
+            if (here(set.showMemory, set.memoryAt)) {
+                c.system.push_back({kMemory, f.memory});
+            }
+            if (here(set.showCpu, set.cpuAt)) {
+                c.system.push_back({kCpu, f.cpu});
+            }
+            c.systemStyle = f.style;
+            c.unit = std::round(height * (float)theme::kIslandSystemSize) / kMeterH;
+            float n = (float)c.system.size();
+            add(n * kMeterW * c.unit + (n - 1) * std::round(4 * c.unit));
+            for (auto [kind, percent] : c.system) {
+                c.key += std::to_wstring(kind) + L":" + std::to_wstring(percent) + L",";
+            }
+            c.key += std::to_wstring(f.style) + std::to_wstring((int)DarkIsland());
+        }
+    }
+
     if (room > 0 && c.width > room && c.title.layout) {
         float before = c.title.width;
         float titleWidth = before - (c.width - room);
@@ -9334,8 +9609,24 @@ Content Measure(Island& g, float height, float room) {
 using float2 = winrt::Windows::Foundation::Numerics::float2;
 using float3 = winrt::Windows::Foundation::Numerics::float3;
 
+// The island the point is on: 0 the middle one, 1 the left corner's, 2 the right
+// corner's, -1 none.
+int BodyAt(Island const& g, POINT pt) {
+    if (g.centerOn &&
+        InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top, g.bottom)) {
+        return 0;
+    }
+    for (int i = 0; i < 2; i++) {
+        Side const& d = g.sides[i];
+        if (d.on && InShape(d.shape, pt.x - d.rect.left, pt.y - d.rect.top, g.bottom)) {
+            return i + 1;
+        }
+    }
+    return -1;
+}
+
 bool OnIsland(Island const& g, POINT pt) {
-    return InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top, g.bottom);
+    return BodyAt(g, pt) >= 0;
 }
 
 // Keeps the taskbar's region box (the pill pieces with their margins) while
@@ -9479,6 +9770,13 @@ void Bind(Island& g) {
     bind(g.content, L"Opacity",
          L"Clamp(1 - m.Progress / " + std::to_wstring(theme::kIslandContentOut) +
              L", 0, 1)" + hover);
+    // The corner islands go as the middle one's content does, early on the way
+    // out, and come back late on the way in.
+    for (auto& d : g.sides) {
+        bind(d.root, L"Opacity",
+             L"Clamp(1 - m.Progress / " + std::to_wstring(theme::kIslandContentOut) +
+                 L", 0, 1)" + hover);
+    }
 }
 
 // ---- the taskbar under the morph ----------------------------------------------
@@ -9564,8 +9862,14 @@ void Settle(Island& g, bool out) {
 // Idle, the island's shape (which is also what DWM shows); morphing, the
 // whole window the shape moves over; out, only where the island sticks out
 // of the pill, usually nothing, so the taskbar gets the pointer.
+// A corner island's place while it counts, else nothing.
+RECT SideRect(Island const& g, int i) {
+    return g.sides[i].on ? g.sides[i].rect : RECT{};
+}
+
 void SetRegion(Island& g) {
-    RegionKey key{g.phase, g.window, g.islandRect, g.pillBox};
+    RegionKey key{g.phase, g.window, g.centerOn ? g.islandRect : RECT{}, g.pillBox,
+                  {SideRect(g, 0), SideRect(g, 1)}};
     if (key == g.region) {
         return;
     }
@@ -9574,8 +9878,23 @@ void SetRegion(Island& g) {
     HRGN rgn = nullptr;
     if (g.phase == Phase::kExpanding || g.phase == Phase::kCollapsing) {
         rgn = CreateRectRgn(0, 0, width, height);
-    } else if ((rgn = Region(g.shape, g.bottom))) {
-        OffsetRgn(rgn, g.islandRect.left - g.window.left, g.islandRect.top - g.window.top);
+    } else if ((rgn = CreateRectRgn(0, 0, 0, 0))) {
+        auto add = [&](Shape const& shape, RECT const& at) {
+            if (HRGN part = Region(shape, g.bottom)) {
+                OffsetRgn(part, at.left - g.window.left, at.top - g.window.top);
+                CombineRgn(rgn, rgn, part, RGN_OR);
+                DeleteObject(part);
+            }
+        };
+        if (g.centerOn) {
+            add(g.shape, g.islandRect);
+        }
+        // The corner ones are gone while the taskbar is out.
+        for (auto const& d : g.sides) {
+            if (d.on && g.phase == Phase::kIdle) {
+                add(d.shape, d.rect);
+            }
+        }
         if (g.phase == Phase::kOut && !g.pillSeen) {
             SetRectRgn(rgn, 0, 0, 0, 0);
         } else if (g.phase == Phase::kOut) {
@@ -9618,9 +9937,46 @@ void Resize(Island& g, Shape const& shape) {
     g.shape = shape;
 }
 
-// Sizes, places and draws the island for what it shows now; false if that's
-// nothing. While a morph runs only the content may change; the rest waits for
-// its end.
+// A corner island (`left` or right) to `shape`; its one fillet is on its inner
+// side, the body runs past the screen's side and edge so those corners are square.
+void ResizeSide(Island& g, Side& d, Shape const& shape, bool left) {
+    d.drawn.clear();
+    SIZE size{(LONG)shape.width, (LONG)shape.height};
+    check_hresult(d.surface.as<ICompositionDrawingSurfaceInterop>()->Resize(size));
+    d.content.Size({shape.width, shape.height});
+    float f = std::max(1.0f, shape.flare);
+    if (f != d.filletSize) {
+        SIZE square{(LONG)f, (LONG)f};
+        check_hresult(d.filletSurface.as<ICompositionDrawingSurfaceInterop>()->Resize(square));
+        d.filletSize = f;
+        auto fillet = Fillet(g.d2d.get(), f, left, g.bottom);
+        Paint(d.filletSurface, [&](ID2D1DeviceContext* dc) {
+            dc->FillGeometry(fillet.get(), Brush(dc, IslandFill()).get(), nullptr);
+        });
+        d.fillet.Size({f, f});
+    }
+    float r = shape.radius, body = shape.width - shape.flare;
+    d.body.Offset({left ? -r : shape.flare, g.bottom ? 0 : -r});
+    d.body.Size({body + r, shape.height + r});
+    d.body.CornerRadius({r, r});
+    d.bodyVisual.Size({shape.width, shape.height});
+    d.fillet.Offset({left ? body : 0, g.bottom ? shape.height - f : 0, 0});
+    d.shape = shape;
+}
+
+// A corner island with nothing to show keeps no pixels.
+void EmptySide(Side& d) {
+    if (d.shape.width > 0) {
+        check_hresult(d.surface.as<ICompositionDrawingSurfaceInterop>()->Resize({1, 1}));
+    }
+    d.shape = {};
+    d.drawn.clear();
+    d.rect = {};
+}
+
+// Sizes, places and draws the islands for what they show now: the middle one and
+// those in the left and right corners; false if that's nothing. While a morph runs
+// only the middle one's content may change; the rest waits for its end.
 bool Layout(Island& g) {
     RECT monitor;
     if (!MonitorRect(g, monitor)) {
@@ -9632,8 +9988,11 @@ bool Layout(Island& g) {
     float height = std::round(settings::g.island.height * s);
     float pad = std::round(height * (float)theme::kIslandPadding);
     float fixed = std::round(settings::g.island.width * s);
-    Content c = Measure(g, height, fixed > 0 ? fixed - 2 * pad : 0);
-    if (c.width <= 0) {
+    Content c = Measure(g, height, fixed > 0 ? fixed - 2 * pad : 0, settings::Slot::kCenter);
+    Content corner[2] = {Measure(g, height, 0, settings::Slot::kLeft),
+                         Measure(g, height, 0, settings::Slot::kRight)};
+    bool centerOn = c.width > 0;
+    if (!centerOn && corner[0].width <= 0 && corner[1].width <= 0) {
         return false;
     }
     Shape shape;
@@ -9647,8 +10006,8 @@ bool Layout(Island& g) {
     shape.width = std::min(std::ceil(body) + 2 * shape.flare,
                            (float)(monitor.right - monitor.left));
     if (g.phase == Phase::kExpanding || g.phase == Phase::kCollapsing) {
-        if (shape == g.shape && c.key != g.drawn) {
-            DrawContent(g, c);
+        if (centerOn && g.centerOn && shape == g.shape && c.key != g.drawn) {
+            DrawContent(g, c, g.surface, g.shape);
             g.drawn = c.key;
         }
         return true;
@@ -9656,21 +10015,73 @@ bool Layout(Island& g) {
     if (!(shape == g.shape)) {
         Resize(g, shape);
     }
+    // Without anything of its own the middle island is still the morph's start.
+    g.centerOn = centerOn;
+    g.bodyVisual.IsVisible(centerOn);
+    g.fillets[0].IsVisible(centerOn);
+    g.fillets[1].IsVisible(centerOn);
+    g.content.IsVisible(centerOn);
 
+    int top = g.bottom ? monitor.bottom - (int)shape.height : monitor.top;
+    for (int i = 0; i < 2; i++) {
+        Side& d = g.sides[i];
+        bool on = corner[i].width > 0;
+        if (on) {
+            Shape ss;
+            ss.height = height;
+            ss.radius = height / 2;
+            ss.flare = shape.flare;
+            ss.flushLeft = i == 0;
+            ss.flushRight = i == 1;
+            ss.width = std::min(std::ceil(std::max(corner[i].width + 2 * pad, height)) + ss.flare,
+                                (float)(monitor.right - monitor.left) / 3);
+            if (!(ss == d.shape)) {
+                ResizeSide(g, d, ss, i == 0);
+            }
+            int w = (int)ss.width;
+            int x = i == 0 ? monitor.left : monitor.right - w;
+            d.rect = {x, top, x + w, top + (int)height};
+        } else if (d.on || d.shape.width > 0) {
+            EmptySide(d);
+        }
+        d.on = on;
+        d.root.IsVisible(on);
+    }
+
+    // The middle one where it's placed, but clear of the corner ones.
     int width = (int)shape.width;
     int x = PlacedLeft(g, monitor, width);
-    int top = g.bottom ? monitor.bottom - (int)shape.height : monitor.top;
+    int apart = (int)std::lround(theme::kIslandApart * s);
+    int lo = g.sides[0].on ? g.sides[0].rect.right + apart : (int)monitor.left;
+    int hi = g.sides[1].on ? g.sides[1].rect.left - apart : (int)monitor.right;
+    if (hi - lo >= width) {
+        x = std::clamp(x, lo, hi - width);
+    }
     g.islandRect = {x, top, x + width, top + (int)shape.height};
     // Past the edge: the row above the top one, the row below the bottom one.
     int beyond = g.bottom ? monitor.bottom : monitor.top - 1;
     g.sharedEdge = false;
-    for (int px : {g.islandRect.left, (g.islandRect.left + g.islandRect.right) / 2,
-                   g.islandRect.right - 1}) {
-        g.sharedEdge |= MonitorFromPoint({px, beyond}, MONITOR_DEFAULTTONULL) != nullptr;
+    auto across = [&](RECT const& r) {
+        for (int px : {r.left, (r.left + r.right) / 2, r.right - 1}) {
+            g.sharedEdge |= MonitorFromPoint({px, beyond}, MONITOR_DEFAULTTONULL) != nullptr;
+        }
+    };
+    if (centerOn) {
+        across(g.islandRect);
+    }
+    for (auto const& d : g.sides) {
+        if (d.on) {
+            across(d.rect);
+        }
     }
     NotePill(g, monitor);
     RECT window;
     UnionRect(&window, &g.islandRect, &g.pillBox);
+    for (auto const& d : g.sides) {
+        if (d.on) {
+            UnionRect(&window, &window, &d.rect);
+        }
+    }
     if (!EqualRect(&window, &g.window)) {
         g.window = window;
         int w = window.right - window.left, h = window.bottom - window.top;
@@ -9682,11 +10093,24 @@ bool Layout(Island& g) {
     }
     g.content.Offset({(float)(g.islandRect.left - g.window.left),
                       (float)(g.islandRect.top - g.window.top), 0});
+    for (auto& d : g.sides) {
+        if (d.on) {
+            d.root.Offset({(float)(d.rect.left - g.window.left),
+                           (float)(d.rect.top - g.window.top), 0});
+        }
+    }
     Place(g);
     SetRegion(g);
-    if (c.key != g.drawn) {
-        DrawContent(g, c);
+    if (centerOn && c.key != g.drawn) {
+        DrawContent(g, c, g.surface, g.shape);
         g.drawn = c.key;
+    }
+    for (int i = 0; i < 2; i++) {
+        Side& d = g.sides[i];
+        if (d.on && corner[i].key != d.drawn) {
+            DrawContent(g, corner[i], d.surface, d.shape);
+            d.drawn = corner[i].key;
+        }
     }
     return true;
 }
@@ -9703,6 +10127,10 @@ bool LayoutRecovering(Island& g) {
     Recover(g);
     g.shape = {};
     g.filletSize = 0;
+    for (auto& d : g.sides) {
+        d.shape = {};
+        d.filletSize = 0;
+    }
     return Layout(g);
 }
 
@@ -10153,15 +10581,19 @@ bool EdgeHalf(Island const& g, POINT pt) {
 // taskbar out. Past the edge another monitor is a way through, so a pointer
 // crossing it brings nothing; only touching the island does. In click mode,
 // and while Ctrl is held or the island is dragged, the pointer brings nothing.
-bool RevealRange(HWND hwnd, int& left, int& right) {
+bool RevealsAt(HWND hwnd, int x, bool& reveals) {
     Island* p = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!p || !p->shown) {
         return false;
     }
     auto& g = *p;
-    left = g.islandRect.left;
-    bool none = g.sharedEdge || settings::g.island.clickToReveal || g.dragging || CtrlDown();
-    right = none ? left : g.islandRect.right;
+    reveals = false;
+    if (g.sharedEdge || settings::g.island.clickToReveal || g.dragging || CtrlDown()) {
+        return true;
+    }
+    auto over = [&](RECT const& r) { return x >= r.left && x < r.right; };
+    reveals = (g.centerOn && over(g.islandRect)) ||
+              (g.sides[0].on && over(g.sides[0].rect)) || (g.sides[1].on && over(g.sides[1].rect));
     return true;
 }
 
@@ -10334,6 +10766,10 @@ void Sync(Island& g) {
         g.window = {};
         g.region = {};
         g.pillSeen = false;
+        for (auto& d : g.sides) {
+            EmptySide(d);
+            d.filletSize = 0;
+        }
     }
     if (want) {
         FindClock();
@@ -10407,7 +10843,9 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
             POINT pt;
             if (g.shown && g.phase == Phase::kIdle && GetCursorPos(&pt) && OnIsland(g, pt)) {
                 if (wParam & MK_CONTROL) {
-                    StartDrag(g, pt);
+                    if (BodyAt(g, pt) == 0) {
+                        StartDrag(g, pt);
+                    }
                     return 0;
                 }
                 g.pressed = true;
@@ -10443,7 +10881,7 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_RBUTTONUP: {
             POINT pt;
             if ((wParam & MK_CONTROL) && g.shown && g.phase == Phase::kIdle && !g.dragging &&
-                GetCursorPos(&pt) && OnIsland(g, pt)) {
+                GetCursorPos(&pt) && BodyAt(g, pt) == 0) {
                 ToMiddle(g);
             }
             return 0;
@@ -10649,6 +11087,33 @@ void Build(Island& g, HWND taskbar) {
     g.content.Brush(surfaceBrush(g.surface));
     g.root.Children().InsertAtTop(g.shapes);
     g.root.Children().InsertAtTop(g.content);
+    // The corner islands: hidden, at one pixel, until they have something to show.
+    for (auto& d : g.sides) {
+        d.root = g.compositor.CreateContainerVisual();
+        d.root.IsVisible(false);
+        d.body = g.compositor.CreateRoundedRectangleGeometry();
+        auto shape = g.compositor.CreateSpriteShape(d.body);
+        shape.FillBrush(g.fill);
+        d.bodyVisual = g.compositor.CreateShapeVisual();
+        d.bodyVisual.Shapes().Append(shape);
+        d.filletSurface = g.graphics.CreateDrawingSurface(
+            {1, 1}, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            wgd::DirectXAlphaMode::Premultiplied);
+        d.surface = g.graphics.CreateDrawingSurface(
+            {1, 1}, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            wgd::DirectXAlphaMode::Premultiplied);
+        auto masked = g.compositor.CreateMaskBrush();
+        masked.Source(g.fill);
+        masked.Mask(surfaceBrush(d.filletSurface));
+        d.fillet = g.compositor.CreateSpriteVisual();
+        d.fillet.Brush(masked);
+        d.content = g.compositor.CreateSpriteVisual();
+        d.content.Brush(surfaceBrush(d.surface));
+        d.root.Children().InsertAtTop(d.bodyVisual);
+        d.root.Children().InsertAtTop(d.fillet);
+        d.root.Children().InsertAtTop(d.content);
+        g.root.Children().InsertAtTop(d.root);
+    }
     g.morphState = g.compositor.CreatePropertySet();
     Bind(g);
     // Tells when a fullscreen app comes and goes.
@@ -10680,6 +11145,16 @@ void Teardown(Island& g) {
     };
     close(g.batch);
     close(g.target);
+    for (auto& d : g.sides) {
+        close(d.content);
+        close(d.fillet);
+        close(d.bodyVisual);
+        close(d.body);
+        close(d.root);
+        close(d.surface);
+        close(d.filletSurface);
+        d.on = false;
+    }
     close(g.content);
     close(g.fillets[0]);
     close(g.fillets[1]);
@@ -10729,6 +11204,13 @@ void OnTaskbarDestroyed(HWND) {
     core::Post(Prune);
 }
 
+// The memory add-on's readings changed: later, once the message is done.
+void OnFigures() {
+    if (ShowsSystem()) {
+        core::Post(SyncAll);
+    }
+}
+
 // A young explorer may have no device or monitor for a taskbar yet. A taskbar
 // whose build failed is tried again as it later goes in or out: a few times in
 // all, some seconds apart.
@@ -10765,7 +11247,7 @@ void Apply(HWND taskbar) {
     }
     NoteWindow();
     autohide::g_onCollapsedChanged = OnCollapsedChanged;
-    autohide::g_revealRange = RevealRange;
+    autohide::g_revealsAt = RevealsAt;
     autohide::g_onExpandedChanged = OnExpandedChanged;
     autohide::g_standsIn = StandsIn;
     autohide::g_holdsHover = HoldsHover;
@@ -10774,6 +11256,7 @@ void Apply(HWND taskbar) {
     core::g_onTaskbarDestroyed = OnTaskbarDestroyed;
     media::g_onShow = OnMedia;
     usage::g_onModel = SyncAll;
+    core::g_onFiguresChanged = OnFigures;
     core::Guard(L"Island show", [&] { Sync(*it); });
 }
 
@@ -10786,7 +11269,7 @@ void RetryBuild(HWND taskbar) {
 
 void Restore() {
     autohide::g_onCollapsedChanged = nullptr;
-    autohide::g_revealRange = nullptr;
+    autohide::g_revealsAt = nullptr;
     autohide::g_onExpandedChanged = nullptr;
     autohide::g_standsIn = nullptr;
     autohide::g_holdsHover = nullptr;
@@ -10795,6 +11278,7 @@ void Restore() {
     core::g_onTaskbarDestroyed = nullptr;
     media::g_onShow = nullptr;
     usage::g_onModel = nullptr;
+    core::g_onFiguresChanged = nullptr;
     g_window = nullptr;
     for (auto& g : g_islands) {
         Teardown(g);
