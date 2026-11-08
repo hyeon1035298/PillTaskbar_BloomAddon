@@ -4551,6 +4551,7 @@ void WaitForHooks() {
 
 namespace start {
 bool LauncherAhead();
+bool IsLauncher(HWND hwnd);
 }  // namespace start
 
 namespace panels {
@@ -5318,11 +5319,50 @@ void CloseCenterWith(HWND hwnd) {
 
 // Once per foreground change. The callback can come while explorer waits in
 // its own SendMessage or a tray slide, so the work runs later from the queue.
-void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+// The launcher's first opening in a Bloom run is named in front a moment before
+// Windows makes it the front window, and no event follows when it does: it is
+// looked at again every kLauncherLookMs, kLauncherLooks times at most.
+constexpr UINT kLauncherLookMs = 50;
+constexpr int kLauncherLooks = 10;
+UINT_PTR g_launcherTimer;
+HWND g_launcherNamed;  // the launcher named in front while it wasn't yet
+int g_launcherLooks;
+
+void EndLauncherLook() {
+    if (g_launcherTimer) {
+        KillTimer(nullptr, std::exchange(g_launcherTimer, 0));
+    }
+    g_launcherNamed = nullptr;
+}
+
+void CALLBACK LauncherLook(HWND, UINT, UINT_PTR, DWORD) {
     core::Guard(L"Bloom launcher", [] {
-        core::Post([] {
+        HWND named = g_launcherNamed;
+        bool front = GetForegroundWindow() == named;
+        if (front || --g_launcherLooks <= 0 || !IsWindowVisible(named)) {
+            EndLauncherLook();
+            core::DiagLine(L"Bloom launcher %p in front later: %d", named, front);
+            if (front) {
+                EvaluateForeground();
+            }
+        }
+    });
+}
+
+void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWORD, DWORD) {
+    core::Guard(L"Bloom launcher", [window] {
+        core::Post([window] {
             EvaluateForeground();
             EvaluateCenter();
+            if (window == GetForegroundWindow()) {
+                return;
+            }
+            EndLauncherLook();
+            if (Active() && start::IsLauncher(window)) {
+                g_launcherNamed = window;
+                g_launcherLooks = kLauncherLooks;
+                g_launcherTimer = SetTimer(nullptr, 0, kLauncherLookMs, LauncherLook);
+            }
         });
     });
 }
@@ -5388,6 +5428,7 @@ void WatchLauncher() {
 void UnwatchLauncher() {
     core::g_dropsTimer = nullptr;
     EndCenter();
+    EndLauncherLook();
     if (HWINEVENTHOOK hook = std::exchange(g_foregroundHook, nullptr)) {
         if (!UnhookWinEvent(hook)) {
             g_leftoverHook = hook;
