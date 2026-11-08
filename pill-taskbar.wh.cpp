@@ -36,7 +36,8 @@
   누르면 Bloom이 열리고, 열려 있으면 닫힙니다. 오른쪽 클릭 메뉴는 그대로이고, 시작 메뉴는 Win 키로 열립니다.
 - **자동 숨김**: Windows 설정에서 자동 숨김을 켜면 위쪽 작업표시줄도 숨겨지고, 화면 위 가장자리
   어디에서 나올지, 나오고 들어가는 지연과 애니메이션 길이를 정할 수 있습니다. Bloom 런처가 열려 있는 동안에는
-  숨은 작업표시줄도 나와 있습니다.
+  숨은 작업표시줄도 나와 있습니다. 알림 센터(Win+N, 시계)가 열려 있으면 작업표시줄과 한 덩어리로 움직입니다.
+  포인터가 둘 중 어디에 있든 작업표시줄이 나와 있고, 둘 다 벗어나 작업표시줄이 들어가면 알림 센터도 닫힙니다.
 - **미디어**: 재생 중인 곡의 앨범 아트, 제목, 이전/재생/다음 단추를 트레이 앞에 보여 줍니다.
 - **사용량**: Bloom이 내보낸 AI 사용량을 트레이 앞에 작은 막대로 보여 줍니다. Bloom 파일이 없으면
   아무것도 보이지 않습니다.
@@ -4552,6 +4553,10 @@ namespace start {
 bool LauncherAhead();
 }  // namespace start
 
+namespace panels {
+bool IsNotificationCenter(HWND hwnd);
+}  // namespace panels
+
 // ============================================================================
 namespace autohide {
 // ============================================================================
@@ -4722,6 +4727,7 @@ bool Collapsed(HWND hwnd) {
 
 bool LooksHidden(HWND taskbar);
 void KeepHeldOut(HWND hwnd);
+void CloseCenterWith(HWND hwnd);
 
 void SetCollapsed(HWND hwnd, bool collapsed) {
     auto [it, added] = g_collapsed.try_emplace(hwnd, collapsed);
@@ -4740,6 +4746,7 @@ void SetCollapsed(HWND hwnd, bool collapsed) {
         });
         if (collapsed) {
             KeepHeldOut(hwnd);
+            CloseCenterWith(hwnd);
         }
     }
 }
@@ -5078,9 +5085,8 @@ bool LauncherInFront() {
     return g_launcher && GetForegroundWindow() == g_launcher && IsWindowVisible(g_launcher);
 }
 
-// The taskbar of the window's monitor, else the primary.
-HWND TaskbarFor(HWND window) {
-    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
+// The taskbar of the monitor, else the primary.
+HWND TaskbarOnMonitor(HMONITOR monitor) {
     HWND primary = nullptr;
     for (HWND hwnd : core::Taskbars()) {
         if (core::MonitorOf(hwnd) == monitor) {
@@ -5091,6 +5097,10 @@ HWND TaskbarFor(HWND window) {
         }
     }
     return primary;
+}
+
+HWND TaskbarFor(HWND window) {
+    return TaskbarOnMonitor(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY));
 }
 
 // The hide check runs on from where it is; the primary's is started again in
@@ -5122,7 +5132,8 @@ void EvaluateForeground() {
         return;
     }
     APPBARDATA data{.cbSize = sizeof(data)};
-    if (!(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) || !start::LauncherAhead()) {
+    if (!(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) ||
+        settings::g.autohide.keepHiddenForBloom || !start::LauncherAhead()) {
         ReleaseHeld();
         return;
     }
@@ -5137,10 +5148,183 @@ void EvaluateForeground() {
     core::DiagLine(L"Bloom hold %p reveal %d", taskbar, asked);
 }
 
+// ---- the notification center ------------------------------------------------------
+// The notification center (Win+N, the clock) is the front window while it is open.
+// Its taskbar and it then act as one, as a menu does: the taskbar stays out while
+// the pointer is on either or between them, comes out when the pointer comes onto
+// the panel, and goes in after the panel closes. The panel closes first: as the
+// taskbar goes, explorer stretches the panel's window over the taskbar's place.
+
+// Taskbar thread only.
+HWND g_center;         // the notification center's window while it is in front
+HWND g_centerTaskbar;  // the taskbar of its monitor
+UINT_PTR g_centerTimer;
+ULONGLONG g_centerClosing;  // when the mod asked the panel to close, 0 if it hasn't
+HWND g_lastApp;  // the last front window other than a taskbar or the panel
+constexpr UINT kCenterLookMs = 150;
+// A panel that hasn't closed by then lets the taskbar go in anyway.
+constexpr ULONGLONG kCenterCloseMs = 1000;
+
+bool CenterInFront() {
+    return g_center && GetForegroundWindow() == g_center;
+}
+
+// The panel on screen, widened to the taskbar's edge of the monitor so the way
+// from the taskbar to the panel counts too. The window is the work area's height
+// and shows only the panel, through its region.
+bool CenterArea(RECT& area) {
+    RECT box, bar;
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    if (!GetWindowRect(g_center, &area) || !GetWindowRect(g_centerTaskbar, &bar) ||
+        !GetMonitorInfo(core::MonitorOf(g_centerTaskbar), &mi)) {
+        return false;
+    }
+    if (GetWindowRgnBox(g_center, &box) > NULLREGION) {
+        OffsetRect(&box, area.left, area.top);
+        area = box;
+    }
+    if (bar.top + bar.bottom < mi.rcMonitor.top + mi.rcMonitor.bottom) {
+        area.top = mi.rcMonitor.top;
+    } else {
+        area.bottom = mi.rcMonitor.bottom;
+    }
+    return true;
+}
+
+bool PointerOnCenter() {
+    RECT area;
+    POINT pt;
+    return CenterInFront() && GetCursorPos(&pt) && CenterArea(area) && PtInRect(&area, pt);
+}
+
+// Closes the panel as Esc closes it; it is in front, so the key goes to it. False
+// while a modifier is held, as Ctrl+Esc opens Start.
+bool CloseCenter() {
+    if (!CenterInFront()) {
+        return false;
+    }
+    for (int vk : {VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN}) {
+        if (GetAsyncKeyState(vk) & 0x8000) {
+            return false;
+        }
+    }
+    INPUT keys[2]{};
+    keys[0].type = keys[1].type = INPUT_KEYBOARD;
+    keys[0].ki.wVk = keys[1].ki.wVk = VK_ESCAPE;
+    keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    UINT sent = SendInput(2, keys, sizeof(INPUT));
+    core::DiagLine(L"Notification center closes for its taskbar %p: %u", g_centerTaskbar, sent);
+    return sent == 2;
+}
+
+void EndCenter() {
+    if (g_centerTimer) {
+        KillTimer(nullptr, std::exchange(g_centerTimer, 0));
+    }
+    HWND taskbar = std::exchange(g_centerTaskbar, nullptr);
+    if (std::exchange(g_center, nullptr)) {
+        core::DiagLine(L"Notification center lets go %p", taskbar);
+    }
+    // Closed for the taskbar to go in. A panel opened from the clock gives the front
+    // back to the taskbar, which Windows keeps out while it is in front: the front
+    // goes to the app that had it before, else the desktop. The check then looks now
+    // rather than a tick later.
+    if (std::exchange(g_centerClosing, 0) && taskbar && IsWindow(taskbar) && !Collapsed(taskbar)) {
+        if (core::IsTaskbarWindow(GetForegroundWindow())) {
+            HWND app = g_lastApp && IsWindowVisible(g_lastApp) && !IsIconic(g_lastApp)
+                           ? g_lastApp
+                           : GetShellWindow();
+            BOOL moved = app && SetForegroundWindow(app);
+            core::DiagLine(L"Notification center closed: front to %p %d", app, moved);
+        }
+        PostMessage(taskbar, WM_TIMER, kTrayHideTimer, 0);
+    }
+}
+
+// While the panel is in front: the pointer coming onto it brings a hidden taskbar out.
+void CALLBACK CenterTick(HWND, UINT, UINT_PTR, DWORD) {
+    core::Guard(L"Notification center", [] {
+        if (!Active() || !CenterInFront()) {
+            return EndCenter();
+        }
+        if (Collapsed(g_centerTaskbar) && PointerOnCenter()) {
+            Reveal(g_centerTaskbar);
+        }
+    });
+}
+
+// On a foreground change. Only a taskbar Windows auto-hides is held.
+void EvaluateCenter() {
+    HWND front = GetForegroundWindow();
+    if (front && !core::IsTaskbarWindow(front) && !panels::IsNotificationCenter(front)) {
+        g_lastApp = front;
+    }
+    APPBARDATA data{.cbSize = sizeof(data)};
+    if (!Active() || !front || !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) ||
+        !panels::IsNotificationCenter(front)) {
+        return EndCenter();
+    }
+    if (front == g_center) {
+        return;
+    }
+    EndCenter();
+    RECT panel;
+    if (!GetWindowRect(front, &panel)) {
+        return;
+    }
+    RECT box;
+    if (GetWindowRgnBox(front, &box) > NULLREGION) {
+        OffsetRect(&box, panel.left, panel.top);
+        panel = box;
+    }
+    g_center = front;
+    g_centerTaskbar = TaskbarOnMonitor(MonitorFromRect(&panel, MONITOR_DEFAULTTOPRIMARY));
+    g_centerTimer = g_centerTaskbar ? SetTimer(nullptr, 0, kCenterLookMs, CenterTick) : 0;
+    core::DiagLine(L"Notification center holds %p", g_centerTaskbar);
+}
+
+// The held taskbar's hide check skips its ticks while the pointer is on the panel
+// or on the way to it; on the taskbar the check keeps it out itself. A tick that
+// would take the taskbar in closes the panel instead, and the taskbar follows once
+// it has (EndCenter).
+bool CenterHolds(HWND hwnd) {
+    if (!g_center || hwnd != g_centerTaskbar || !Active() || !CenterInFront()) {
+        return false;
+    }
+    POINT pt;
+    RECT bar;
+    if (PointerOnCenter() || !GetCursorPos(&pt)) {
+        return true;
+    }
+    if (GetWindowRect(hwnd, &bar) && PtInRect(&bar, pt)) {
+        return false;
+    }
+    if (g_centerClosing) {
+        return GetTickCount64() - g_centerClosing < kCenterCloseMs;
+    }
+    if (!CloseCenter()) {
+        return false;
+    }
+    g_centerClosing = GetTickCount64();
+    return true;
+}
+
+// The taskbar went in another way with the panel in front: the panel closes too.
+void CloseCenterWith(HWND hwnd) {
+    if (g_center && hwnd == g_centerTaskbar) {
+        core::Post([] { CloseCenter(); });
+    }
+}
+
 // Once per foreground change. The callback can come while explorer waits in
 // its own SendMessage or a tray slide, so the work runs later from the queue.
 void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
-    core::Guard(L"Bloom launcher", [] { core::Post(EvaluateForeground); });
+    core::Guard(L"Bloom launcher", [] {
+        core::Post([] {
+            EvaluateForeground();
+            EvaluateCenter();
+        });
+    });
 }
 
 // A held taskbar that went in by another way than the hide check whose ticks
@@ -5169,6 +5353,9 @@ void KeepHeldOut(HWND hwnd) {
 // tick through. A secondary tray's check is taken to use TrayUI's timer id;
 // were it another, KeepHeldOut brings it out a bounded number of times.
 bool DropsTimer(HWND hwnd, UINT_PTR id) {
+    if (id == kTrayHideTimer && CenterHolds(hwnd)) {
+        return true;
+    }
     if (id != kTrayHideTimer || hwnd != g_heldOut || !g_heldOut) {
         return false;
     }
@@ -5180,7 +5367,8 @@ bool DropsTimer(HWND hwnd, UINT_PTR id) {
 }
 
 void WatchLauncher() {
-    if (g_foregroundHook || settings::g.autohide.keepHiddenForBloom) {
+    // Set whatever keepHiddenForBloom says: the notification center uses it too.
+    if (g_foregroundHook) {
         return;
     }
     // Out of context: called on this thread, which unhooks it in Restore.
@@ -5199,6 +5387,7 @@ void WatchLauncher() {
 
 void UnwatchLauncher() {
     core::g_dropsTimer = nullptr;
+    EndCenter();
     if (HWINEVENTHOOK hook = std::exchange(g_foregroundHook, nullptr)) {
         if (!UnhookWinEvent(hook)) {
             g_leftoverHook = hook;
@@ -7608,7 +7797,6 @@ struct Flower {
     Shapes::Ellipse rose{nullptr};
     FrameworkElement::SizeChanged_revoker stockSized;
     FrameworkElement::ActualThemeChanged_revoker themeChanged;
-    UIElement::PointerEntered_revoker entered;
     UIElement::PointerPressed_revoker pressed;
     UIElement::PointerReleased_revoker released;
     UIElement::Tapped_revoker tapped;
@@ -7616,12 +7804,18 @@ struct Flower {
 
 [[clang::no_destroy]] std::list<Flower> g_flowers;
 
-// Whether Bloom's launcher was in front just before the click: the press
-// brings the taskbar forward and Bloom then hides itself, so a click that
-// meant to close it must not open it again. What the button last saw of it:
-// at the hover, or what its own click left, for a click without moving.
-bool g_seenOpen = false;
+// Whether Bloom's launcher was open at the press: the press brings the taskbar
+// forward and Bloom then hides the launcher, so a click that meant to close it
+// must not open it again. At the press the taskbar is already in front and the
+// launcher, about to hide, is still visible; it is asked then and only then.
 bool g_openAtPress = false;
+ULONGLONG g_pressedAt = 0;
+
+// A launcher Bloom pinned stays shown, behind, when the press takes the focus
+// from it, and is brought forward; one not pinned has hidden itself by this
+// long after the press.
+constexpr UINT kPinnedLookMs = 150;
+UINT_PTR g_pinnedTimer = 0;
 
 bool IsStartButton(FrameworkElement const& e) {
     return e && core::IsClass(e, L"Taskbar.ExperienceToggleButton") &&
@@ -7659,17 +7853,16 @@ std::wstring BloomExe() {
     return PathFileExistsW(exe.c_str()) ? exe : std::wstring();
 }
 
-// The front window is Bloom's launcher: Bloom's process, the launcher's title.
-bool LauncherAhead() {
-    HWND front = GetForegroundWindow();
+// The window is Bloom's launcher: Bloom's process, the launcher's title.
+bool IsLauncher(HWND hwnd) {
     DWORD pid = 0;
     // A window of explorer's own would answer the title on its own thread.
-    if (!front || !GetWindowThreadProcessId(front, &pid) ||
+    if (!hwnd || !GetWindowThreadProcessId(hwnd, &pid) ||
         pid == GetCurrentProcessId()) {
         return false;
     }
     WCHAR title[8];
-    if (GetWindowTextW(front, title, ARRAYSIZE(title)) != 5 ||
+    if (GetWindowTextW(hwnd, title, ARRAYSIZE(title)) != 5 ||
         wcscmp(title, L"Bloom") != 0) {
         return false;
     }
@@ -7683,6 +7876,29 @@ bool LauncherAhead() {
                  _wcsicmp(image, BloomExe().c_str()) == 0;
     CloseHandle(process);
     return bloom;
+}
+
+// The front window is Bloom's launcher.
+bool LauncherAhead() {
+    return IsLauncher(GetForegroundWindow());
+}
+
+// Bloom's launcher is shown, in front or not. Bloom's notice cards carry its
+// title too, and stay shown; they never take the focus, the launcher does.
+bool LauncherShown() {
+    bool shown = false;
+    EnumWindows(
+        [](HWND hwnd, LPARAM found) -> BOOL {
+            if (IsWindowVisible(hwnd) &&
+                !(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE) &&
+                IsLauncher(hwnd)) {
+                *reinterpret_cast<bool*>(found) = true;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&shown));
+    return shown;
 }
 
 // A running Bloom waits for this event and then opens its launcher, or hides
@@ -7710,6 +7926,15 @@ void Show() {
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+}
+
+void CALLBACK PinnedLook(HWND, UINT, UINT_PTR, DWORD) {
+    KillTimer(nullptr, std::exchange(g_pinnedTimer, 0));
+    core::Guard(L"Bloom pinned", [] {
+        if (LauncherShown() && !LauncherAhead()) {
+            Show();
+        }
+    });
 }
 
 void Paint(Flower& f) {
@@ -7818,15 +8043,14 @@ void Attach(FrameworkElement const& button) {
         winrt::auto_revoke, [p](auto&&, auto&&) {
             core::Guard(L"Bloom icon theme", [p] { Paint(*p); });
         });
-    f.entered = root.PointerEntered(winrt::auto_revoke, [](auto&&, auto&&) {
-        core::Guard(L"Bloom hover", [] { g_seenOpen = LauncherAhead(); });
-    });
     f.pressed = root.PointerPressed(
         winrt::auto_revoke, [](auto&&, Input::PointerRoutedEventArgs const& e) {
             core::Guard(L"Bloom press", [&] {
                 if (e.GetCurrentPoint(nullptr).Properties().IsLeftButtonPressed()) {
                     e.Handled(true);
-                    g_openAtPress = g_seenOpen || LauncherAhead();
+                    g_openAtPress = LauncherAhead() || LauncherShown();
+                    g_pressedAt = GetTickCount64();
+                    core::DiagLine(L"Bloom flower press, open %d", g_openAtPress);
                 }
             });
         });
@@ -7848,8 +8072,14 @@ void Attach(FrameworkElement const& button) {
                 // still in front: Bloom hides it itself on the signal
                 if (!open || LauncherAhead()) {
                     Show();
+                } else if (!g_pinnedTimer) {
+                    ULONGLONG since = GetTickCount64() - g_pressedAt;
+                    g_pinnedTimer = SetTimer(
+                        nullptr, 0,
+                        since < kPinnedLookMs ? UINT(kPinnedLookMs - since)
+                                              : USER_TIMER_MINIMUM,
+                        PinnedLook);
                 }
-                g_seenOpen = !open;
             });
         });
     unlist.done = true;
@@ -7901,7 +8131,10 @@ void Restore() {
         core::Guard(L"Bloom icon", [&] { Detach(f); });
     }
     g_flowers.clear();
-    g_seenOpen = g_openAtPress = false;
+    g_openAtPress = false;
+    if (g_pinnedTimer) {
+        KillTimer(nullptr, std::exchange(g_pinnedTimer, 0));
+    }
 }
 
 }  // namespace start
@@ -16169,6 +16402,9 @@ using DwmSetWindowAttribute_t = decltype(&DwmSetWindowAttribute);
 DwmSetWindowAttribute_t DwmSetWindowAttribute_Original;
 using SetWindowRgn_t = decltype(&SetWindowRgn);
 SetWindowRgn_t SetWindowRgn_Original;
+using SetWindowPos_t = decltype(&SetWindowPos);
+SetWindowPos_t SetWindowPos_Original;
+BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int cy, UINT flags);
 
 // The notification center's window, where Windows had it and where it was put, so it
 // can go back when the mod stops. Explorer may leave it where it was between openings.
@@ -16238,23 +16474,20 @@ bool IsNotificationCenter(HWND hwnd) {
 
 // The window is as tall as the work area; Windows shows only the panel through the
 // window's region, at the bottom. The panel goes to the tray and, under a top taskbar,
-// to the top. region: the one being set, or null for the window's own.
-void PlaceNotificationCenter(HWND hwnd, HRGN region) {
-    RECT rc;
-    if (!IsNotificationCenter(hwnd) || !GetWindowRect(hwnd, &rc)) {
-        return;
-    }
+// to the top. Where the window goes, with it at rc where explorer has or puts it;
+// false to leave it. region: the one being set, or null for the window's own.
+bool CenterTarget(HWND hwnd, HRGN region, const RECT& rc, POINT& at) {
     RECT panel;  // in the window
     int kind = region ? GetRgnBox(region, &panel) : GetWindowRgnBox(hwnd, &panel);
     if (kind == NULLREGION) {
-        return;
+        return false;
     }
     bool cut = kind != ERROR;
     if (!cut) {
         panel = {0, 0, rc.right - rc.left, rc.bottom - rc.top};  // no region: y stays
     }
     if (panel.right - panel.left <= 1 || panel.bottom - panel.top <= 1) {
-        return;  // a placeholder while ShellExperienceHost builds its views
+        return false;  // a placeholder while ShellExperienceHost builds its views
     }
     LONG x, y;
     {
@@ -16277,10 +16510,47 @@ void PlaceNotificationCenter(HWND hwnd, HRGN region) {
         y = cut ? PlaceTop(shown) - panel.top : rc.top;
         g_centerAt = {x, y};
     }
-    if (x != rc.left || y != rc.top) {
-        Wh_Log(L"Notification center %ld,%ld -> %ld,%ld", rc.left, rc.top, x, y);
-        SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    at = {x, y};
+    return true;
+}
+
+thread_local bool g_placing;  // the mod's own move, which the SetWindowPos hook lets by
+
+void PlaceNotificationCenter(HWND hwnd, HRGN region) {
+    RECT rc;
+    POINT at;
+    if (!IsNotificationCenter(hwnd) || !GetWindowRect(hwnd, &rc) ||
+        !CenterTarget(hwnd, region, rc, at) || (at.x == rc.left && at.y == rc.top)) {
+        return;
     }
+    Wh_Log(L"Notification center %ld,%ld -> %ld,%ld", rc.left, rc.top, at.x, at.y);
+    g_placing = true;
+    SetWindowPos(hwnd, nullptr, at.x, at.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    g_placing = false;
+}
+
+// Explorer's own move of the window, as the taskbar slides in or out: it goes where
+// the mod puts it rather than back to the right end for a frame. Explorer starts
+// placing the window from where this call asks.
+bool PlaceCenterMove(HWND hwnd, int& x, int& y, int cx, int cy, UINT flags) {
+    RECT now;
+    if (g_placing || core::g_unloading || (flags & SWP_NOMOVE) || !IsNotificationCenter(hwnd) ||
+        !GetWindowRect(hwnd, &now)) {
+        return false;
+    }
+    int width = flags & SWP_NOSIZE ? now.right - now.left : cx;
+    int height = flags & SWP_NOSIZE ? now.bottom - now.top : cy;
+    RECT rc{x, y, x + width, y + height};
+    POINT at;
+    if (!CenterTarget(hwnd, nullptr, rc, at)) {
+        return false;
+    }
+    if (at.x != x || at.y != y) {
+        Wh_Log(L"Notification center move %d,%d -> %ld,%ld", x, y, at.x, at.y);
+    }
+    x = at.x;
+    y = at.y;
+    return true;
 }
 
 // Explorer uncloaks the window once it's in place; the move comes just before.
@@ -16314,6 +16584,9 @@ bool HookExplorer() {
     } else if (!WindhawkUtils::SetFunctionHook(SetWindowRgn, SetWindowRgn_Hook,
                                                &SetWindowRgn_Original)) {
         Wh_Log(L"No SetWindowRgn hook: under a top taskbar the panel keeps its first top");
+    } else if (!WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
+                                               &SetWindowPos_Original)) {
+        Wh_Log(L"No SetWindowPos hook: explorer's own moves of the notification center show");
     }
     return ok;
 }
@@ -16352,9 +16625,6 @@ void Restore() {
 
 std::atomic<bool> g_on;  // the setting, in ShellHost
 
-using SetWindowPos_t = decltype(&SetWindowPos);
-SetWindowPos_t SetWindowPos_Original;
-
 bool IsQuickSettings(HWND hwnd) {
     WCHAR cls[32];
     DWORD pid = 0;
@@ -16362,11 +16632,13 @@ bool IsQuickSettings(HWND hwnd) {
            GetClassName(hwnd, cls, ARRAYSIZE(cls)) && wcscmp(cls, L"ControlCenterWindow") == 0;
 }
 
+// In ShellHost for Quick Settings, in explorer for the notification center.
 BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int cy,
                               UINT flags) {
     constexpr UINT kStill = SWP_NOMOVE | SWP_NOSIZE;
     RECT rc;
-    if (g_on && (flags & kStill) != kStill && IsQuickSettings(hwnd) &&
+    if (!PlaceCenterMove(hwnd, x, y, cx, cy, flags) && g_on && (flags & kStill) != kStill &&
+        IsQuickSettings(hwnd) &&
         GetWindowRect(hwnd, &rc)) {
         int width = flags & SWP_NOSIZE ? rc.right - rc.left : cx;
         int height = flags & SWP_NOSIZE ? rc.bottom - rc.top : cy;
