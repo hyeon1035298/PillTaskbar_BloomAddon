@@ -27,6 +27,8 @@
 - **트레이**: 볼륨, 네트워크 같은 시스템 아이콘과 알림 벨을 숨기고, 시계를 시간만 보이게 합니다.
   빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)은 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 열립니다.
   빠른 설정은 ShellHost.exe가 띄우므로 모드가 그 프로세스에도 올라갑니다(거기서는 패널 자리만 정합니다).
+  알림 센터는 오른쪽에서 밀려 들어오지 않고 제자리에 나타납니다. ShellExperienceHost.exe에는 모드를 넣지 않고,
+  explorer가 그 프로세스의 슬라이드 식 문자열 두 개만 같은 길이로 바꿔 두었다가 끌 때 되돌립니다.
 - **크기**: 작업표시줄 높이, 아이콘 크기, 아이콘 간격을 바꿉니다. explorer를 다시 시작하지 않아도
   바로 반영됩니다.
 - **시작 버튼**: Windows 시작 버튼을 숨기거나, 그 자리에 Bloom 런처를 여는 꽃 버튼을 둡니다. 꽃 버튼을
@@ -138,6 +140,9 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - panelsNearTray: true
     $name: Windows 패널을 트레이 쪽에 열기
     $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 끄면 Windows가 정한 자리에 열립니다
+  - centerStill: true
+    $name: 알림 센터 슬라이드 끄기
+    $description: 알림 센터·달력(Win+N, 시계)이 화면 오른쪽에서 밀려 들어오지 않고 제자리에 바로 나타납니다. 끄면 Windows 애니메이션 그대로입니다
   $name: 트레이
   $description: 숨긴 아이콘은 자리도 남기지 않습니다. 레지스트리는 건드리지 않습니다
 - size:
@@ -378,6 +383,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 #include <shlobj.h>
 #include <shlguid.h>  // shlobj.h leaves it out under INITGUID
 #include <shlwapi.h>
+#include <tlhelp32.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -451,6 +457,7 @@ struct Settings {
         Clock clock;
         bool clock12;  // else 24 hours
         bool panelsNearTray;  // Quick Settings and the notification center
+        bool centerStill;     // the notification center without its slide
     } tray;
     struct {
         bool enabled;
@@ -554,6 +561,7 @@ void Load() {
     t.clock = (Clock)Choice(L"tray.clock", {L"timeDate", L"time", L"hidden"});
     t.clock12 = Choice(L"tray.clockFormat", {L"h24", L"h12"}) == 1;
     t.panelsNearTray = Wh_GetIntSetting(L"tray.panelsNearTray");
+    t.centerStill = Wh_GetIntSetting(L"tray.centerStill");
 
     g.size.enabled = Wh_GetIntSetting(L"size.enabled");
     g.size.taskbarHeight = Clamped(L"size.taskbarHeight", 6, 600);
@@ -16366,6 +16374,259 @@ bool InstallShellHost() {
 }  // namespace panels
 
 // ============================================================================
+namespace center {
+// ============================================================================
+// The notification center (with the calendar) slides in from the right end of the
+// screen, whatever edge the taskbar is on and wherever the panel opens. With
+// tray.centerStill it appears in place. ShellExperienceHost.exe draws it, and its
+// Windows.UI.ActionCenter.dll builds the slide on every show and hide from two
+// expression literals (the second when it comes from the left). Explorer rewrites
+// them in that process, the same length with "0 *" for "1 -", so the slide stays
+// at 0 on the channel Windows animates anyway; nothing is loaded or hooked there.
+// A literal read while half rewritten ("0 -", "1 *") is an expression all the
+// same. Turning it off or unloading writes Windows' text back, and a new
+// ShellExperienceHost starts with it.
+
+constexpr WCHAR kImageTail[] = L"\\SystemApps\\ShellExperienceHost_cw5n1h2txyewy\\ShellExperienceHost.exe";
+constexpr WCHAR kModule[] = L"Windows.UI.ActionCenter.dll";
+// Windows' literal, then the still one.
+constexpr std::wstring_view kSlides[][2] = {
+    {L"AnimationProps.Width * (1 - AnimationProps.VisibilityProgress)",
+     L"AnimationProps.Width * (0 * AnimationProps.VisibilityProgress)"},
+    {L"-AnimationProps.Width * (1 - AnimationProps.VisibilityProgress)",
+     L"-AnimationProps.Width * (0 * AnimationProps.VisibilityProgress)"},
+};
+constexpr DWORD kLookMs = 5000;  // while ShellExperienceHost or its module is not there
+
+std::atomic<bool> g_on;  // tray.centerStill
+HANDLE g_thread, g_stop, g_nudge;
+
+// ShellExperienceHost as found, with the literals' addresses in it.
+struct Target {
+    HANDLE process = nullptr;
+    DWORD pid = 0;
+    BYTE* at[2] = {};
+    void Close() {
+        if (process) {
+            CloseHandle(process);
+        }
+        *this = {};
+    }
+};
+
+// This session's ShellExperienceHost, opened to read and write its memory; skip is
+// one already given up on.
+Target Open(DWORD skip) {
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    Target t;
+    PROCESSENTRY32W pe{.dwSize = sizeof(pe)};
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !t.process; ok = Process32NextW(snap, &pe)) {
+        DWORD s = 0;
+        if (pe.th32ProcessID == skip || _wcsicmp(pe.szExeFile, L"ShellExperienceHost.exe") != 0 ||
+            !ProcessIdToSessionId(pe.th32ProcessID, &s) || s != session) {
+            continue;
+        }
+        HANDLE p = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ |
+                                   PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+                               FALSE, pe.th32ProcessID);
+        WCHAR path[MAX_PATH];
+        DWORD n = ARRAYSIZE(path);
+        size_t tail = wcslen(kImageTail);
+        if (p && QueryFullProcessImageNameW(p, 0, path, &n) && n >= tail &&
+            _wcsicmp(path + n - tail, kImageTail) == 0) {
+            t.process = p;
+            t.pid = pe.th32ProcessID;
+        } else if (p) {
+            CloseHandle(p);
+        }
+    }
+    CloseHandle(snap);
+    return t;
+}
+
+bool Read(HANDLE process, const void* at, void* to, size_t size) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(process, at, to, size, &got) && got == size;
+}
+
+// Where Windows.UI.ActionCenter.dll lies in the process; null until it is loaded.
+BYTE* ModuleBase(DWORD pid) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+    BYTE* base = nullptr;
+    MODULEENTRY32W me{.dwSize = sizeof(me)};
+    for (BOOL ok = Module32FirstW(snap, &me); ok && !base; ok = Module32NextW(snap, &me)) {
+        if (_wcsicmp(me.szModule, kModule) == 0) {
+            base = me.modBaseAddr;
+        }
+    }
+    CloseHandle(snap);
+    return base;
+}
+
+// The literals in the module's read-only data, as whole strings (a terminator on
+// both sides), in Windows' text or the still one. False when this build has
+// neither.
+bool FindLiterals(Target& t, BYTE* base) {
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nt;
+    if (!Read(t.process, base, &dos, sizeof(dos)) ||
+        !Read(t.process, base + dos.e_lfanew, &nt, sizeof(nt))) {
+        return false;
+    }
+    std::vector<IMAGE_SECTION_HEADER> sections(nt.FileHeader.NumberOfSections);
+    BYTE* first = base + dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                  nt.FileHeader.SizeOfOptionalHeader;
+    if (sections.empty() ||
+        !Read(t.process, first, sections.data(), sections.size() * sizeof(IMAGE_SECTION_HEADER))) {
+        return false;
+    }
+    for (auto& section : sections) {
+        if (memcmp(section.Name, ".rdata", 7) != 0) {
+            continue;
+        }
+        std::vector<WCHAR> data(section.Misc.VirtualSize / sizeof(WCHAR));
+        if (!Read(t.process, base + section.VirtualAddress, data.data(), data.size() * sizeof(WCHAR))) {
+            return false;
+        }
+        for (int i = 0; i < 2; i++) {
+            for (std::wstring_view text : kSlides[i]) {
+                for (size_t j = 1; !t.at[i] && j + text.size() < data.size(); j++) {
+                    if (data[j - 1] == L'\0' && data[j + text.size()] == L'\0' &&
+                        std::wstring_view(&data[j], text.size()) == text) {
+                        t.at[i] = base + section.VirtualAddress + j * sizeof(WCHAR);
+                    }
+                }
+            }
+        }
+    }
+    return t.at[0] && t.at[1];
+}
+
+// Both literals in Windows' text or the still one, each written only when it is
+// not that already. False when the memory could not be read or written.
+bool Set(Target& t, bool still) {
+    for (int i = 0; i < 2; i++) {
+        std::wstring_view want = kSlides[i][still];
+        std::wstring now(want.size(), L'\0');
+        if (!Read(t.process, t.at[i], now.data(), want.size() * sizeof(WCHAR))) {
+            return false;
+        }
+        if (now == want) {
+            continue;
+        }
+        SIZE_T size = want.size() * sizeof(WCHAR), done = 0;
+        DWORD old;
+        if (!VirtualProtectEx(t.process, t.at[i], size, PAGE_READWRITE, &old)) {
+            return false;
+        }
+        bool ok = WriteProcessMemory(t.process, t.at[i], want.data(), size, &done) && done == size;
+        VirtualProtectEx(t.process, t.at[i], size, old, &old);
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Windhawk loads the mod into every explorer.exe; the one with the taskbar does this.
+bool OwnsTaskbar() {
+    DWORD pid = 0;
+    HWND bar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    return bar && GetWindowThreadProcessId(bar, &pid) && pid == GetCurrentProcessId();
+}
+
+DWORD WINAPI WatchProc(void*) {
+    Target t;
+    DWORD skip = 0;  // a process the literals could not be found or set in
+    bool logged = false;
+    int state = -1;  // the text the literals have, as far as this load knows
+    for (;;) {
+        bool on = g_on;
+        if (!t.process && OwnsTaskbar()) {
+            t = Open(skip);
+            BYTE* base = t.process ? ModuleBase(t.pid) : nullptr;
+            if (t.process && !base) {
+                t.Close();  // its module comes with the first show
+            } else if (t.process && !FindLiterals(t, base)) {
+                Wh_Log(L"Notification center slide not found in %u; left as it is", t.pid);
+                skip = t.pid;
+                t.Close();
+            }
+            state = -1;
+        }
+        if (t.process && state != (int)on) {
+            if (Set(t, on)) {
+                state = on;
+                if (on || logged) {
+                    Wh_Log(L"Notification center slide %s in %u", on ? L"off" : L"back", t.pid);
+                    logged = true;
+                }
+            } else {
+                Wh_Log(L"Notification center slide could not be set in %u (%u)", t.pid, GetLastError());
+                skip = t.pid;
+                t.Close();
+            }
+        }
+        HANDLE waits[3] = {g_stop, g_nudge, t.process};
+        DWORD r = WaitForMultipleObjects(t.process ? 3 : 2, waits, FALSE, t.process ? INFINITE : kLookMs);
+        if (r == WAIT_OBJECT_0) {
+            break;
+        }
+        if (r == WAIT_OBJECT_0 + 2) {
+            t.Close();  // it ended; a new one starts with Windows' text
+        }
+    }
+    if (t.process && state == 1 && !Set(t, false)) {
+        Wh_Log(L"Notification center slide could not be put back in %u", t.pid);
+    }
+    t.Close();
+    return 0;
+}
+
+void LoadSettings() {
+    g_on = settings::g.tray.centerStill;
+    if (g_nudge) {
+        SetEvent(g_nudge);
+    }
+}
+
+// Wh_ModAfterInit, in explorer.
+void Start() {
+    LoadSettings();
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_nudge = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_thread = g_stop && g_nudge ? CreateThread(nullptr, 0, WatchProc, nullptr, 0, nullptr) : nullptr;
+    if (!g_thread) {
+        Wh_Log(L"Notification center watch did not start");
+    }
+}
+
+// Wh_ModBeforeUninit: Windows' text goes back before the module does.
+void Stop() {
+    if (g_thread) {
+        SetEvent(g_stop);
+        WaitForSingleObject(g_thread, INFINITE);
+        CloseHandle(g_thread);
+    }
+    for (HANDLE* h : {&g_stop, &g_nudge}) {
+        if (*h) {
+            CloseHandle(*h);
+        }
+    }
+    g_thread = g_stop = g_nudge = nullptr;
+}
+
+}  // namespace center
+
+// ============================================================================
 namespace position {
 // ============================================================================
 // The taskbar at the top or bottom edge whatever Windows' setting says, through
@@ -17950,6 +18211,7 @@ void Wh_ModAfterInit() {
         folders::Start();
     }
     bloom_link::Start();
+    center::Start();
 }
 
 void Wh_ModBeforeUninit() {
@@ -17958,6 +18220,7 @@ void Wh_ModBeforeUninit() {
         panels::g_on = false;
         return;
     }
+    center::Stop();
     bloom_link::Stop();
     core::g_unloading = true;
     if (hooks::g_features.folders) {
@@ -18006,6 +18269,7 @@ BOOL Wh_ModSettingsChanged(BOOL* bReload) {
         panels::LoadShellHostSettings();
         return TRUE;
     }
+    center::LoadSettings();
     if (hooks::Wanted() != hooks::g_features) {
         *bReload = TRUE;
         return TRUE;

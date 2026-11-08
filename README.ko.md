@@ -30,4 +30,4 @@ PillTaskbar는 GNU General Public License 버전 3 전용(GPL-3.0-only)으로 �
 
 모드의 일부는 다른 Windhawk 모드에서 가져왔고, 애드온에는 MinHook(BSD-2-Clause)과 Zydis(MIT)가 들어 있습니다. 저작자 표시와 라이선스는 `THIRD_PARTY.md`와 `THIRD_PARTY_NOTICES.txt`에 있습니다.
 
-이 프로그램은 어떤 보증도 하지 않습니다. explorer.exe 안의 코드를 바꾸고, 빠른 설정을 트레이 쪽에 놓으려고 ShellHost.exe 안의 코드도 바꾸므로 사용에 따른 책임은 사용자에게 있습니다. Windows와 Windhawk는 각 소유자의 상표이며, 이 프로젝트는 Microsoft나 Windhawk 제작자와 관계가 없습니다.
+이 프로그램은 어떤 보증도 하지 않습니다. explorer.exe 안의 코드를 바꾸고, 빠른 설정을 트레이 쪽에 놓으려고 ShellHost.exe 안의 코드도, 알림 센터 슬라이드를 끄려고 ShellExperienceHost.exe 메모리의 애니메이션 문자열 두 개도 바꾸므로 사용에 따른 책임은 사용자에게 있습니다. Windows와 Windhawk는 각 소유자의 상표이며, 이 프로젝트는 Microsoft나 Windhawk 제작자와 관계가 없습니다.
