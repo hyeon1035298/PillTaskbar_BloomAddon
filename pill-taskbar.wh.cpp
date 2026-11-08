@@ -5729,6 +5729,32 @@ void WINAPI CSecondaryTray__Unhide_Hook(void* pThis, int flags, int request) {
     }
 }
 
+// The hide check of every tray asks the task list whether it may go in, and the
+// task list refuses while any button flashes: a taskbar brought out with one
+// flashing stayed out until that app was activated. With keepHiddenOnFlash the
+// task list is asked as if none flashed; its other reasons (an open jump list,
+// thumbnail or drag) still hold it.
+thread_local int g_inPermitAutoHide;
+
+using PermitAutoHide_t = int(WINAPI*)(void* pThis);
+PermitAutoHide_t CTaskListWnd_PermitAutoHide_Original;
+PermitAutoHide_t CTaskBtnGroup_IsFlashing_Original;
+
+int WINAPI CTaskListWnd_PermitAutoHide_Hook(void* pThis) {
+    InFlight counted;
+    if (!Active() || !settings::g.autohide.keepHiddenOnFlash) {
+        return CTaskListWnd_PermitAutoHide_Original(pThis);
+    }
+    g_inPermitAutoHide++;
+    int permit = CTaskListWnd_PermitAutoHide_Original(pThis);
+    g_inPermitAutoHide--;
+    return permit;
+}
+
+int WINAPI CTaskBtnGroup_IsFlashing_Hook(void* pThis) {
+    return g_inPermitAutoHide ? 0 : CTaskBtnGroup_IsFlashing_Original(pThis);
+}
+
 // ---- Taskbar.View.dll: slide animations -------------------------------------------
 // The taskbar reuses one animation object per direction; its duration is set
 // when it's first seen and on each apply.
@@ -5809,6 +5835,10 @@ void CollectTaskbarDll(std::vector<SH>& list) {
                     &TrayUI_Unhide_Original, TrayUI_Unhide_Hook, true});
     list.push_back({{LR"(private: void __cdecl CSecondaryTray::_Unhide(enum TrayCommon::TrayUnhideFlags,enum TrayCommon::UnhideRequest))"},
                     &CSecondaryTray__Unhide_Original, CSecondaryTray__Unhide_Hook, true});
+    list.push_back({{LR"(public: virtual int __cdecl CTaskListWnd::PermitAutoHide(void))"},
+                    &CTaskListWnd_PermitAutoHide_Original, CTaskListWnd_PermitAutoHide_Hook, true});
+    list.push_back({{LR"(public: virtual int __cdecl CTaskBtnGroup::IsFlashing(void))"},
+                    &CTaskBtnGroup_IsFlashing_Original, CTaskBtnGroup_IsFlashing_Hook, true});
     list.push_back({{LR"(public: virtual unsigned int __cdecl TrayUI::GetAutoHideFlags(void))"},
                     &TrayUI_GetAutoHideFlags, nullptr, true});
     list.push_back({{LR"(const TrayUI::`vftable'{for `IInspectable'})"},
