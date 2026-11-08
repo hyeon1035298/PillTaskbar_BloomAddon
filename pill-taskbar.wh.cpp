@@ -16393,15 +16393,15 @@ enum class Source { kClaude, kCodex };
 // What a session is doing; kOutput is TokenCat's, shown as working.
 enum class State { kIdle, kWorking, kOutput, kTool, kInput, kStale, kComplete, kInterrupted, kUnfinished };
 
-constexpr uint64_t kTailBytes = 512 * 1024;      // from the end, on a log's first look
+constexpr uint64_t kTailBytes = 256 * 1024;      // from the end, on a log's first look
 constexpr uint64_t kHeadBytes = 64 * 1024;       // a Codex log's own session record
-constexpr uint64_t kReadBudget = 4 * 1024 * 1024;  // per log per look
+constexpr uint64_t kReadBudget = 1024 * 1024;    // per log per look
 constexpr size_t kMaxLine = 256 * 1024;          // longer lines only end a tool call
 constexpr size_t kPrefixBytes = 16 * 1024;       // of a longer line, for that
-constexpr size_t kPerSource = 8;                 // newest logs read per tool
+constexpr size_t kPerSource = 6;                 // newest logs read per tool
 constexpr int64_t kRecentSeconds = 24 * 3600;    // older logs are left out
 constexpr int kFindEvery = 5;                    // looks between two searches for logs
-constexpr size_t kMaxSet = 4096;                 // ids remembered per log
+constexpr size_t kMaxSet = 512;                  // ids remembered per log
 
 // ---- a log's state (worker) ----------------------------------------------------
 
@@ -17473,23 +17473,28 @@ std::wstring CodexId(std::wstring const& path) {
 }
 
 // Codex keeps its thread names in session_index.jsonl ({id, thread_name,
-// updated_at}); the newest name of an id wins. Its tail is read again as it changes.
+// updated_at}); the newest name of an id wins. Its tail is read again as it or
+// the logs shown change, and only the names of those logs are kept.
 struct Names {
     std::wstring path;
     uint64_t size = 0;
     int64_t written = 0;
+    std::vector<std::wstring> ids;  // the logs' sessions, lower case
     std::unordered_map<std::wstring, std::pair<int64_t, std::wstring>> byId;
 
-    void Update() {
+    void Update(std::vector<std::wstring> wanted) {
         WIN32_FILE_ATTRIBUTE_DATA data;
         if (path.empty() || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
             return;
         }
         uint64_t now = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
         int64_t at = Unix(data.ftLastWriteTime);
-        if (now == size && at == written) {
+        std::ranges::sort(wanted);
+        if (now == size && at == written && wanted == ids) {
             return;
         }
+        ids = std::move(wanted);
+        byId.clear();
         size = now;
         written = at;
         winrt::file_handle file{CreateFileW(path.c_str(), GENERIC_READ,
@@ -17516,13 +17521,10 @@ struct Names {
             std::wstring id = Str(record, L"id"), name = CleanTitle(Str(record, L"thread_name"));
             if (id.empty() || name.empty()) continue;
             std::ranges::transform(id, id.begin(), towlower);
+            if (!std::ranges::binary_search(ids, id)) continue;
             int64_t updated = TimeOf(record, L"updated_at");
             auto& entry = byId[id];
             if (updated >= entry.first) entry = {updated, name};
-        }
-        if (byId.size() > 2048) {
-            byId.clear();  // read whole again on the next change
-            size = 0;
         }
     }
 };
@@ -17628,7 +17630,11 @@ void Look() {
         }
     }
     if (anyCodex) {
-        g_names.Update();
+        std::vector<std::wstring> ids;
+        for (auto const& [path, g] : g_logs) {
+            if (g.source == Source::kCodex && !g.sessionId.empty()) ids.push_back(g.sessionId);
+        }
+        g_names.Update(std::move(ids));
     }
     now = usage::Now();
     for (auto const& [path, g] : g_logs) {
@@ -17643,10 +17649,30 @@ void Look() {
     });
     snapshot->at = now;
     core::Post([snapshot] {
+        if (!g_wanted) {
+            return;  // closed meanwhile
+        }
         g_snapshot = snapshot;
         if (g_onRows) {
             g_onRows();
         }
+    });
+}
+
+// The details closed: nothing read for them stays. A look running now holds
+// the lock, so the job lets go after it, unless they opened again meanwhile.
+void Forget() {
+    g_snapshot = nullptr;
+    folders::StartJob([] {
+        std::lock_guard guard(g_lock);
+        if (g_wanted) {
+            return;
+        }
+        std::unordered_map<std::wstring, Log>().swap(g_logs);
+        g_names = Names{};
+        std::vector<Found>().swap(g_found);
+        g_looks = 0;
+        g_findNow = true;
     });
 }
 
@@ -17671,83 +17697,301 @@ void Request() {
 // ============================================================================
 namespace usage_detail {
 // ============================================================================
-// A click on the usage meter opens its details in the folder popup's glass
-// bubble: a card per account as Bloom's home draws them, with every limit's
-// number, bar and time to its reset. The numbers count used or left as the
-// meter does, and the switch at the top turns them as a right-click on the
-// meter does. Taskbar thread only.
+// A click on the usage meter opens its details: a card per account as Bloom's
+// home draws them, with every limit's number, bar and time to its reset, then
+// the Claude Code and Codex sessions. Drawn in Bloom's design system (its
+// palette, accent, popup surface, type), on the folder popup's flyout, which
+// holds the taskbar out and closes on a press elsewhere. Everything is made as
+// it opens and let go as it closes; nothing is read while it is closed. The
+// numbers count used or left as the meter does, and the switch at the top turns
+// them as a right-click on the meter does. Taskbar thread only.
 
 namespace wux = winrt::Windows::UI::Xaml;
-namespace theme = settings::theme;
 using winrt::Windows::UI::Color;
+
+// ---- Bloom's design system -----------------------------------------------------------
+// Bloom's Ui\Theme\Palette.cs tokens, dark and light; the accent is Bloom's pick.
+
+struct Colors {
+    uint32_t text, dim, faint, card, tile, track, line, popup, popupLine, edge, hilite, hover, warn,
+        danger;
+    uint32_t accent = 0, accentSoft = 0, accentText = 0;
+};
+constexpr Colors kDark{0xFFECEDEE, 0xFFA1A1AA, 0xFF97989A, 0x0DFFFFFF, 0x14FFFFFF,
+                       0x1AFFFFFF, 0x14FFFFFF, 0xF527272A, 0x14FFFFFF, 0x26FFFFFF,
+                       0x14FFFFFF, 0x14FFFFFF, 0xFFF7B750, 0xFFE77578};
+constexpr Colors kLight{0xFF11181C, 0xFF3F3F46, 0xFF52525B, 0x0D111111, 0x14111111,
+                        0x1A111111, 0x14111111, 0xFAFAFAFA, 0x14111111, 0x26111111,
+                        0x99FAFAFA, 0x14111111, 0xFF62420E, 0xFFB3363A};
+// Theme.Sans: Windows' UI font, Malgun Gothic for Hangul.
+constexpr PCWSTR kFont = L"Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Malgun Gothic";
+constexpr PCWSTR kIconFont = L"Segoe Fluent Icons, Segoe MDL2 Assets";
+constexpr double kPopupRadius = 12, kCardRadius = 12, kSmoothing = 0.6;
+constexpr double kShadowBlur = 26, kShadowDepth = 6, kShadowOpacity = 0.3;  // LiftMenu
+
+// Bloom's Hsl (Palette.cs).
+void ToHsl(uint32_t argb, double& h, double& s, double& l) {
+    double r = BYTE(argb >> 16) / 255.0, g = BYTE(argb >> 8) / 255.0, b = BYTE(argb) / 255.0;
+    double hi = std::max({r, g, b}), lo = std::min({r, g, b}), d = hi - lo;
+    l = (hi + lo) / 2;
+    if (d < 1e-9) {
+        h = s = 0;
+        return;
+    }
+    s = l > 0.5 ? d / (2 - hi - lo) : d / (hi + lo);
+    h = 60 * (hi == r ? (g - b) / d + (g < b ? 6 : 0) : hi == g ? (b - r) / d + 2 : (r - g) / d + 4);
+}
+
+uint32_t FromHsl(BYTE a, double h, double s, double l) {
+    double q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q, hk = h / 360;
+    auto channel = [&](double t) {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        return t < 1.0 / 6 ? p + (q - p) * 6 * t
+               : t < 0.5   ? q
+               : t < 2.0 / 3 ? p + (q - p) * (2.0 / 3 - t) * 6
+                             : p;
+    };
+    auto byte = [](double v) { return (uint32_t)std::lround(std::clamp(v, 0.0, 1.0) * 255); };
+    uint32_t r = byte(s < 1e-9 ? l : channel(hk + 1.0 / 3)), g = byte(s < 1e-9 ? l : channel(hk)),
+             b = byte(s < 1e-9 ? l : channel(hk - 1.0 / 3));
+    return (uint32_t)a << 24 | r << 16 | g << 8 | b;
+}
+
+// The accent Bloom shows, dark and light: its "accent" in settings.json (a preset,
+// or "custom" with "accentCustom", the light theme's colour). Rose without one.
+// Only the two values are looked for, in the file's bytes, once per opening.
+std::pair<uint32_t, uint32_t> BloomAccent() {
+    std::pair<uint32_t, uint32_t> rose{0xFFFF7A9E, 0xFFE04E78};
+    WCHAR base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", base, ARRAYSIZE(base));
+    if (!n || n >= ARRAYSIZE(base)) {
+        return rose;
+    }
+    winrt::file_handle file{CreateFileW((std::wstring(base) + L"\\Bloom\\settings.json").c_str(),
+                                        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    LARGE_INTEGER size;
+    if (!file || !GetFileSizeEx(file.get(), &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 4 * 1024 * 1024) {
+        return rose;
+    }
+    std::string bytes((size_t)size.QuadPart, '\0');
+    DWORD got = 0;
+    if (!ReadFile(file.get(), bytes.data(), (DWORD)bytes.size(), &got, nullptr)) {
+        return rose;
+    }
+    bytes.resize(got);
+    auto value = [&](std::string_view key) {
+        std::string needle = "\"" + std::string(key) + "\"";
+        size_t at = bytes.find(needle);
+        if (at == std::string::npos) return std::string();
+        at = bytes.find_first_not_of(" \t\r\n:", at + needle.size());
+        if (at == std::string::npos || bytes[at] != '"') return std::string();
+        size_t end = bytes.find('"', at + 1);
+        return end == std::string::npos ? std::string() : bytes.substr(at + 1, end - at - 1);
+    };
+    std::string key = value("accent");
+    static constexpr std::pair<const char*, std::pair<uint32_t, uint32_t>> kPresets[] = {
+        {"rose", {0xFFFF7A9E, 0xFFE04E78}},      {"lavender", {0xFFB49CFF, 0xFF7B5BDB}},
+        {"sky", {0xFF72B6FF, 0xFF2F72D6}},       {"mint", {0xFF5ED3AE, 0xFF168F6C}},
+        {"tangerine", {0xFFFF9B5E, 0xFFD9652A}}, {"lemon", {0xFFEDC94F, 0xFFA87C00}},
+        {"gray", {0xFFE4E4E4, 0xFF2E2E2E}},
+    };
+    for (auto const& [name, pair] : kPresets) {
+        if (key == name) return pair;
+    }
+    if (key == "custom") {
+        std::string t = value("accentCustom");
+        if (!t.empty() && t[0] == '#') t.erase(0, 1);
+        if (t.size() == 6 && t.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+            uint32_t light = 0xFF000000u | (uint32_t)strtoul(t.c_str(), nullptr, 16);
+            double h, s, l;
+            ToHsl(light, h, s, l);
+            return {FromHsl(0xFF, h, s, std::max(l, std::min(0.86, l + 0.18))), light};
+        }
+    }
+    return rose;
+}
+
+// The palette with the accent and what Bloom makes of it (Palette.Recolor).
+Colors MakeColors(bool dark) {
+    Colors c = dark ? kDark : kLight;
+    auto [darkAccent, lightAccent] = BloomAccent();
+    c.accent = dark ? darkAccent : lightAccent;
+    c.accentSoft = 0x1F000000u | (c.accent & 0xFFFFFF);
+    double h, s, l;
+    ToHsl(c.accent, h, s, l);
+    c.accentText = FromHsl(0xFF, h, s, std::clamp(l + (dark ? 0.05 : -0.06), 0.0, 1.0));
+    return c;
+}
+
+Color ToColor(uint32_t argb) {
+    return {BYTE(argb >> 24), BYTE(argb >> 16), BYTE(argb >> 8), BYTE(argb)};
+}
+
+Media::SolidColorBrush Brush(uint32_t argb) {
+    return Media::SolidColorBrush(ToColor(argb));
+}
+
+// ---- the popup's state ---------------------------------------------------------------------
 
 // The popup's folder name: '|' never is in a folder's path.
 constexpr PCWSTR kKey = L"|usage";
-constexpr double kWidth = 312;
-constexpr double kPadding = 12;      // around the bubble's content
-constexpr double kCardPadding = 12;  // inside a card
-constexpr double kCardRadius = 14;
-constexpr double kGap = 8;           // between cards
+constexpr double kWidth = 320;
+constexpr double kPadding = 14;       // inside the surface
+constexpr double kCardPadX = 14, kCardPadY = 12;  // Bloom's home cards
+constexpr double kGap = 8;            // between cards
 constexpr double kMarkSize = 16;
-constexpr double kBarHeight = 4;
-constexpr double kTitleSize = 14, kNameSize = 13, kTextSize = 12, kSmallSize = 11;
+constexpr double kTitleSize = 14, kNameSize = 12.5, kTextSize = 11.5, kSmallSize = 11;
 
-// Set when the usage popup hooked the tray's hide timer itself (the folders,
-// which do it otherwise, are off); undone as it closes for good.
+// What one opening holds; reset as it closes, so nothing stays between openings.
+struct Open {
+    Colors colors{};
+    bool dark = true;
+    double rasterization = 1;  // the taskbar's pixels per DIP, for the logos
+    winrt::weak_ref<Controls::StackPanel> body;
+    winrt::weak_ref<Controls::TextBlock> sessionsSummary;
+    winrt::weak_ref<Controls::StackPanel> sessionsList;
+    DispatcherTimer tick{nullptr};
+    int ticks = 0;
+};
+[[clang::no_destroy]] std::optional<Open> g_open;
+// Set when the popup hooked the tray's hide timer itself (the folders, which do
+// it otherwise, are off); undone as the meter goes.
 bool g_ownsTimerHook = false;
-winrt::weak_ref<Controls::StackPanel> g_body;
-double g_rasterization = 1;  // the taskbar's pixels per DIP, for the logos
 
 bool Ours() {
-    return folders::g_popup && folders::g_popup->model.folder == kKey;
+    return folders::g_popup && folders::g_popup->model.folder == kKey && g_open;
 }
 
-bool Dark(folders::Popup const& p) {
-    return p.colors != &folders::kLightPalette;
+Colors const& C() {
+    return g_open->colors;
 }
 
-Controls::TextBlock Text(std::wstring const& text, double size, Color color,
-                         bool semi = false) {
+// ---- pieces -------------------------------------------------------------------------------------
+
+Controls::TextBlock Text(std::wstring const& text, double size, uint32_t color,
+                         winrt::Windows::UI::Text::FontWeight weight =
+                             winrt::Windows::UI::Text::FontWeights::Normal()) {
     Controls::TextBlock t;
     t.Text(text);
     t.FontSize(size);
-    t.FontFamily(Media::FontFamily{theme::kUsageFont});
-    t.Foreground(Media::SolidColorBrush(color));
-    if (semi) {
-        t.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-    }
+    t.FontFamily(Media::FontFamily{kFont});
+    t.FontWeight(weight);
+    t.Foreground(Brush(color));
     t.TextTrimming(TextTrimming::CharacterEllipsis);
     t.VerticalAlignment(VerticalAlignment::Center);
     return t;
 }
 
-Documents::Run Span(std::wstring const& text, double size, Color color, bool medium = false) {
+auto Semi() {
+    return winrt::Windows::UI::Text::FontWeights::SemiBold();
+}
+
+auto Medium() {
+    return winrt::Windows::UI::Text::FontWeights::Medium();
+}
+
+Documents::Run Span(std::wstring const& text, double size, uint32_t color, bool medium = false) {
     Documents::Run run;
     run.Text(text);
     run.FontSize(size);
-    run.Foreground(Media::SolidColorBrush(color));
+    run.Foreground(Brush(color));
     if (medium) {
-        run.FontWeight(winrt::Windows::UI::Text::FontWeights::Medium());
+        run.FontWeight(Medium());
     }
     return run;
 }
 
-// A fill in the popup's smooth-cornered shape behind `content`, as wide as it is.
-Controls::Grid Card(folders::Popup& p, FrameworkElement const& content, uint32_t fill,
-                    double radius, Thickness padding) {
-    Controls::Grid card;
+// A smooth-cornered fill (Bloom's SmoothBorder) behind `content`, its size.
+Controls::Grid Surface(FrameworkElement const& content, uint32_t fill, double radius,
+                       Thickness padding, uint32_t stroke = 0) {
+    Controls::Grid surface;
     Shapes::Path shape;
-    shape.Fill(folders::Brush(fill));
+    shape.Fill(Brush(fill));
+    if (stroke) {
+        shape.Stroke(Brush(stroke));
+        shape.StrokeThickness(1);
+    }
     content.Margin(padding);
-    card.Children().Append(shape);
-    card.Children().Append(content);
-    double smoothing = folders::Smoothing(p.look);
-    folders::Keep(p, card.SizeChanged(winrt::auto_revoke, [shape, radius, smoothing](
-                                                             auto&&, SizeChangedEventArgs const& e) {
-        shape.Data(folders::SmoothRect(0, 0, e.NewSize().Width, e.NewSize().Height, radius,
-                                       smoothing));
-    }));
-    return card;
+    surface.Children().Append(shape);
+    surface.Children().Append(content);
+    if (folders::g_popup) {
+        double inset = stroke ? 0.5 : 0;
+        folders::Keep(*folders::g_popup,
+                      surface.SizeChanged(winrt::auto_revoke, [shape, radius, inset](
+                                                                  auto&&, SizeChangedEventArgs const& e) {
+                          shape.Data(folders::SmoothRect(inset, inset, e.NewSize().Width - 2 * inset,
+                                                         e.NewSize().Height - 2 * inset, radius,
+                                                         kSmoothing));
+                      }));
+    }
+    return surface;
+}
+
+// A line: `left` taking the room, `right` at its end.
+Controls::Grid Line(FrameworkElement const& left, FrameworkElement const& right) {
+    Controls::Grid line;
+    Controls::ColumnDefinition rest, end;
+    end.Width(GridLengthHelper::Auto());
+    line.ColumnDefinitions().Append(rest);
+    line.ColumnDefinitions().Append(end);
+    line.Children().Append(left);
+    if (right) {
+        right.Margin({8, 0, 0, 0});
+        Controls::Grid::SetColumn(right, 1);
+        line.Children().Append(right);
+    }
+    return line;
+}
+
+Controls::StackPanel Across(std::initializer_list<FrameworkElement> items) {
+    Controls::StackPanel row;
+    row.Orientation(Controls::Orientation::Horizontal);
+    for (auto const& item : items) {
+        if (item) row.Children().Append(item);
+    }
+    return row;
+}
+
+std::wstring Joined(std::initializer_list<std::wstring> parts) {
+    std::wstring out;
+    for (auto const& part : parts) {
+        if (part.empty()) continue;
+        if (!out.empty()) out += L" · ";
+        out += part;
+    }
+    return out;
+}
+
+// Bloom's home bar (HomeViews.Bar): 4 high, `fill` (the accent; red when the
+// limit is nearly used up) on the track.
+Controls::Grid Bar(double fraction, uint32_t fill, double width = 0) {
+    Controls::Grid bar;
+    bar.Height(4);
+    if (width > 0) {
+        bar.Width(width);
+    }
+    fraction = std::clamp(fraction, 0.0, 1.0);
+    Controls::ColumnDefinition shown, rest;
+    shown.Width({std::max(fraction, 0.0001), GridUnitType::Star});
+    rest.Width({std::max(1 - fraction, 0.0001), GridUnitType::Star});
+    bar.ColumnDefinitions().Append(shown);
+    bar.ColumnDefinitions().Append(rest);
+    auto radius = CornerRadiusHelper::FromUniformRadius(2);
+    Controls::Border back;
+    back.CornerRadius(radius);
+    back.Background(Brush(C().track));
+    Controls::Grid::SetColumnSpan(back, 2);
+    bar.Children().Append(back);
+    if (fraction > 0) {
+        Controls::Border front;
+        front.CornerRadius(radius);
+        front.Background(Brush(fill));
+        bar.Children().Append(front);
+    }
+    return bar;
 }
 
 // The local date and time of a Unix time: "11/12 (수) 18:00".
@@ -17767,12 +18011,10 @@ std::wstring LocalTime(int64_t unix) {
     return text;
 }
 
-// The account's logo as the meter draws it: its icon, else its letter on a tile,
-// else its letter.
-FrameworkElement Mark(usage::Account const& a, usage::Label const& label, bool dark,
-                      double scale) {
-    auto const& u = usage::Palette(dark);
-    UINT px = (UINT)std::lround(kMarkSize * scale);
+// The account's logo as the meter draws it: its icon, else its letter on a
+// tile, else its letter.
+FrameworkElement Mark(usage::Account const& a, usage::Label const& label) {
+    UINT px = (UINT)std::lround(kMarkSize * g_open->rasterization);
     auto icon = a.hasIcon ? usage::IconAt(a.icon, px) : nullptr;
     switch (usage::MarkOf(a, icon != nullptr)) {
         case usage::Mark::kIcon: {
@@ -17780,8 +18022,8 @@ FrameworkElement Mark(usage::Account const& a, usage::Label const& label, bool d
             Controls::Image image;
             image.Width(kMarkSize);
             image.Height(kMarkSize);
-            if (auto bitmap =
-                    usage::IconBitmap(*usage::Colored(icon, mono, usage::IconTint(mono, dark)))) {
+            if (auto bitmap = usage::IconBitmap(
+                    *usage::Colored(icon, mono, ToColor(mono ? C().dim : C().text)))) {
                 image.Source(bitmap);
             }
             return image;
@@ -17790,192 +18032,171 @@ FrameworkElement Mark(usage::Account const& a, usage::Label const& label, bool d
             Controls::Border tile;
             tile.Width(kMarkSize);
             tile.Height(kMarkSize);
-            tile.CornerRadius(CornerRadiusHelper::FromUniformRadius(kMarkSize *
-                                                                    theme::kUsageTileRadius));
-            tile.Background(Media::SolidColorBrush(usage::TileFill(dark)));
-            auto letter = Text(label.letter, std::round(kMarkSize * theme::kUsageTileLetter),
-                               u.text, true);
+            tile.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+            tile.Background(Brush(C().tile));
+            auto letter = Text(label.letter, 10, C().text, Semi());
             letter.HorizontalAlignment(HorizontalAlignment::Center);
             tile.Child(letter);
             return tile;
         }
         default:
-            return Text(label.initial, kNameSize, u.text, true);
+            return Text(label.initial, kNameSize, C().text, Semi());
     }
 }
 
-// A thin bar filled to `fraction` in `fill`.
-Controls::Grid Bar(double fraction, Color track, Color fill) {
-    Controls::Grid bar;
-    bar.Height(kBarHeight);
-    bar.Margin({0, 4, 0, 0});
-    auto columns = bar.ColumnDefinitions();
-    Controls::ColumnDefinition shown, rest;
-    shown.Width({fraction, GridUnitType::Star});
-    rest.Width({1 - fraction, GridUnitType::Star});
-    columns.Append(shown);
-    columns.Append(rest);
-    auto radius = CornerRadiusHelper::FromUniformRadius(kBarHeight / 2);
-    Controls::Border back, front;
-    back.CornerRadius(radius);
-    back.Background(Media::SolidColorBrush(track));
-    Controls::Grid::SetColumnSpan(back, 2);
-    front.CornerRadius(radius);
-    front.Background(Media::SolidColorBrush(fill));
-    bar.Children().Append(back);
-    if (fraction > 0) {
-        bar.Children().Append(front);
-    }
-    return bar;
-}
-
-// A limit: its name, then the number ("68% 남음") and the time to its reset;
-// under them its bar. The reset's date and time are in the tooltip.
-FrameworkElement LimitRow(usage::Model const& m, usage::Account const& a,
-                          usage::Limit const& l, int64_t now, bool dark) {
-    auto const& u = usage::Palette(dark);
+// A limit as Bloom's home shows it: its name, then "68%" (" 남음") and the time
+// to its reset; under them its bar. The reset's date is in the tooltip.
+FrameworkElement LimitRow(usage::Model const& m, usage::Account const& a, usage::Limit const& l,
+                          int64_t now) {
     usage::Value v = usage::Evaluate(m, a, &l, now);
+    bool number = v.kind == usage::Value::kNumber;
+    bool hot = number && v.percent >= settings::theme::kUsageDangerPercent;
     Controls::StackPanel row;
-    row.Margin({0, 6, 0, 0});
-    Controls::Grid line;
-    Controls::ColumnDefinition name, figures;
-    figures.Width(GridLengthHelper::Auto());
-    line.ColumnDefinitions().Append(name);
-    line.ColumnDefinitions().Append(figures);
-    line.Children().Append(
-        Text(l.name.empty() ? usage::WindowName(l.mins) : l.name, kTextSize, u.muted));
+    row.Margin({0, 2, 0, 0});
     Controls::TextBlock right;
-    right.FontFamily(Media::FontFamily{theme::kUsageFont});
+    right.FontFamily(Media::FontFamily{kFont});
     right.VerticalAlignment(VerticalAlignment::Center);
     Documents::Typography::SetNumeralAlignment(right, FontNumeralAlignment::Tabular);
-    bool danger = v.kind == usage::Value::kNumber && v.percent >= theme::kUsageDangerPercent;
-    if (danger) {  // a mark as well as the color
-        auto mark = Span(L"\xE7BA ", kSmallSize, u.dangerText);
-        mark.FontFamily(Media::FontFamily{L"Segoe Fluent Icons, Segoe MDL2 Assets"});
+    if (hot) {  // a mark as well as the colour
+        auto mark = Span(L"\xE7BA ", 10.5, C().danger);
+        mark.FontFamily(Media::FontFamily{kIconFont});
         right.Inlines().Append(mark);
     }
-    right.Inlines().Append(Span(v.Figure() + (v.kind == usage::Value::kNumber ? L"%" : L""),
-                                kTextSize, usage::FigureColor(v, dark), true));
-    if (v.kind == usage::Value::kNumber && v.left) {
-        right.Inlines().Append(Span(L" 남음", kSmallSize, u.muted));
+    auto figure = Span(v.Figure() + (number ? L"%" : L""), kTextSize, hot ? C().danger : C().text, !hot);
+    if (hot) {
+        figure.FontWeight(Semi());
     }
-    if (v.kind == usage::Value::kNumber && l.resetsAt > now) {
-        right.Inlines().Append(Span(L"  " + usage::Duration(l.resetsAt - now) + L" 뒤 초기화",
-                                    kSmallSize, u.faint));
+    right.Inlines().Append(figure);
+    if (number && v.left) {
+        right.Inlines().Append(Span(L" 남음", kSmallSize, C().dim));
     }
-    Controls::Grid::SetColumn(right, 1);
-    line.Children().Append(right);
-    row.Children().Append(line);
-    auto fill = u.text;
-    fill.A = theme::kUsageFillAlpha;
-    double fraction = v.kind == usage::Value::kNumber ? v.Shown() / 100.0 : 0;
-    row.Children().Append(Bar(fraction, u.track, usage::AlertColor(v, dark, false).value_or(fill)));
+    if (number && l.resetsAt > now) {
+        right.Inlines().Append(Span(L"  " + usage::Duration(l.resetsAt - now), kSmallSize, C().faint));
+    }
+    row.Children().Append(
+        Line(Text(l.name.empty() ? usage::WindowName(l.mins) : l.name, kSmallSize, C().dim), right));
+    auto bar = Bar(number ? v.Shown() / 100.0 : 0, hot ? C().danger : C().accent);
+    bar.Margin({0, 3, 0, 2});
+    row.Children().Append(bar);
     if (std::wstring at = LocalTime(l.resetsAt); !at.empty()) {
         Controls::ToolTipService::SetToolTip(row, winrt::box_value(at + L" 초기화"));
     }
     return row;
 }
 
-// When the account's numbers came, or why they can't: what Bloom's home and the
-// meter's tooltip say.
+// When the account's numbers came, or why they can't.
 std::wstring Status(usage::Model const& m, usage::Account const& a, int64_t now) {
     if (!m.online) {
-        return L"Bloom 꺼짐 · " + usage::Duration(std::max<int64_t>(0, now - m.writtenAt)) +
-               L" 전";
+        return L"Bloom 꺼짐 · " + usage::Duration(std::max<int64_t>(0, now - m.writtenAt)) + L" 전";
     }
     if (usage::Age(a, now) > usage::kGiveUpSeconds) {
         return L"하루 넘게 갱신 없음";
     }
-    return usage::Duration(usage::Age(a, now)) + L" 전 갱신";
+    return usage::Duration(usage::Age(a, now)) + L" 전";
 }
 
-// [mark][name][plan] … [when], then the limits; a signed-out account says so
-// instead. Old numbers are dimmed.
-FrameworkElement AccountCard(folders::Popup& p, usage::Model const& m, usage::Account const& a,
-                             usage::Label const& label, int64_t now, double scale) {
-    bool dark = Dark(p);
-    auto const& u = usage::Palette(dark);
+// Bloom's home card: [mark][name][plan] … [when], then the limits; a signed-out
+// account says so instead. Old numbers are dimmed.
+FrameworkElement AccountCard(usage::Model const& m, usage::Account const& a,
+                             usage::Label const& label, int64_t now) {
     Controls::StackPanel stack;
     Controls::Grid head;
+    head.Margin({0, 0, 0, 5});
     for (int c = 0; c < 4; c++) {
         Controls::ColumnDefinition column;
         column.Width(c == 1 ? GridLength{1, GridUnitType::Star} : GridLengthHelper::Auto());
         head.ColumnDefinitions().Append(column);
     }
-    auto mark = Mark(a, label, dark, scale);
-    mark.Margin({0, 0, 8, 0});
+    auto mark = Mark(a, label);
+    mark.Margin({0, 0, 6, 0});
     mark.VerticalAlignment(VerticalAlignment::Center);
     head.Children().Append(mark);
-    auto name = Text(label.title, kNameSize, u.text, true);
+    auto name = Text(label.title, kNameSize, C().text, Semi());
     Controls::Grid::SetColumn(name, 1);
     head.Children().Append(name);
     if (!a.plan.empty()) {
         Controls::Border badge;
-        badge.CornerRadius(CornerRadiusHelper::FromUniformRadius(5));
-        badge.Background(folders::Brush(p.colors->field));
-        badge.Padding({6, 1, 6, 1});
+        badge.Height(16);
+        badge.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        badge.Background(Brush(C().tile));
+        badge.Padding({5, 0, 5, 0});
         badge.Margin({6, 0, 0, 0});
         badge.VerticalAlignment(VerticalAlignment::Center);
-        badge.Child(Text(a.plan, kSmallSize, u.muted));
+        badge.Child(Text(a.plan, kSmallSize, C().dim, Medium()));
         Controls::Grid::SetColumn(badge, 2);
         head.Children().Append(badge);
     }
-    auto when = Text(a.signedOut ? L"" : Status(m, a, now), kSmallSize, u.faint);
-    when.Margin({8, 0, 0, 0});
-    Controls::Grid::SetColumn(when, 3);
-    head.Children().Append(when);
+    if (!a.signedOut) {
+        auto when = Text(Status(m, a, now), kSmallSize, C().faint);
+        when.Margin({6, 0, 0, 0});
+        Controls::ToolTipService::SetToolTip(when, winrt::box_value(L"마지막으로 받은 때"));
+        Controls::Grid::SetColumn(when, 3);
+        head.Children().Append(when);
+    }
     stack.Children().Append(head);
-
     if (a.signedOut) {
-        auto need = Text(L"로그인이 풀려 사용량을 받지 못했습니다", kTextSize, u.muted);
+        auto need = Text(L"로그인이 풀려 사용량을 받지 못했습니다", kSmallSize, C().dim);
         need.TextWrapping(TextWrapping::Wrap);
-        need.Margin({0, 6, 0, 0});
         stack.Children().Append(need);
     } else {
         Controls::StackPanel rows;
-        rows.Opacity(usage::Dim(m, a, now) ? theme::kUsageDimOpacity : 1.0);
+        rows.Opacity(usage::Dim(m, a, now) ? 0.55 : 1.0);
         for (auto const& l : a.limits) {
-            rows.Children().Append(LimitRow(m, a, l, now, dark));
+            rows.Children().Append(LimitRow(m, a, l, now));
         }
         if (a.limits.empty()) {
-            auto none = Text(L"받은 한도가 없습니다", kTextSize, u.muted);
-            none.Margin({0, 6, 0, 0});
-            rows.Children().Append(none);
+            rows.Children().Append(Text(L"받은 한도가 없습니다", kSmallSize, C().dim));
         }
         stack.Children().Append(rows);
     }
-    return Card(p, stack, p.colors->field, kCardRadius,
-                {kCardPadding, kCardPadding - 2, kCardPadding, kCardPadding});
+    return Surface(stack, C().card, kCardRadius, {kCardPadX, kCardPadY, kCardPadX, kCardPadY});
 }
 
-// "쓴 만큼 | 남은 만큼": the one shown lit; the other turns the numbers, as a
+// Bloom's Segmented: the options on a faint well, the chosen one on a lighter
+// fill with a light line along its top. The other one turns the numbers, as a
 // right-click on the meter does.
-FrameworkElement Switch(folders::Popup& p, bool left) {
-    constexpr double kSegmentWidth = 64, kSegmentHeight = 24;
-    bool dark = Dark(p);
-    auto const& u = usage::Palette(dark);
-    Controls::StackPanel segments;
-    segments.Orientation(Controls::Orientation::Horizontal);
-    segments.VerticalAlignment(VerticalAlignment::Center);
+FrameworkElement Switch(bool left) {
+    Controls::StackPanel items;
+    items.Orientation(Controls::Orientation::Horizontal);
     for (bool side : {false, true}) {
         bool on = side == left;
-        auto text = Text(side ? L"남은 만큼" : L"쓴 만큼", kSmallSize, on ? u.text : u.muted, on);
+        PCWSTR label = side ? L"남은 만큼" : L"쓴 만큼";
+        auto text = Text(label, 12, on ? C().text : C().faint, Medium());
         text.HorizontalAlignment(HorizontalAlignment::Center);
-        auto segment = folders::Plate(p, kSegmentWidth, kSegmentHeight, kSegmentHeight / 2, text,
-                                      on ? p.colors->hover : 0);
-        Automation::AutomationProperties::SetName(segment, side ? L"남은 만큼" : L"쓴 만큼");
-        if (!on) {
-            folders::Keep(p, segment.Tapped(winrt::auto_revoke, [](auto&&, auto&&) {
+        Controls::Grid item;
+        item.Height(24);
+        item.Padding({10, 0, 10, 0});
+        item.Margin({side ? 2.0 : 0.0, 0, 0, 0});
+        item.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+        item.Background(on ? Brush(C().edge) : Brush(0));  // hit-testable either way
+        if (on) {
+            Controls::Border top;  // the light line along its top
+            top.Height(1);
+            top.Margin({4, 0, 4, 0});
+            top.VerticalAlignment(VerticalAlignment::Top);
+            top.Background(Brush(C().hilite));
+            item.Children().Append(top);
+        }
+        item.Children().Append(text);
+        Automation::AutomationProperties::SetName(item, label);
+        if (!on && folders::g_popup) {
+            folders::Keep(*folders::g_popup, item.Tapped(winrt::auto_revoke, [](auto&&, auto&&) {
                 core::Guard(L"Usage switch", usage::FlipLeft);
             }));
         }
-        segments.Children().Append(segment);
+        items.Children().Append(item);
     }
-    return segments;
+    Controls::Border well;
+    well.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+    well.Background(Brush(C().card));
+    well.Padding({2, 2, 2, 2});
+    well.VerticalAlignment(VerticalAlignment::Center);
+    well.Child(items);
+    return well;
 }
 
 // ---- sessions --------------------------------------------------------------------------
-// TokenCat's list, in this popup's look: a live session (working, running a tool,
+// TokenCat's list, in Bloom's look: a live session (working, running a tool,
 // waiting for an answer) gets three lines, the rest one.
 
 constexpr size_t kMaxSessions = 12;
@@ -17983,11 +18204,6 @@ constexpr size_t kMaxSessions = 12;
 // the taskbar as sessions come and go.
 constexpr double kSessionsHeight = 228;
 constexpr int kLookEveryTicks = 2;  // a look every other second while open
-
-winrt::weak_ref<Controls::TextBlock> g_sessionsSummary;
-winrt::weak_ref<Controls::StackPanel> g_sessionsList;
-[[clang::no_destroy]] DispatcherTimer g_tick{nullptr};
-int g_ticks = 0;
 
 bool SessionsOn() {
     return settings::g.usage.sessions;
@@ -18103,114 +18319,67 @@ std::wstring Client(ai_sessions::Row const& r) {
     return r.source == ai_sessions::Source::kCodex ? L"Codex" : L"Claude Code";
 }
 
-Color ArgbColor(uint32_t argb) {
-    return {BYTE(argb >> 24), BYTE(argb >> 16), BYTE(argb >> 8), BYTE(argb)};
-}
-
-// The state's color: amber for a question, the accent while it runs.
-Color StateColor(folders::Popup const& p, ai_sessions::Row const& r) {
-    auto const& u = usage::Palette(Dark(p));
-    switch (r.state) {
-        case ai_sessions::State::kInput:
-            return u.warn;
-        case ai_sessions::State::kStale:
-            return u.muted;
-        default:
-            return ArgbColor(p.colors->accent);
+// The state as Bloom's badge (the plan's on a home card), in the accent's soft
+// fill while it runs, amber for a question, plain while the log is quiet.
+FrameworkElement Chip(ai_sessions::Row const& r) {
+    uint32_t fill = C().accentSoft, text = C().accentText;
+    if (r.state == ai_sessions::State::kInput) {
+        fill = 0x1F000000u | (C().warn & 0xFFFFFF);
+        text = C().warn;
+    } else if (r.state == ai_sessions::State::kStale) {
+        fill = C().tile;
+        text = C().dim;
     }
-}
-
-// The state in a soft pill of its color.
-FrameworkElement Chip(folders::Popup const& p, ai_sessions::Row const& r) {
-    Color color = StateColor(p, r);
-    Color fill = color;
-    fill.A = 0x2E;
     Controls::Border chip;
-    chip.CornerRadius(CornerRadiusHelper::FromUniformRadius(9));
-    chip.Background(Media::SolidColorBrush(fill));
-    chip.Padding({7, 1, 7, 2});
+    chip.Height(16);
+    chip.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+    chip.Background(Brush(fill));
+    chip.Padding({5, 0, 5, 0});
     chip.Margin({0, 0, 6, 0});
     chip.VerticalAlignment(VerticalAlignment::Center);
-    chip.Child(Text(StateWords(r), kSmallSize, color, true));
+    chip.Child(Text(StateWords(r), kSmallSize, text, Medium()));
     return chip;
 }
 
-// A line: `left` taking the room, `right` at its end.
-Controls::Grid Line(FrameworkElement const& left, FrameworkElement const& right) {
-    Controls::Grid line;
-    Controls::ColumnDefinition rest, end;
-    end.Width(GridLengthHelper::Auto());
-    line.ColumnDefinitions().Append(rest);
-    line.ColumnDefinitions().Append(end);
-    line.Children().Append(left);
-    if (right) {
-        right.Margin({8, 0, 0, 0});
-        Controls::Grid::SetColumn(right, 1);
-        line.Children().Append(right);
-    }
-    return line;
-}
-
-Controls::StackPanel Across(std::initializer_list<FrameworkElement> items) {
-    Controls::StackPanel row;
-    row.Orientation(Controls::Orientation::Horizontal);
-    for (auto const& item : items) {
-        if (item) row.Children().Append(item);
-    }
-    return row;
-}
-
-std::wstring Joined(std::initializer_list<std::wstring> parts) {
-    std::wstring out;
-    for (auto const& part : parts) {
-        if (part.empty()) continue;
-        if (!out.empty()) out += L" · ";
-        out += part;
-    }
-    return out;
-}
-
-FrameworkElement SessionRow(folders::Popup const& p, ai_sessions::Row const& r, int64_t now) {
-    bool dark = Dark(p);
-    auto const& u = usage::Palette(dark);
+FrameworkElement SessionRow(ai_sessions::Row const& r, int64_t now) {
     std::wstring title = !r.title.empty() ? r.title : !r.project.empty() ? r.project : L"프로젝트 미확인";
     if (!r.Live()) {
-        // ● title  client … [state ·] 마지막 턴 7.5k  30분 전
+        // ● title  client … [state ·] 마지막 턴 7.5k · 30분 전
         Controls::Border dot;
         dot.Width(6);
         dot.Height(6);
         dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
-        dot.Background(Media::SolidColorBrush(u.faint));
+        dot.Background(Brush(C().faint));
         dot.Margin({1, 0, 8, 0});
         dot.VerticalAlignment(VerticalAlignment::Center);
-        auto name = Text(title, kTextSize, u.text);
-        auto client = Text(Client(r), kSmallSize, u.faint);
+        auto name = Text(title, kTextSize, C().text);
+        auto client = Text(Client(r), kSmallSize, C().faint);
         client.Margin({6, 0, 0, 0});
         std::wstring state = r.state == ai_sessions::State::kComplete ||
                                      r.state == ai_sessions::State::kIdle
                                  ? L""
                                  : StateWords(r);
         std::wstring last = r.lastTurnOutput > 0 ? L"마지막 턴 " + Compact(r.lastTurnOutput) : L"";
-        auto right = Text(Joined({state, last, Ago(now - r.liveAt)}), kSmallSize, u.faint);
+        auto right = Text(Joined({state, last, Ago(now - r.liveAt)}), kSmallSize, C().faint);
         auto line = Line(Across({dot, name, client}), right);
-        line.Margin({0, 6, 0, 6});
+        line.Margin({0, 7, 0, 7});
         return line;
     }
     Controls::StackPanel rows;
-    rows.Margin({0, 8, 0, 8});
-    rows.Spacing(2);
-    // [chip] title … 4,020 tok
+    rows.Margin({0, 9, 0, 9});
+    rows.Spacing(3);
+    // [state] title … 4,020 tok
     FrameworkElement tokens{nullptr};
     if (r.turnOutput) {
         Controls::TextBlock t;
-        t.FontFamily(Media::FontFamily{theme::kUsageFont});
+        t.FontFamily(Media::FontFamily{kFont});
         Documents::Typography::SetNumeralAlignment(t, FontNumeralAlignment::Tabular);
-        t.Inlines().Append(Span(Tokens(*r.turnOutput), kNameSize, u.text, true));
-        t.Inlines().Append(Span(L" tok", kSmallSize, u.muted));
+        t.Inlines().Append(Span(Tokens(*r.turnOutput), kTextSize, C().text, true));
+        t.Inlines().Append(Span(L" tok", kSmallSize, C().dim));
         t.VerticalAlignment(VerticalAlignment::Center);
         tokens = t;
     }
-    rows.Children().Append(Line(Across({Chip(p, r), Text(title, kNameSize, u.text, true)}), tokens));
+    rows.Children().Append(Line(Across({Chip(r), Text(title, kNameSize, C().text, Semi())}), tokens));
     // project · Claude Code · model · effort … 턴 0:41 / 입력 대기 3:12 / 활동 3분 전
     std::wstring timer;
     if (r.state == ai_sessions::State::kInput) {
@@ -18222,28 +18391,27 @@ FrameworkElement SessionRow(folders::Popup const& p, ai_sessions::Row const& r, 
     }
     std::wstring client = Joined({r.title.empty() ? L"" : r.project, Client(r),
                                   r.model.empty() ? L"모델 기록 대기" : r.model, r.effort});
-    rows.Children().Append(Line(Text(client, kSmallSize, u.muted),
+    rows.Children().Append(Line(Text(client, kSmallSize, C().dim),
                                 timer.empty() ? FrameworkElement{nullptr}
-                                              : FrameworkElement{Text(timer, kSmallSize, u.muted)}));
-    // +1,120 tok · 1분 전 … 컨텍스트 61% 사용 [bar] / 컨텍스트 182k
+                                              : FrameworkElement{Text(timer, kSmallSize, C().faint)}));
+    // +1,120 tok · 1분 전 … [bar] 컨텍스트 61% / 컨텍스트 182k
     bool output = r.lastOutputDelta > 0 && r.lastOutputAt;
     if (output || r.contextUsed >= 0) {
         FrameworkElement context{nullptr};
         if (r.contextUsed >= 0 && r.contextWindow > 0) {
             int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
-            double fraction = std::min(1.0, (double)r.contextUsed / r.contextWindow);
-            auto bar = Bar(fraction, u.track, percent >= 85 ? u.warn : u.faint);
-            bar.Width(40);
+            bool full = percent >= 85;
+            auto bar = Bar((double)r.contextUsed / r.contextWindow, full ? C().warn : C().accent, 40);
             bar.Margin({0, 0, 6, 0});
             bar.VerticalAlignment(VerticalAlignment::Center);
-            context = Across({bar, Text(L"컨텍스트 " + std::to_wstring(percent) + L"% 사용",
-                                        kSmallSize, percent >= 85 ? u.warn : u.faint)});
+            context = Across({bar, Text(L"컨텍스트 " + std::to_wstring(percent) + L"%", kSmallSize,
+                                        full ? C().warn : C().faint)});
         } else if (r.contextUsed >= 0) {
-            context = Text(L"컨텍스트 " + Compact(r.contextUsed), kSmallSize, u.faint);
+            context = Text(L"컨텍스트 " + Compact(r.contextUsed), kSmallSize, C().faint);
         }
         std::wstring recent =
             output ? L"+" + Tokens(r.lastOutputDelta) + L" tok · " + Ago(now - r.lastOutputAt) : L"";
-        rows.Children().Append(Line(Text(recent, kSmallSize, u.faint), context));
+        rows.Children().Append(Line(Text(recent, kSmallSize, C().faint), context));
     }
     return rows;
 }
@@ -18262,39 +18430,39 @@ std::wstring Summary(std::vector<ai_sessions::Row> const& rows) {
                    running ? L"진행 " + std::to_wstring(running) : L""});
 }
 
-// "세션 … 입력 필요 1 · 진행 2", then the list in a card of a fixed height.
-FrameworkElement BuildSessions(folders::Popup& p) {
-    auto const& u = usage::Palette(Dark(p));
+// "세션 … 입력 필요 1 · 진행 2", then the list on a card of a fixed height.
+FrameworkElement BuildSessions() {
     Controls::StackPanel panel;
-    auto summary = Text(L"", kSmallSize, u.muted);
-    auto head = Line(Text(L"세션", kNameSize, u.text, true), summary);
-    head.Margin({2, 14, 0, 0});
+    auto summary = Text(L"", kSmallSize, C().dim);
+    auto head = Line(Text(L"세션", kNameSize, C().text, Semi()), summary);
+    head.Margin({2, 14, 2, 0});
     panel.Children().Append(head);
     Controls::StackPanel list;
-    list.Margin({kCardPadding, 2, kCardPadding, 2});
+    list.Margin({kCardPadX, 2, kCardPadX, 2});
     Controls::ScrollViewer scroll;
     scroll.Height(kSessionsHeight);
     scroll.VerticalScrollBarVisibility(Controls::ScrollBarVisibility::Auto);
     scroll.HorizontalScrollBarVisibility(Controls::ScrollBarVisibility::Disabled);
     scroll.Content(list);
-    auto card = Card(p, scroll, p.colors->field, kCardRadius, {0, 0, 0, 0});
+    auto card = Surface(scroll, C().card, kCardRadius, {0, 0, 0, 0});
     card.Margin({0, kGap, 0, 0});
     panel.Children().Append(card);
-    g_sessionsSummary = winrt::make_weak(summary);
-    g_sessionsList = winrt::make_weak(list);
+    g_open->sessionsSummary = winrt::make_weak(summary);
+    g_open->sessionsList = winrt::make_weak(list);
     return panel;
 }
 
 // The rows again, with the current time: only the list's content changes, so
 // it keeps where it was scrolled to.
 void RenderSessions() {
-    auto list = g_sessionsList.get();
-    auto summary = g_sessionsSummary.get();
-    if (!Ours() || !list || !summary) {
+    if (!Ours()) {
         return;
     }
-    folders::Popup& p = *folders::g_popup;
-    auto const& u = usage::Palette(Dark(p));
+    auto list = g_open->sessionsList.get();
+    auto summary = g_open->sessionsSummary.get();
+    if (!list || !summary) {
+        return;
+    }
     auto snapshot = ai_sessions::g_snapshot;
     int64_t now = usage::Now();
     std::vector<ai_sessions::Row> rows;
@@ -18307,7 +18475,7 @@ void RenderSessions() {
     if (rows.empty()) {
         auto none = Text(snapshot ? L"최근 하루 동안의 Claude Code·Codex 세션이 없습니다"
                                   : L"세션 기록을 읽는 중…",
-                         kTextSize, u.muted);
+                         kSmallSize, C().dim);
         none.TextWrapping(TextWrapping::Wrap);
         none.Margin({0, 10, 0, 10});
         list.Children().Append(none);
@@ -18317,19 +18485,21 @@ void RenderSessions() {
         if (i) {
             Controls::Border separator;
             separator.Height(1);
-            separator.Background(folders::Brush(p.colors->border));
+            separator.Background(Brush(C().line));
             list.Children().Append(separator);
         }
-        list.Children().Append(SessionRow(p, rows[i], now));
+        list.Children().Append(SessionRow(rows[i], now));
     }
 }
 
 void StopSessions() {
-    ai_sessions::g_wanted = false;
     ai_sessions::g_onRows = nullptr;
-    if (g_tick) {
-        g_tick.Stop();
-        g_tick = nullptr;
+    if (g_open && g_open->tick) {
+        g_open->tick.Stop();
+        g_open->tick = nullptr;
+    }
+    if (ai_sessions::g_wanted.exchange(false)) {
+        ai_sessions::Forget();
     }
 }
 
@@ -18342,29 +18512,31 @@ void StartSessions() {
     ai_sessions::g_findNow = true;
     ai_sessions::g_onRows = RenderSessions;
     ai_sessions::Request();
-    g_ticks = 0;
-    g_tick = DispatcherTimer();
-    g_tick.Interval(std::chrono::seconds(1));
-    g_tick.Tick([](auto&&, auto&&) {
+    DispatcherTimer tick;
+    tick.Interval(std::chrono::seconds(1));
+    tick.Tick([](auto&&, auto&&) {
         core::Guard(L"Usage sessions", [] {
             if (!Ours() || !folders::g_popup->flyout || !folders::g_popup->flyout.IsOpen()) {
                 return StopSessions();
             }
             RenderSessions();
-            if (++g_ticks % kLookEveryTicks == 0) {
+            if (++g_open->ticks % kLookEveryTicks == 0) {
                 ai_sessions::Request();
             }
         });
     });
-    g_tick.Start();
+    g_open->tick = tick;
+    tick.Start();
 }
 
+// ---- the popup -------------------------------------------------------------------------
+
 // The popup's content, made again whenever the numbers or their way change.
-void Fill(folders::Popup& p, Controls::StackPanel const& body) {
+void Fill(Controls::StackPanel const& body) {
     body.Children().Clear();
+    g_open->sessionsSummary = nullptr;
+    g_open->sessionsList = nullptr;
     auto model = usage::g_model;
-    bool dark = Dark(p);
-    auto const& u = usage::Palette(dark);
     int64_t now = usage::Now();
 
     Controls::Grid head;
@@ -18373,38 +18545,87 @@ void Fill(folders::Popup& p, Controls::StackPanel const& body) {
     head.ColumnDefinitions().Append(title);
     head.ColumnDefinitions().Append(toggle);
     head.Margin({2, 0, 0, 2});
-    head.Children().Append(Text(L"AI 사용량", kTitleSize, u.text, true));
+    head.Children().Append(Text(L"AI 사용량", kTitleSize, C().text, Semi()));
     if (model && !model->accounts.empty()) {
-        auto segments = Switch(p, usage::ShowsLeft(*model));
+        auto segments = Switch(usage::ShowsLeft(*model));
         Controls::Grid::SetColumn(segments, 1);
         head.Children().Append(segments);
     }
     body.Children().Append(head);
 
     if (!model || model->accounts.empty()) {
-        auto none = Text(L"Bloom이 내보낸 사용량이 없습니다", kTextSize, u.muted);
-        none.Margin({2, 4, 0, 4});
+        auto none = Text(L"Bloom이 내보낸 사용량이 없습니다", kSmallSize, C().dim);
+        none.Margin({2, 6, 0, 2});
         body.Children().Append(none);
     }
-    double scale = g_rasterization * folders::UiScale(p.look);
     auto labels = model ? usage::Labels(*model) : std::vector<usage::Label>{};
     for (size_t i = 0; model && i < model->accounts.size(); i++) {
-        auto card = AccountCard(p, *model, model->accounts[i], labels[i], now, scale);
+        auto card = AccountCard(*model, model->accounts[i], labels[i], now);
         card.Margin({0, kGap, 0, 0});
         body.Children().Append(card);
     }
     if (SessionsOn()) {
-        body.Children().Append(BuildSessions(p));
+        body.Children().Append(BuildSessions());
         RenderSessions();
     }
+}
+
+// Bloom's popup surface (PopupMenu): its popup fill with a hairline edge in the
+// smooth-cornered shape, lifted by a soft shadow, holding `content`. In the
+// room the folder popup keeps around its bubble, so it sits where theirs do.
+FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
+    Controls::Grid shell;
+    shell.RequestedTheme(g_open->dark ? ElementTheme::Dark : ElementTheme::Light);  // the scroll bar
+    Controls::Border shadowHost;
+    Shapes::Path body;
+    body.Fill(Brush(C().popup));
+    body.Stroke(Brush(C().popupLine));
+    body.StrokeThickness(1);
+    p.body = body;
+    content.Margin({kPadding, kPadding, kPadding, kPadding});
+    shell.Children().Append(shadowHost);
+    shell.Children().Append(body);
+    shell.Children().Append(content);
+    auto compositor = Hosting::ElementCompositionPreview::GetElementVisual(shadowHost).Compositor();
+    auto sprite = compositor.CreateSpriteVisual();
+    auto shadow = compositor.CreateDropShadow();
+    shadow.Mask(body.GetAlphaMask());
+    shadow.BlurRadius(kShadowBlur);
+    shadow.Offset({0, (float)kShadowDepth, 0});
+    shadow.Opacity((float)kShadowOpacity);
+    sprite.Shadow(shadow);
+    Hosting::ElementCompositionPreview::SetElementChildVisual(shadowHost, sprite);
+    folders::Keep(p, shell.SizeChanged(winrt::auto_revoke, [body, sprite](
+                                                               auto&&, SizeChangedEventArgs const& e) {
+        auto size = e.NewSize();
+        body.Data(folders::SmoothRect(0.5, 0.5, size.Width - 1, size.Height - 1, kPopupRadius,
+                                      kSmoothing));
+        sprite.Size({size.Width, size.Height});
+    }));
+    Controls::Grid room;
+    room.Padding({folders::kShadowRoom, folders::kShadowRoom, folders::kShadowRoom,
+                  folders::kShadowRoom});
+    room.Children().Append(shell);
+    p.content = shell;
+    return room;
+}
+
+// Everything one opening made goes: the popup's XAML, the session rows, what
+// was read for them.
+void LetGo() {
+    StopSessions();
+    if (Ours()) {
+        folders::ClosePopup();
+    }
+    g_open.reset();
 }
 
 void Refresh() {
     if (!Ours()) {
         return;
     }
-    if (auto body = g_body.get()) {
-        Fill(*folders::g_popup, body);
+    if (auto body = g_open->body.get()) {
+        Fill(body);
     }
 }
 
@@ -18417,6 +18638,7 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
     if (Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen()) {
         return folders::HideSelf(*folders::g_popup);
     }
+    LetGo();
     folders::NoteTaskbarThread();
     if (!core::g_popupDropsTimer) {
         core::g_popupDropsTimer = folders::PopupDropsTimer;
@@ -18425,36 +18647,44 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
     POINT pt;
     GetCursorPos(&pt);
     folders::g_folderTaskbar = taskbar;
-    auto root = anchor.XamlRoot();
-    g_rasterization = root ? root.RasterizationScale() : 1.0;
     folders::Popup& p = folders::NewPopup(kKey, anchor);
+    Open& open = g_open.emplace();
+    open.dark = p.colors != &folders::kLightPalette;
+    open.colors = MakeColors(open.dark);
+    auto root = anchor.XamlRoot();
+    open.rasterization = (root ? root.RasterizationScale() : 1.0) * folders::UiScale(p.look);
     Controls::StackPanel body;
     body.Width(kWidth);
-    g_body = winrt::make_weak(body);
+    open.body = winrt::make_weak(body);
     try {
-        Fill(p, body);
-        folders::PresentBubble(p, body, kPadding, anchor, folders::TaskbarOnTop(pt));
-        folders::Keep(p, p.flyout.Closed(winrt::auto_revoke, [](auto&&, auto&&) {
-            core::Guard(L"Usage details closed", StopSessions);
+        Fill(body);
+        Controls::Flyout flyout;
+        flyout.FlyoutPresenterStyle(folders::BarePresenter());
+        flyout.Content(folders::Scaled(p, Bubble(p, body)));
+        p.flyout = flyout;
+        folders::Present(p, anchor, folders::TaskbarOnTop(pt));
+        // Once closed it is let go of, after the folder popup's own handlers.
+        folders::Keep(p, flyout.Closed(winrt::auto_revoke, [](auto&&, auto&&) {
+            core::Guard(L"Usage details closed", [] {
+                StopSessions();
+                core::Post([] {
+                    if (Ours() && !(folders::g_popup->flyout && folders::g_popup->flyout.IsOpen())) {
+                        LetGo();
+                    }
+                });
+            });
         }));
         StartSessions();
     } catch (...) {
         Wh_Log(L"Usage details failed: %08X", winrt::to_hresult());
-        StopSessions();
-        folders::ClosePopup();
+        LetGo();
     }
 }
 
 // The meter goes (an unload, new settings): its popup and everything it set up
 // with it, which the folders otherwise undo on their own unload.
 void Close() {
-    StopSessions();
-    if (Ours()) {
-        folders::ClosePopup();
-    }
-    g_body = nullptr;
-    g_sessionsSummary = nullptr;
-    g_sessionsList = nullptr;
+    LetGo();
     folders::DropGiveBack();
     if (g_ownsTimerHook) {
         core::g_popupDropsTimer = nullptr;
