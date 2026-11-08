@@ -15,6 +15,8 @@
       A JSON object whose values replace the YAML defaults of the keys it names.
   --with-files (with --schema)
       Also the ==BloomFileSettings== items (below), for a Bloom that reads their kinds.
+  --names <names-en.tsv> (with --schema, --check)
+      Another add-on's English text instead of this folder's names-en.tsv.
 
 The block is the small YAML subset the mod uses: groups "- group:", leaves
 "  - key: value" with $name/$description/$options under them. A leaf's kind comes
@@ -380,6 +382,7 @@ def main():
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--values")
     ap.add_argument("--with-files", action="store_true")
+    ap.add_argument("--names", default=NAMES_EN)
     ap.add_argument("source")
     args = ap.parse_args()
     with open(args.source, encoding="utf-8") as f:
@@ -404,7 +407,7 @@ def main():
         if problems:
             raise SystemExit("\n".join(problems))
         kept = files if args.with_files else ()
-        schema = build_schema(items, groups, found, read_names(NAMES_EN), kept)
+        schema = build_schema(items, groups, found, read_names(args.names), kept)
         write_schema(schema, args.schema)
         print(f"{len(groups)} groups, {len(items)} settings, {len(kept)} in files -> {args.schema}")
     if args.check:
@@ -414,7 +417,7 @@ def main():
             span = f" {found[item['key']]}" if item["key"] in found else ""
             print(f"  {item['key']} {item['kind']} = {item['default']!r}{span}{extra}")
         problems = check(items, found)
-        schema = json.loads(json.dumps(build_schema(items, groups, found, read_names(NAMES_EN), files)))
+        schema = json.loads(json.dumps(build_schema(items, groups, found, read_names(args.names), files)))
         problems += check_schema(schema, items, found)
         leaves = [e for g in schema["groups"] for e in g["items"]]
         counts = {t: sum(e["type"] == t for e in leaves) for t in ("bool", "int", "choice", "text")}
