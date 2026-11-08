@@ -53,10 +53,11 @@ public:
     // Stamps version, pid and time, drops crashes older than the window, writes.
     bool Save();
     void SetPhase(const std::wstring& phase, const std::wstring& reason = {});
-    bool ReadRuntime(RuntimeState& out) const;
+    // panel: the ShellHost runtime's file.
+    bool ReadRuntime(RuntimeState& out, bool panel = false) const;
 
 private:
-    std::wstring path_, runtimePath_;
+    std::wstring path_, runtimePath_, panelRuntimePath_;
     bool readOnly_ = false;
     HostState state_;
 };

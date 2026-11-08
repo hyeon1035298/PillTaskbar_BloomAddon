@@ -83,6 +83,7 @@ bool ParseRuntimeState(const std::string& utf8, RuntimeState& out) {
 void StateFile::Init(const std::wstring& dataDir, bool readOnly) {
     path_ = JoinPath(dataDir, addon::kHostStateFile);
     runtimePath_ = JoinPath(dataDir, addon::kRuntimeStateFile);
+    panelRuntimePath_ = JoinPath(dataDir, addon::kPanelRuntimeStateFile);
     readOnly_ = readOnly;
 }
 
@@ -110,9 +111,9 @@ void StateFile::SetPhase(const std::wstring& phase, const std::wstring& reason) 
     Save();
 }
 
-bool StateFile::ReadRuntime(RuntimeState& out) const {
+bool StateFile::ReadRuntime(RuntimeState& out, bool panel) const {
     std::string bytes;
-    return ReadFileBytes(runtimePath_, bytes) && ParseRuntimeState(bytes, out);
+    return ReadFileBytes(panel ? panelRuntimePath_ : runtimePath_, bytes) && ParseRuntimeState(bytes, out);
 }
 
 bool IsCrashExitCode(DWORD code) {

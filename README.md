@@ -30,4 +30,4 @@ PillTaskbar is free software under the GNU General Public License, version 3 onl
 
 Parts of the mod come from other Windhawk mods, and the add-on bundles MinHook (BSD-2-Clause) and Zydis (MIT). Their credits and licenses are in `THIRD_PARTY.md` and `THIRD_PARTY_NOTICES.txt`.
 
-This program comes with no warranty. It patches code inside explorer.exe, so use it at your own risk. Windows and Windhawk are trademarks of their owners. This project is not affiliated with Microsoft or with the Windhawk authors.
+This program comes with no warranty. It patches code inside explorer.exe (and, to place Quick Settings next to the tray, inside ShellHost.exe), so use it at your own risk. Windows and Windhawk are trademarks of their owners. This project is not affiliated with Microsoft or with the Windhawk authors.

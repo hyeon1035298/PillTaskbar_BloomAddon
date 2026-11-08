@@ -27,6 +27,10 @@ constexpr wchar_t kHostStateFile[] = L"host-state.json";
 constexpr wchar_t kRuntimeStateFile[] = L"runtime-state.json";
 constexpr wchar_t kHostLog[] = L"host.log";
 constexpr wchar_t kRuntimeLog[] = L"runtime.log";
+// The same two for the runtime in ShellHost.exe (kConfigPanel). Bloom reads only the
+// explorer ones.
+constexpr wchar_t kPanelRuntimeStateFile[] = L"runtime-panel-state.json";
+constexpr wchar_t kPanelRuntimeLog[] = L"runtime-panel.log";
 constexpr wchar_t kOffsetsDir[] = L"offsets";
 constexpr wchar_t kSymbolsDir[] = L"symbols";
 
@@ -35,8 +39,9 @@ constexpr wchar_t kRuntimeDll[] = ADDON_NAME L"Runtime.dll";
 constexpr wchar_t kModDll[] = ADDON_NAME L".dll";
 constexpr wchar_t kSymbolList[] = L"symbols.txt";
 
-// Named objects. %u is the explorer process id. The explorer-side names never carry
-// a version, so a newer host can still ask an older runtime to unload.
+// Named objects. %u is the process id of the explorer (or the ShellHost) the runtime
+// goes into. The process-side names never carry a version, so a newer host can still
+// ask an older runtime to unload.
 constexpr wchar_t kHostMutex[] = L"Local\\Bloom.Addon." ADDON_ID L".Host";
 constexpr wchar_t kHostStopEvent[] = L"Local\\Bloom.Addon." ADDON_ID L".Stop";
 constexpr wchar_t kHostWindowClass[] = L"Bloom.Addon." ADDON_ID L".Host";
@@ -90,7 +95,8 @@ constexpr DWORD kUnloadWaitMs = 10000;
 // runtime copies it at start and does not look at it again. The fields up to dataDir
 // never move, so a runtime that does not match size or protocol can still report its
 // refusal ("protocol") in the data folder.
-constexpr DWORD kConfigLog = 1;  // Wh_Log on from the start
+constexpr DWORD kConfigLog = 1;    // Wh_Log on from the start
+constexpr DWORD kConfigPanel = 2;  // in ShellHost.exe, not explorer: the kPanel* files
 struct Config {
     DWORD size;      // sizeof(Config)
     DWORD protocol;  // kProtocol

@@ -38,6 +38,8 @@ tray.clock=hidden	Hidden
 tray.clockFormat	Time format
 tray.clockFormat=h24	24-hour (18:24)
 tray.clockFormat=h12	12-hour (6:24 PM)
+tray.panelsNearTray	Open Windows panels at the tray
+tray.panelsNearTray#about	Quick Settings (Win+A) and the notification center and calendar (Win+N, the clock) open at the pill's tray instead of the right end of the screen. When off, they open where Windows puts them
 group:size	Size
 group:size#about	Don't use together with the Windows "small taskbar buttons" setting
 size.enabled	Change size

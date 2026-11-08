@@ -12,6 +12,7 @@
 #include "commands.h"
 #include "eventlog.h"
 #include "inject.h"
+#include "panel.h"
 #include "state.h"
 #include "symbols.h"
 #include "taskbar.h"
@@ -33,6 +34,8 @@ constexpr DWORD kTaskbarReadyPollMs = 250;
 constexpr DWORD kWindhawkPollMs = 5000;
 // Returned by steps that leave the main loop running.
 constexpr int kContinue = -100;
+// How long the runtime in ShellHost gets to bring the mod up.
+constexpr DWORD kPanelStartMs = 15000;
 
 const wchar_t* ReasonFor(int code) {
     switch (code) {
@@ -123,6 +126,9 @@ private:
     int OnExplorerExit();
     int RecheckPendingCrash();
     bool FaultInAddon(const AppCrash& c) const;
+    void StartPanel();
+    void OnPanelExit();
+    void StopPanel();
     bool TaskbarReady(const Taskbar& t);
     bool TakeOverBloom(DWORD pid, const std::wstring& exe);
     addon::Config MakeConfig() const;
@@ -152,6 +158,12 @@ private:
         DWORD pid = 0;
         uint64_t created = 0, injectedAt = 0;
     } pendingCrash_;                  // an exit whose crash event may still be on its way
+
+    // ShellHost, for Quick Settings (panel.h). Its taskbar field holds ShellHost's window.
+    Explorer panel_;
+    bool havePanel_ = false;          // panel_ holds a runtime and is watched
+    bool panelOff_ = false;           // given up on for this host run
+    ULONGLONG panelTriedAt_ = 0;
 };
 
 Host* g_host = nullptr;
@@ -304,6 +316,7 @@ addon::Config Host::MakeConfig() const {
 }
 
 int Host::Finish(int code, const std::wstring& reason) {
+    StopPanel();
     HostState& s = state_.state();
     if (code == addon::kExitCrashes) s.safeMode = true;
     std::wstring why = reason.empty() && code != addon::kExitOk ? std::wstring(ReasonFor(code)) : reason;
@@ -577,6 +590,122 @@ bool Host::FaultInAddon(const AppCrash& c) const {
     return in;
 }
 
+// Puts the runtime into ShellHost once explorer's runs. Quick Settings is all it
+// places, so whatever goes wrong here only turns this off for the host run (logged);
+// explorer's runtime and the exit code stay as they are.
+void Host::StartPanel() {
+    Taskbar t;
+    if (!FindShellHost(t)) return;  // not running now: looked for again later
+    Explorer p;
+    if (!OpenExplorer(t, p)) return;
+    if (RuntimeLoadedIn(t.pid)) {
+        // Left by an earlier host: taken over when it is this version and up, else
+        // unloaded first.
+        RuntimeState rs;
+        bool live = state_.ReadRuntime(rs, true) && rs.pid == t.pid && rs.version == addon::kVersion &&
+                    (rs.state == L"running" || rs.state == L"reloading" || rs.state == L"off");
+        if (!OpenEvents(p, false)) {
+            Log(L"ShellHost %lu has a runtime whose events cannot be opened", t.pid);
+            panelOff_ = true;
+            return;
+        }
+        if (live) {
+            p.runtimeIn = true;
+            panel_ = std::move(p);
+            havePanel_ = true;
+            Log(L"runtime already in ShellHost %lu; taking it over", t.pid);
+            return;
+        }
+        if (!UnloadRuntime(p, addon::kUnloadWaitMs, Waiter())) {
+            Log(L"the old runtime in ShellHost %lu did not unload", t.pid);
+            panelOff_ = true;
+            return;
+        }
+    }
+    Log(L"injecting into ShellHost %lu, thread %lu", t.pid, t.tid);
+    addon::Config c = MakeConfig();
+    c.flags |= addon::kConfigPanel;
+    if (!CreateConfig(p, c) || !OpenEvents(p, true)) {
+        Log(L"could not create the ShellHost objects (%lu)", GetLastError());
+        panelOff_ = true;
+        return;
+    }
+    p.injectedAt = NowTicks();
+    DWORD err = 0;
+    HookResult hr = HookUntilLoaded(p, RuntimePath(), Waiter(), err);
+    if (hr == HookResult::ExplorerGone) return;  // ShellHost exited: tried again once it is back
+    if (hr == HookResult::Stopped) {
+        if (p.runtimeIn) {  // Finish takes it out
+            panel_ = std::move(p);
+            havePanel_ = true;
+        }
+        return;
+    }
+    if (hr != HookResult::Loaded) {
+        if (hr == HookResult::HookFailed)
+            Log(L"could not hook ShellHost (%lu)", err);
+        else
+            Log(L"the runtime did not report Loaded in ShellHost within 10 s");
+        panelOff_ = true;
+        return;
+    }
+    ULONGLONG start = GetTickCount64();
+    while (true) {
+        RuntimeState rs;
+        if (state_.ReadRuntime(rs, true) && rs.pid == t.pid && rs.at + 2 * kTicksPerSecond >= p.injectedAt &&
+            rs.state != L"starting") {
+            if (rs.state == L"running" || rs.state == L"off" || rs.state == L"reloading") {
+                p.mapping.Reset();
+                panel_ = std::move(p);
+                havePanel_ = true;
+                Log(L"runtime in ShellHost %lu: %ls", t.pid, rs.state.c_str());
+                return;
+            }
+            Log(L"runtime in ShellHost %lu: %ls %ls; taking it out", t.pid, rs.state.c_str(), rs.reason.c_str());
+            break;
+        }
+        if (GetTickCount64() - start >= kPanelStartMs) {
+            Log(L"the runtime in ShellHost did not start within %lu s", kPanelStartMs / 1000);
+            break;
+        }
+        int r = Wait({p.process.get()}, 250, true);
+        if (r == 0) return;  // ShellHost exited
+        if (r == kWaitStop) {
+            panel_ = std::move(p);  // Finish takes it out
+            havePanel_ = true;
+            return;
+        }
+    }
+    UnloadRuntime(p, addon::kUnloadWaitMs, Waiter());
+    panelOff_ = true;
+}
+
+void Host::OnPanelExit() {
+    DWORD code = 0;
+    GetExitCodeProcess(panel_.process.get(), &code);
+    bool crash = IsCrashExitCode(code);
+    Log(L"ShellHost %lu exited with 0x%08lX%ls", panel_.taskbar.pid, code, crash ? L" (crash)" : L"");
+    panel_ = Explorer{};
+    havePanel_ = false;
+    // Never a crash loop for the sake of a panel's place.
+    if (crash) {
+        Log(L"not putting the runtime into ShellHost again in this host run");
+        panelOff_ = true;
+    }
+}
+
+void Host::StopPanel() {
+    if (!havePanel_) return;
+    havePanel_ = false;
+    if (panel_.runtimeIn) {
+        if (UnloadRuntime(panel_, addon::kUnloadWaitMs, Waiter()))
+            Log(L"runtime unloaded from ShellHost");
+        else
+            Log(L"the runtime in ShellHost did not unload within %lu ms", addon::kUnloadWaitMs);
+    }
+    panel_ = Explorer{};
+}
+
 // Holds off injecting until a new explorer has built its taskbar (ExplorerReady). It
 // never blocks: the main loop asks again every kTaskbarReadyPollMs.
 bool Host::TaskbarReady(const Taskbar& t) {
@@ -668,6 +797,7 @@ int Host::Run() {
                         // Leave nothing behind when giving up with a runtime inside.
                         if (haveExplorer_ && ex_.runtimeIn) UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
                         if (!ex_.runtimeIn) state_.state().loaded.reset();
+                        StopPanel();  // Finish does it too, but is skipped below
                         return state_.state().phase == L"failed" ? r : Finish(r);
                     }
                     // On to the wait: it watches the new explorer, or polls again in a
@@ -676,8 +806,14 @@ int Host::Run() {
             }
         }
 
+        if (!havePanel_ && !panelOff_ && haveExplorer_ && ex_.runtimeIn && !args_.mod.empty() &&
+            state_.state().phase == L"running" && GetTickCount64() - panelTriedAt_ >= kWindhawkPollMs) {
+            panelTriedAt_ = GetTickCount64();
+            StartPanel();
+        }
+
         std::vector<HANDLE> hs;
-        int bloomIdx = -1, explorerIdx = -1;
+        int bloomIdx = -1, explorerIdx = -1, panelIdx = -1;
         if (bloom_ && !graceStart_) {
             bloomIdx = (int)hs.size();
             hs.push_back(bloom_.get());
@@ -685,6 +821,10 @@ int Host::Run() {
         if (haveExplorer_) {
             explorerIdx = (int)hs.size();
             hs.push_back(ex_.process.get());
+        }
+        if (havePanel_) {
+            panelIdx = (int)hs.size();
+            hs.push_back(panel_.process.get());
         }
         DWORD timeout = haveExplorer_ ? (ex_.runtimeIn ? kWindhawkPollMs : INFINITE) : kTaskbarPollMs;
         if (graceStart_) timeout = std::min<DWORD>(timeout, (DWORD)(kBloomGraceMs - std::min<ULONGLONG>(now - graceStart_, kBloomGraceMs)));
@@ -700,6 +840,8 @@ int Host::Run() {
         } else if (r >= 0 && r == explorerIdx) {
             r = OnExplorerExit();
             if (r != kContinue) return r;
+        } else if (r >= 0 && r == panelIdx) {
+            OnPanelExit();
         }
         // Windhawk started after the load (or its service was set to start by itself)
         // with the same mod on: take the runtime out before both hook the same code.
@@ -766,6 +908,13 @@ int Host::DryRun() {
     Print(Format(L"Windhawk: %ls -> %ls", wh.detail.c_str(), wh.any() ? L"CONFLICT, a real start exits 12"
                                                                          : L"no conflict"));
     for (auto& m : AddonModules(mods)) Print(L"module " + m.name + L": " + m.path);
+    Taskbar shellHost;
+    Print(FindShellHost(shellHost)
+              ? Format(L"ShellHost: pid %lu, window %p, thread %lu, Loaded event %ls; a real start puts the "
+                       L"runtime in it too once explorer's runs",
+                       shellHost.pid, (void*)shellHost.tray, shellHost.tid,
+                       RuntimeLoadedIn(shellHost.pid) ? L"set" : L"not set")
+              : std::wstring(L"ShellHost: not running; a real start looks for it every 5 s"));
 
     ULONGLONG t0 = GetTickCount64();
     int r = Symbols(mods, true);

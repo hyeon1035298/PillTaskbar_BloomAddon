@@ -22,6 +22,11 @@ extern addon::Config g_config;  // copied from the host's mapping at start
 
 // <data folder>\<name>
 std::wstring DataPath(std::wstring_view name);
+// Serving ShellHost.exe rather than explorer (addon::kConfigPanel): its own state file
+// and log.
+inline bool InPanel() {
+    return (g_config.flags & addon::kConfigPanel) != 0;
+}
 
 std::string Utf8(std::wstring_view text);
 std::wstring Wide(std::string_view text);

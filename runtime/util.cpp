@@ -104,8 +104,9 @@ void WriteState(PCWSTR state, PCWSTR reason) {
     std::string json = "{\"v\":1,\"version\":" + JsonString(g_config.version) +
                        ",\"pid\":" + std::to_string(GetCurrentProcessId()) + ",\"state\":" + JsonString(state) +
                        ",\"reason\":" + JsonString(reason) + ",\"at\":\"" + IsoNow() + "\"}\n";
-    if (!ReplaceFile(DataPath(addon::kRuntimeStateFile), json)) {
-        log::Line(L"could not write %s", addon::kRuntimeStateFile);
+    PCWSTR file = InPanel() ? addon::kPanelRuntimeStateFile : addon::kRuntimeStateFile;
+    if (!ReplaceFile(DataPath(file), json)) {
+        log::Line(L"could not write %s", file);
     }
     log::Line(L"state %s%s%s", state, *reason ? L" " : L"", reason);
 }

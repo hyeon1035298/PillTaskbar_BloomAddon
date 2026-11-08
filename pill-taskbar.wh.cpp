@@ -5,6 +5,7 @@
 // @version         0.1
 // @author          Hyeon
 // @include         explorer.exe
+// @include         ShellHost.exe
 // @architecture    x86-64
 // @compilerOptions -lcomctl32 -ld2d1 -ld3d11 -ldwmapi -ldwrite -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshcore -lshlwapi -luuid -lversion -lwindowscodecs
 // ==/WindhawkMod==
@@ -22,6 +23,8 @@
 - **알약**: 작업 영역과 트레이를 가운데로 모아 유리 배경(블러, 옅은 틴트, 빛을 받는
   가장자리, 위 반사광과 아래 집광) 하나로 이어 붙입니다. 알약 양옆의 빈 곳은 클릭이 바탕 화면으로 통과합니다.
 - **트레이**: 볼륨, 네트워크 같은 시스템 아이콘과 알림 벨을 숨기고, 시계를 시간만 보이게 합니다.
+  빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)은 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 열립니다.
+  빠른 설정은 ShellHost.exe가 띄우므로 모드가 그 프로세스에도 올라갑니다(거기서는 패널 자리만 정합니다).
 - **크기**: 작업표시줄 높이, 아이콘 크기, 아이콘 간격을 바꿉니다. explorer를 다시 시작하지 않아도
   바로 반영됩니다.
 - **시작 버튼**: Windows 시작 버튼을 숨기거나, 그 자리에 Bloom 런처를 여는 꽃 버튼을 둡니다. 꽃 버튼을
@@ -116,6 +119,9 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $options:
     - h24: 24시간 (18:24)
     - h12: 12시간 (오후 6:24)
+  - panelsNearTray: true
+    $name: Windows 패널을 트레이 쪽에 열기
+    $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 끄면 Windows가 정한 자리에 열립니다
   $name: 트레이
   $description: 숨긴 아이콘은 자리도 남기지 않습니다. 레지스트리는 건드리지 않습니다
 - size:
@@ -422,6 +428,7 @@ struct Settings {
         Bell bell;
         Clock clock;
         bool clock12;  // else 24 hours
+        bool panelsNearTray;  // Quick Settings and the notification center
     } tray;
     struct {
         bool enabled;
@@ -522,6 +529,7 @@ void Load() {
     t.bell = (Bell)Choice(L"tray.bell", {L"shown", L"whenNew", L"hidden"});
     t.clock = (Clock)Choice(L"tray.clock", {L"timeDate", L"time", L"hidden"});
     t.clock12 = Choice(L"tray.clockFormat", {L"h24", L"h12"}) == 1;
+    t.panelsNearTray = Wh_GetIntSetting(L"tray.panelsNearTray");
 
     g.size.enabled = Wh_GetIntSetting(L"size.enabled");
     g.size.taskbarHeight = Clamped(L"size.taskbarHeight", 6, 600);
@@ -15943,6 +15951,301 @@ void WaitForWork() {
 
 }  // namespace folders
 
+// ============================================================================
+namespace panels {
+// ============================================================================
+// Quick Settings (Win+A) and the notification center with the calendar (Win+N, the
+// clock) open at the right end of the screen, where the stock tray is. Here they
+// open at the pill's tray: the panel's right edge on the tray's, inside the work
+// area. Explorer keeps each taskbar's tray span on the taskbar window. Each panel is
+// placed before it shows, by the process that places it: Quick Settings places its
+// own window in ShellHost.exe (SetWindowPos), and explorer places the notification
+// center's window and then uncloaks it (DwmSetWindowAttribute).
+
+// Screen x of the tray's left and right edges, packed into a window property (left
+// in the low half). ShellHost reads it too.
+constexpr WCHAR kTrayProp[] = L"PillTaskbar.TraySpan";
+
+ULONG_PTR Pack(LONG left, LONG right) {
+    return (ULONG_PTR)(UINT32)left | ((ULONG_PTR)(UINT32)right << 32);
+}
+
+// The taskbar window on a monitor. Works from any process.
+HWND TaskbarOn(HMONITOR monitor) {
+    for (PCWSTR cls : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
+        for (HWND hwnd = nullptr; (hwnd = FindWindowEx(nullptr, hwnd, cls, nullptr));) {
+            // As core::MonitorOf: a hidden top taskbar lies mostly on the monitor above.
+            auto on = (HMONITOR)GetProp(hwnd, L"TaskbarMonitor");
+            if ((on ? on : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) == monitor) {
+                return hwnd;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Where a panel of this size goes on the monitor it opens on: x for its right edge
+// at the tray's, kept inside the work area. x itself where no tray span is kept
+// (the feature is off in explorer, or the taskbar is vertical).
+int PlaceX(int x, int y, int width, int height) {
+    RECT rc{x, y, x + width, y + height};
+    HMONITOR monitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarOn(monitor);
+    auto span = taskbar ? (ULONG_PTR)GetProp(taskbar, kTrayProp) : 0;
+    LONG left = (LONG)(UINT32)span, right = (LONG)(UINT32)(span >> 32);
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    if (right <= left || !GetMonitorInfo(monitor, &mi) || left < mi.rcMonitor.left ||
+        right > mi.rcMonitor.right) {
+        return x;
+    }
+    LONG lo = mi.rcWork.left, hi = mi.rcWork.right - width;
+    return hi < lo ? x : std::clamp<LONG>(right - width, lo, hi);
+}
+
+// ---- explorer: the tray span (taskbar thread) ------------------------------------
+
+struct Bar {
+    HWND hwnd = nullptr;
+    winrt::weak_ref<FrameworkElement> frame;
+    FrameworkElement::LayoutUpdated_revoker layoutUpdated;
+    ULONG_PTR span = 0;  // set on the window, 0 if none
+};
+
+std::list<Bar> g_bars;  // taskbar thread only
+
+// On every layout pass, as the pill grows or moves; the window property is written
+// only when the span changed.
+void Publish(Bar& bar) {
+    auto frame = bar.frame.get();
+    auto root = frame ? frame.XamlRoot() : nullptr;
+    auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
+    RECT window;
+    if (!content || !GetWindowRect(bar.hwnd, &window)) {
+        return;
+    }
+    // A taskbar without a tray (a secondary monitor's) has its whole pill instead.
+    FrameworkElement piece =
+        core::ChildOfClass(core::Parent(frame), L"SystemTray.SystemTrayFrame");
+    if (!piece || piece.Visibility() != Visibility::Visible || piece.ActualWidth() <= 0) {
+        piece = frame;
+    }
+    if (piece.ActualWidth() <= 0) {
+        return;  // not laid out yet
+    }
+    // DIPs to window pixels by the window DPI, as region::Update.
+    UINT dpi = GetDpiForWindow(bar.hwnd);
+    double scale = dpi ? dpi / 96.0 : root.RasterizationScale();
+    auto r = piece.TransformToVisual(content).TransformBounds(
+        {0, 0, (float)piece.ActualWidth(), (float)piece.ActualHeight()});
+    LONG left = window.left + (LONG)std::lround(r.X * scale);
+    LONG right = window.left + (LONG)std::lround((r.X + r.Width) * scale);
+    ULONG_PTR span = right > left ? Pack(left, right) : 0;
+    if (span && span != bar.span && SetProp(bar.hwnd, kTrayProp, (HANDLE)span)) {
+        bar.span = span;
+    }
+}
+
+void Apply(HWND hwnd) {
+    if (core::g_vertical) {
+        return;
+    }
+    auto root = core::TaskbarRoot(hwnd);
+    auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
+    auto frame = content ? core::FindDescendant(
+                               content,
+                               [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); }, 8)
+                         : nullptr;
+    if (!frame) {
+        return;
+    }
+    std::erase_if(g_bars, [&](Bar& b) {
+        auto f = b.frame.get();
+        return !f || (b.hwnd == hwnd && f != frame);
+    });
+    for (auto& bar : g_bars) {
+        if (bar.hwnd == hwnd) {
+            Publish(bar);
+            return;
+        }
+    }
+    auto& bar = g_bars.emplace_back();
+    bar.hwnd = hwnd;
+    bar.frame = frame;
+    Bar* p = &bar;  // std::list keeps it in place
+    bar.layoutUpdated = frame.LayoutUpdated(
+        winrt::auto_revoke,
+        [p](auto&&, auto&&) { core::Guard(L"Tray span", [&] { Publish(*p); }); });
+    Publish(bar);
+}
+
+// ---- explorer: the notification center ---------------------------------------------
+
+using DwmSetWindowAttribute_t = decltype(&DwmSetWindowAttribute);
+DwmSetWindowAttribute_t DwmSetWindowAttribute_Original;
+
+// The notification center's window, where Windows had it and where it was put, so it
+// can go back when the mod stops. Explorer may leave it where it was between openings.
+std::mutex g_centerLock;
+HWND g_center;
+LONG g_centerDefaultX, g_centerX;
+
+bool HasName(PCWSTR path, PCWSTR name) {
+    PCWSTR slash = wcsrchr(path, L'\\');
+    return _wcsicmp(slash ? slash + 1 : path, name) == 0;
+}
+
+// The CoreWindow on the "ActionCenter" thread of ShellExperienceHost (or ShellHost).
+bool IsNotificationCenter(HWND hwnd) {
+    WCHAR cls[32];
+    DWORD pid = 0;
+    DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
+    if (!tid || !GetClassName(hwnd, cls, ARRAYSIZE(cls)) ||
+        wcscmp(cls, L"Windows.UI.Core.CoreWindow") != 0) {
+        return false;
+    }
+    bool center = false;
+    if (HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) {
+        PWSTR description = nullptr;
+        if (SUCCEEDED(GetThreadDescription(thread, &description)) && description) {
+            center = wcscmp(description, L"ActionCenter") == 0;
+            LocalFree(description);
+        }
+        CloseHandle(thread);
+    }
+    if (!center) {
+        return false;
+    }
+    center = false;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        WCHAR path[MAX_PATH];
+        DWORD size = ARRAYSIZE(path);
+        center = QueryFullProcessImageName(process, 0, path, &size) &&
+                 (HasName(path, L"ShellExperienceHost.exe") || HasName(path, L"ShellHost.exe"));
+        CloseHandle(process);
+    }
+    return center;
+}
+
+void PlaceNotificationCenter(HWND hwnd) {
+    RECT rc;
+    if (!IsNotificationCenter(hwnd) || !GetWindowRect(hwnd, &rc)) {
+        return;
+    }
+    int x = PlaceX(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+    {
+        std::lock_guard lock(g_centerLock);
+        if (hwnd != g_center || rc.left != g_centerX) {
+            g_center = hwnd;
+            g_centerDefaultX = rc.left;  // where explorer put it this time
+        }
+        g_centerX = x;
+    }
+    if (x != rc.left) {
+        Wh_Log(L"Notification center %ld -> %d", rc.left, x);
+        SetWindowPos(hwnd, nullptr, x, rc.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+// Explorer uncloaks the window once it's in place; the move comes just before.
+HRESULT WINAPI DwmSetWindowAttribute_Hook(HWND hwnd, DWORD attribute, LPCVOID value,
+                                          DWORD size) {
+    if (attribute == DWMWA_CLOAK && size == sizeof(BOOL) && value &&
+        !*(const BOOL*)value && !core::g_unloading) {
+        PlaceNotificationCenter(hwnd);
+    }
+    return DwmSetWindowAttribute_Original(hwnd, attribute, value, size);
+}
+
+bool HookExplorer() {
+    HMODULE dwm = LoadLibraryEx(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto target = dwm ? (DwmSetWindowAttribute_t)GetProcAddress(dwm, "DwmSetWindowAttribute")
+                      : nullptr;
+    bool ok = target && WindhawkUtils::SetFunctionHook(target, DwmSetWindowAttribute_Hook,
+                                                       &DwmSetWindowAttribute_Original);
+    if (!ok) {
+        Wh_Log(L"No DwmSetWindowAttribute hook: the notification center stays at the right");
+    }
+    return ok;
+}
+
+// Taskbar thread: the spans go, and the notification center goes back where explorer
+// had it. Asynchronous: its process may be suspended while the panel is closed.
+void Restore() {
+    for (auto& bar : g_bars) {
+        if (bar.span && IsWindow(bar.hwnd)) {
+            RemoveProp(bar.hwnd, kTrayProp);
+        }
+    }
+    g_bars.clear();
+    HWND center;
+    LONG defaultX, x;
+    {
+        std::lock_guard lock(g_centerLock);
+        center = std::exchange(g_center, nullptr);
+        defaultX = g_centerDefaultX;
+        x = g_centerX;
+    }
+    RECT rc;
+    if (center && defaultX != x && IsWindow(center) && GetWindowRect(center, &rc) &&
+        rc.left == x) {
+        SetWindowPos(center, nullptr, defaultX, rc.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    }
+}
+
+// ---- ShellHost: Quick Settings -------------------------------------------------------
+
+std::atomic<bool> g_on;  // the setting, in ShellHost
+
+using SetWindowPos_t = decltype(&SetWindowPos);
+SetWindowPos_t SetWindowPos_Original;
+
+bool IsQuickSettings(HWND hwnd) {
+    WCHAR cls[32];
+    DWORD pid = 0;
+    return GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId() &&
+           GetClassName(hwnd, cls, ARRAYSIZE(cls)) && wcscmp(cls, L"ControlCenterWindow") == 0;
+}
+
+BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int cy,
+                              UINT flags) {
+    constexpr UINT kStill = SWP_NOMOVE | SWP_NOSIZE;
+    RECT rc;
+    if (g_on && (flags & kStill) != kStill && IsQuickSettings(hwnd) &&
+        GetWindowRect(hwnd, &rc)) {
+        int width = flags & SWP_NOSIZE ? rc.right - rc.left : cx;
+        int height = flags & SWP_NOSIZE ? rc.bottom - rc.top : cy;
+        if (flags & SWP_NOMOVE) {
+            // A resize alone would keep the left edge; the right one stays at the tray.
+            int placed = PlaceX(rc.left, rc.top, width, height);
+            if (placed != rc.left) {
+                flags &= ~SWP_NOMOVE;
+                x = placed;
+                y = rc.top;
+            }
+        } else {
+            x = PlaceX(x, y, width, height);
+        }
+    }
+    return SetWindowPos_Original(hwnd, after, x, y, cx, cy, flags);
+}
+
+bool InShellHost() {
+    WCHAR path[MAX_PATH];
+    DWORD n = GetModuleFileName(nullptr, path, ARRAYSIZE(path));
+    return n && n < ARRAYSIZE(path) && HasName(path, L"ShellHost.exe");
+}
+
+// Wh_ModInit in ShellHost: only this part runs there.
+bool InstallShellHost() {
+    g_on = settings::g.tray.panelsNearTray;
+    return WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
+                                          &SetWindowPos_Original);
+}
+
+}  // namespace panels
+
 namespace entry {
 void ApplyNew();
 }
@@ -15961,6 +16264,7 @@ struct Features {
     bool island;
     bool folders;
     bool start;
+    bool panels;
     bool operator==(const Features&) const = default;
 };
 
@@ -15976,7 +16280,9 @@ Features Wanted() {
             // It brings the taskbar out through the auto-hide hooks.
             .island = settings::g.island.enabled && settings::g.autohide.enabled,
             .folders = settings::g.folders.enabled,
-            .start = settings::g.start.mode != settings::StartMode::kWindows};
+            .start = settings::g.start.mode != settings::StartMode::kWindows,
+            // The stock tray is at the right end already.
+            .panels = settings::g.pill.enabled && settings::g.tray.panelsNearTray};
 }
 
 // ---- shared hooks -------------------------------------------------------------
@@ -16259,6 +16565,9 @@ bool Install() {
     }
     if (g_features.size) {
         size::InstallWin32();
+    }
+    if (g_features.panels) {
+        panels::HookExplorer();
     }
     // Without its launch hook a folder's pin would open the folder in File Explorer.
     if (g_features.folders && !folders::Install()) {
@@ -17217,6 +17526,9 @@ void ApplyAll() {
         if (hooks::g_features.folders) {
             folders::HideRunningLines(hwnd);
         }
+        if (hooks::g_features.panels) {
+            panels::Apply(hwnd);
+        }
     }
 }
 
@@ -17243,6 +17555,9 @@ void ApplyNew() {
         if (hooks::g_features.start) {
             start::Apply(hwnd);
         }
+        if (hooks::g_features.panels) {
+            panels::Apply(hwnd);
+        }
     }
 }
 
@@ -17264,6 +17579,7 @@ void RestoreAll() {
     if (hooks::g_features.start) {
         start::Restore();
     }
+    panels::Restore();
     widgets::Restore();
     core::RestoreAll();
 }
@@ -17285,15 +17601,25 @@ void OnOrientationChanged() {
 
 }  // namespace entry
 
+// In ShellHost only panels runs; g_shellHost is set once in Wh_ModInit.
+bool g_shellHost;
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
     settings::Load();
+    g_shellHost = panels::InShellHost();
+    if (g_shellHost) {
+        return panels::InstallShellHost();
+    }
     core::g_onOrientationChanged = entry::OnOrientationChanged;
     return hooks::Install();
 }
 
 void Wh_ModAfterInit() {
     Wh_Log(L">");
+    if (g_shellHost) {
+        return;
+    }
     hooks::AfterInit();
     core::RunOn(core::PrimaryTaskbar(), entry::ApplyAll);
     if (hooks::g_features.size) {
@@ -17313,6 +17639,10 @@ void Wh_ModAfterInit() {
 
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
+    if (g_shellHost) {
+        panels::g_on = false;
+        return;
+    }
     bloom_link::Stop();
     core::g_unloading = true;
     if (hooks::g_features.folders) {
@@ -17340,6 +17670,9 @@ void Wh_ModBeforeUninit() {
 
 void Wh_ModUninit() {
     Wh_Log(L">");
+    if (g_shellHost) {
+        return;
+    }
     if (hooks::g_features.folders) {
         folders::WaitForWork();
     }
@@ -17351,6 +17684,10 @@ void Wh_ModUninit() {
 BOOL Wh_ModSettingsChanged(BOOL* bReload) {
     Wh_Log(L">");
     settings::Load();
+    if (g_shellHost) {
+        panels::g_on = settings::g.tray.panelsNearTray;
+        return TRUE;
+    }
     if (hooks::Wanted() != hooks::g_features) {
         *bReload = TRUE;
         return TRUE;

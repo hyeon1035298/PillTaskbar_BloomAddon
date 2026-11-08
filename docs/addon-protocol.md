@@ -39,10 +39,11 @@
 | `values.json` | Bloom | 런타임 | 모드 설정 값의 평평한 맵 |
 | `host-state.json` | 호스트 | Bloom, 호스트 | 호스트 상태, 충돌 기록, 안전 모드 |
 | `runtime-state.json` | 런타임 | Bloom, 호스트 | explorer 안 상태 |
+| `runtime-panel-state.json` | ShellHost 안 런타임 | 호스트 | ShellHost 안 상태(4절 "ShellHost"). 모양은 `runtime-state.json`과 같다 |
 | `prefs.json` | 모드, Bloom | 모드, Bloom | 모드가 쓰는 설정(아래 `prefs.json`) |
 | `offsets\<모듈 소문자>_<GUID+age>.txt` | 호스트 | 런타임 | 기호 오프셋 |
 | `symbols\<PDB>\<GUID+age>\<PDB>` | 호스트 | 호스트 | 받은 PDB(오프셋을 만든 뒤 지움) |
-| `host.log`, `runtime.log` | 각자 | 사람 | 기록. 1 MB를 넘으면 처음부터 다시 씀 |
+| `host.log`, `runtime.log`, `runtime-panel.log` | 각자 | 사람 | 기록. 1 MB를 넘으면 처음부터 다시 씀 |
 
 JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바꿔 통째로 바꾼다.
 
@@ -69,6 +70,10 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 #### 숨은 작업표시줄을 붙잡는 창
 
 다른 프로그램의 최상위 창에 창 속성 `PillTaskbar.HoldReveal`(값은 0이 아니면 무엇이든)이 있으면, 포인터가 그 창 위에 있는 동안 숨은 작업표시줄을 꺼내는 포인터 요청(가장자리 닿기, 마우스 올림, 트레이의 호버 타이머)을 모드가 버린다. 아일랜드도 그대로 있다. 포인터가 그 창을 벗어나거나 창·속성이 없어지면 원래대로다. Bloom의 화면 녹화 막대가 아일랜드·알약 자리에서 자라날 때 쓴다(`RecordBar`). 파일이나 설정을 거치지 않으므로 Bloom이 끝나도 남는 것이 없다.
+
+#### 트레이 자리 창 속성
+
+모드는 explorer에서 작업표시줄 창(`Shell_TrayWnd`, `Shell_SecondaryTrayWnd`)마다 창 속성 `PillTaskbar.TraySpan`에 알약 트레이의 화면 x 범위를 둔다. 값은 포인터 크기 정수 하나로, 아래 32비트가 왼쪽, 위 32비트가 오른쪽(둘 다 부호 있는 화면 픽셀)이다. 트레이가 없는 작업표시줄(보조 모니터)은 알약 전체의 범위다. 레이아웃이 바뀔 때마다 고치고, 기능을 끄거나 모드를 내리면 지운다. 빠른 설정과 알림 센터를 놓을 때(`tray.panelsNearTray`) ShellHost 안의 모드와 explorer 안의 모드가 읽는다. 파일이나 공유 메모리를 쓰지 않으므로 explorer가 끝나면 함께 없어진다.
 
 `pill.glass`가 거짓이면 모드는 알약 조각, 숨김 아일랜드가 알약으로 바뀌는 색, 폴더 창 바탕을 블러·백드롭 없이 테마 틴트 색(`SystemChromeMediumColor`, 폴더 창은 팔레트의 surface)으로 불투명하게 칠한다. 윤곽선(Bloom 모양의 옅은 선, 글래스모피즘의 가장자리 빛)은 그대로다. `Wh_ModSettingsChanged`가 알약과 아일랜드를 다시 그리므로 explorer를 다시 시작하지 않고 양쪽으로 바뀐다. 폴더 창은 다음에 열 때 반영된다.
 
@@ -183,6 +188,19 @@ Bloom은 종료 코드 10–15 뒤에는 스스로 다시 띄우지 않는다.
    - `refused`나 시작 때의 `initFailed`로 기다리던 런타임은 상태를 덮지 않고 끝난다.
 3. 호스트는 `Unloaded`를 10초(`kUnloadWaitMs`)까지 기다린다. 런타임 쪽 예산(8초 + 1초)은 이보다 짧다. 다만 모드 자체의 `Wh_ModUninit`이 그보다 오래 걸리면 넘길 수 있다. 안 오면 explorer를 건드리지 않고 `reason: unloadTimeout`을 남긴다.
 4. Bloom은 끌 때 `Stop`을 켜고 호스트가 끝나기를 12초까지 기다린 뒤에야 프로세스를 죽인다(호스트가 explorer를 10초 기다리므로).
+
+### ShellHost
+
+빠른 설정(Win+A)은 ShellHost.exe가 자기 창(`ControlCenterWindow`)을 스스로 놓는다. 그래서 모드의 패널 부분(`panels`)이 그 안에서 돈다. 모드는 `Wh_ModInit`에서 실행 파일 이름이 `ShellHost.exe`이면 `SetWindowPos` 훅만 걸고 다른 기능은 하나도 켜지 않는다. 알림 센터·달력(ShellExperienceHost.exe, AppContainer)은 explorer가 창을 놓고 클로킹을 푸므로 explorer 안의 모드가 맡고, 그 프로세스에는 넣지 않는다.
+
+1. explorer의 런타임이 `running`이 되면(그 뒤 5초마다, 아직 없으면) 호스트가 `System32\ShellHost.exe`의 최상위 창 하나를 찾는다. ShellHost는 보통 무결성(AppContainer 아님)이고 서명·확장 지점 완화가 꺼져 있어 explorer와 같은 길로 넣는다.
+2. 넣기 3–7과 같다. 이름은 ShellHost pid로 만든 `Config`, `Loaded`, `Unload`, `Unloaded`, 런타임 뮤텍스이고, `Config.flags`에 `kConfigPanel`(2)을 더한다. 훅은 그 창의 스레드에 걸고 `WM_NULL`도 그 창에 보낸다. 런타임은 이 표시를 보고 `runtime-panel-state.json`과 `runtime-panel.log`에 쓴다. Bloom은 이 둘을 읽지 않는다.
+3. 이미 `Loaded`가 켜져 있으면 `runtime-panel-state.json`의 버전이 같고 살아 있을 때 이어받고, 아니면 먼저 내린다.
+4. 15초 안에 `running`·`off`·`reloading`이 되지 않거나 `initFailed`·`refused`(예: Windhawk판 모드가 ShellHost에 있음)이면 내리고, 이 호스트 실행 동안 다시 넣지 않는다. 훅을 걸지 못해도 같다. 어느 경우든 explorer 쪽과 종료 코드는 그대로이고 `host.log`에만 남는다.
+5. ShellHost가 끝나면 다시 뜬 뒤 5초 안에 다시 넣는다. 충돌 종료 코드(`0xC…`)로 끝났으면 이 호스트 실행 동안 다시 넣지 않는다. 안전 모드 셈에는 넣지 않는다.
+6. 호스트가 끝날 때(어느 길이든) ShellHost의 런타임도 내리기 1–3으로 내린다. explorer가 끝나도 ShellHost 쪽은 그대로 둔다(창 속성이 없으면 패널은 Windows 자리에 열린다).
+
+`--mod none`(런타임만 넣는 시험)이면 ShellHost에는 넣지 않는다. 설정을 꺼도 런타임과 훅은 남고, 훅은 아무것도 바꾸지 않는다(`Wh_ModSettingsChanged`가 다시 올리지 않고 값만 바꾼다).
 
 ### 설정 바꾸기
 

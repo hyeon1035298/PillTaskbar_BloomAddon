@@ -566,8 +566,9 @@ DWORD WINAPI ControlThread(void*) {
         Exit();
     }
     settings::Reset();
-    log::Open(DataPath(addon::kRuntimeLog));
-    log::Line(L"runtime %s in explorer %u, host %u", g_config.version, GetCurrentProcessId(), g_config.hostPid);
+    log::Open(DataPath(InPanel() ? addon::kPanelRuntimeLog : addon::kRuntimeLog));
+    log::Line(L"runtime %s in %s %u, host %u", g_config.version, InPanel() ? L"ShellHost" : L"explorer",
+              GetCurrentProcessId(), g_config.hostPid);
 
     DWORD access = SYNCHRONIZE | EVENT_MODIFY_STATE;
     g_unload = OpenEventW(access, FALSE, NamedObject(addon::kUnloadEvent).c_str());
