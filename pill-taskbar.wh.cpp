@@ -482,7 +482,8 @@ enum class Align { kCenter, kLeft, kRight };  // an unknown value reads as the f
 enum class Slot { kCenter, kLeft, kRight };   // the same
 
 struct Settings {
-    struct {
+    bool operator==(const Settings&) const = default;
+    struct Pill {
         bool enabled;
         Edge edge;
         Align align;
@@ -492,8 +493,9 @@ struct Settings {
         double cornerRadius;
         float blur;
         int tintOpacity;  // 0..100
+        bool operator==(const Pill&) const = default;
     } pill;
-    struct {
+    struct Tray {
         bool hideVolume, hideNetwork, hideBattery, hideMicrophone, hideLocation,
             hideStudioEffects, hideRecall, hideLanguageBar, hideLanguageExtras,
             hideCopilot;
@@ -502,17 +504,20 @@ struct Settings {
         bool clock12;  // else 24 hours
         bool panelsNearTray;  // Quick Settings and the notification center
         bool centerStill;     // the notification center without its slide
+        bool operator==(const Tray&) const = default;
     } tray;
-    struct {
+    struct Size {
         bool enabled;
         int taskbarHeight;
         int iconSize;
         int iconSpacing;
+        bool operator==(const Size&) const = default;
     } size;
-    struct {
+    struct Start {
         StartMode mode;
+        bool operator==(const Start&) const = default;
     } start;
-        struct {
+        struct Autohide {
             bool enabled;
             int revealZone;  // 1..100, % of the edge around its middle
             int showDelay;   // ms, -1 = Windows
@@ -520,18 +525,21 @@ struct Settings {
             int animation;   // ms, 0 = Windows
             bool keepHiddenForBloom;  // else Bloom's launcher brings it out
             bool keepHiddenOnFlash;   // else a flashing button brings it out
+            bool operator==(const Autohide&) const = default;
         } autohide;
-        struct {
+        struct Media {
             bool enabled;
             int maxWidth;
+            bool operator==(const Media&) const = default;
         } media;
-        struct {
+        struct Usage {
             bool enabled;
             LogoColor logoColor;
             int gapBefore, gapAfter;  // px, beside the meter in the tray
             bool sessions;            // the details list Claude Code and Codex sessions
+            bool operator==(const Usage&) const = default;
         } usage;
-        struct {
+        struct Island {
             bool enabled;
             bool white;  // else black
             bool showClock, showMedia, showUsage, showMemory, showCpu;
@@ -542,8 +550,9 @@ struct Settings {
             int width;   // body, px at 100% scale; 0 = fits the content
             bool clickToReveal;     // else the pointer entering it brings the taskbar out
             int hoverTransparency;  // %, while the pointer rests on it
+            bool operator==(const Island&) const = default;
         } island;
-    struct {
+    struct Folders {
         bool enabled;
         std::wstring path;  // as typed; folders expands it
         int mergeDelay;     // ms
@@ -553,6 +562,7 @@ struct Settings {
         FolderSide popupSide;
         bool autoRunning;
         std::wstring runningName;
+        bool operator==(const Folders&) const = default;
     } folders;
 };
 
@@ -11268,6 +11278,31 @@ void RetryBuild(HWND taskbar) {
     }
 }
 
+// Taskbar thread, when only the islands' own settings changed: the islands stay
+// and take them where they are. The see-through on hover and the fill go to the
+// morph's values, the fillets and the content are drawn again, and the layout
+// follows the height, width and items.
+void Restyle() {
+    for (auto& g : g_islands) {
+        if (!g.ready) {
+            continue;
+        }
+        core::Guard(L"Island restyle", [&] {
+            auto& m = g.morphState;
+            m.InsertScalar(L"HoverOpacity", 1 - settings::g.island.hoverTransparency / 100.0f);
+            m.InsertColor(L"Black", IslandFill());
+            m.InsertColor(L"Pill", PillColor());
+            g.filletSize = 0;
+            g.shape = {};
+            for (auto& d : g.sides) {
+                d.filletSize = 0;
+                d.shape = {};
+            }
+            Sync(g);
+        });
+    }
+}
+
 void Restore() {
     autohide::g_onCollapsedChanged = nullptr;
     autohide::g_revealsAt = nullptr;
@@ -21614,6 +21649,10 @@ void Wh_ModAfterInit() {
     center::Start();
 }
 
+namespace changes {
+void Stop();
+}
+
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
     if (g_shellHost) {
@@ -21622,6 +21661,7 @@ void Wh_ModBeforeUninit() {
     }
     center::Stop();
     bloom_link::Stop();
+    changes::Stop();
     core::g_unloading = true;
     if (hooks::g_features.folders) {
         folders::Stop();
@@ -21662,18 +21702,18 @@ void Wh_ModUninit() {
     autohide::UnhookLeftover();
 }
 
-BOOL Wh_ModSettingsChanged(BOOL* bReload) {
-    Wh_Log(L">");
-    settings::Load();
-    if (g_shellHost) {
-        panels::LoadShellHostSettings();
-        return TRUE;
-    }
-    center::LoadSettings();
-    if (hooks::Wanted() != hooks::g_features) {
-        *bReload = TRUE;
-        return TRUE;
-    }
+namespace changes {
+
+// A slider being dragged in Bloom changes a setting ten times a second. Taking
+// every feature off the taskbars and putting it back for each made the islands
+// blink and the taskbar come out, so the changes of a run are put on once, this
+// long after the last of them. The lock keeps a change from reading the settings
+// in while the last run's are being put on.
+constexpr LONGLONG kApplyAfterMs = 250;
+std::mutex g_lock;
+PTP_TIMER g_timer;
+
+void Apply() {
     if (hooks::g_features.position) {
         position::Apply();
     }
@@ -21687,5 +21727,66 @@ BOOL Wh_ModSettingsChanged(BOOL* bReload) {
     if (hooks::g_features.folders) {
         folders::SettingsChanged();
     }
+}
+
+void CALLBACK ApplyLater(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER) {
+    std::lock_guard lock(g_lock);
+    if (!core::g_unloading) {
+        Apply();
+    }
+}
+
+// Under g_lock.
+void Schedule() {
+    if (!g_timer) {
+        g_timer = CreateThreadpoolTimer(ApplyLater, nullptr, nullptr);
+    }
+    if (!g_timer) {
+        Apply();
+        return;
+    }
+    ULARGE_INTEGER due{.QuadPart = (ULONGLONG)(-kApplyAfterMs * 10000)};
+    FILETIME ft{due.LowPart, due.HighPart};
+    SetThreadpoolTimer(g_timer, &ft, 0, 0);
+}
+
+// At unload, before the features come off: a waiting run is dropped.
+void Stop() {
+    if (PTP_TIMER timer = std::exchange(g_timer, nullptr)) {
+        SetThreadpoolTimer(timer, nullptr, 0, 0);
+        WaitForThreadpoolTimerCallbacks(timer, TRUE);
+        CloseThreadpoolTimer(timer);
+    }
+}
+
+}  // namespace changes
+
+BOOL Wh_ModSettingsChanged(BOOL* bReload) {
+    Wh_Log(L">");
+    std::lock_guard lock(changes::g_lock);
+    settings::Settings was = settings::g;
+    settings::Load();
+    if (g_shellHost) {
+        panels::LoadShellHostSettings();
+        return TRUE;
+    }
+    center::LoadSettings();
+    if (hooks::Wanted() != hooks::g_features) {
+        *bReload = TRUE;
+        return TRUE;
+    }
+    if (settings::g == was) {
+        return TRUE;
+    }
+    // Only the islands' own settings: they take them where they are.
+    settings::Settings rest = settings::g;
+    rest.island = was.island;
+    if (rest == was) {
+        if (hooks::g_features.island) {
+            core::Post(island::Restyle);
+        }
+        return TRUE;
+    }
+    changes::Schedule();
     return TRUE;
 }
