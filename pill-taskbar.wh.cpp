@@ -17850,11 +17850,14 @@ struct Open {
     Colors colors{};
     bool dark = true;
     double rasterization = 1;  // the taskbar's pixels per DIP, for the logos
-    winrt::weak_ref<Controls::StackPanel> body;
-    winrt::weak_ref<Controls::TextBlock> sessionsSummary;
-    winrt::weak_ref<Controls::StackPanel> sessionsList;
+    // Held, not weak: XAML lets go of a text block's object while only its tree
+    // holds it, and a weak reference to it comes back empty.
+    Controls::StackPanel body{nullptr};
+    Controls::TextBlock sessionsSummary{nullptr};
+    Controls::StackPanel sessionsList{nullptr};
     DispatcherTimer tick{nullptr};
     int ticks = 0;
+    int renders = 0;  // for the first diagnostics only
 };
 [[clang::no_destroy]] std::optional<Open> g_open;
 // Set when the popup hooked the tray's hide timer itself (the folders, which do
@@ -17904,29 +17907,39 @@ Documents::Run Span(std::wstring const& text, double size, uint32_t color, bool 
     return run;
 }
 
+// `shape` drawn as `owner`'s smooth-cornered outline, inset by `inset`, following
+// its size. It sits on a canvas, which asks for no room, so the outline never
+// changes the size it follows: a shape in the layout itself would feed its own
+// size back, and a layout that doesn't settle is a crash (XAML's layout cycle).
+Controls::Canvas Outline(Controls::Grid const& owner, Shapes::Path const& shape, double radius,
+                         double inset) {
+    Controls::Canvas holder;
+    holder.IsHitTestVisible(false);
+    holder.Children().Append(shape);
+    if (folders::g_popup) {
+        folders::Keep(*folders::g_popup,
+                      owner.SizeChanged(winrt::auto_revoke, [shape, radius, inset](
+                                                                auto&&, SizeChangedEventArgs const& e) {
+                          core::Guard(L"Usage outline", [&] {
+                              auto size = e.NewSize();
+                              shape.Data(folders::SmoothRect(
+                                  inset, inset, std::max(0.0, size.Width - 2 * inset),
+                                  std::max(0.0, size.Height - 2 * inset), radius, kSmoothing));
+                          });
+                      }));
+    }
+    return holder;
+}
+
 // A smooth-cornered fill (Bloom's SmoothBorder) behind `content`, its size.
 Controls::Grid Surface(FrameworkElement const& content, uint32_t fill, double radius,
-                       Thickness padding, uint32_t stroke = 0) {
+                       Thickness padding) {
     Controls::Grid surface;
     Shapes::Path shape;
     shape.Fill(Brush(fill));
-    if (stroke) {
-        shape.Stroke(Brush(stroke));
-        shape.StrokeThickness(1);
-    }
     content.Margin(padding);
-    surface.Children().Append(shape);
+    surface.Children().Append(Outline(surface, shape, radius, 0));
     surface.Children().Append(content);
-    if (folders::g_popup) {
-        double inset = stroke ? 0.5 : 0;
-        folders::Keep(*folders::g_popup,
-                      surface.SizeChanged(winrt::auto_revoke, [shape, radius, inset](
-                                                                  auto&&, SizeChangedEventArgs const& e) {
-                          shape.Data(folders::SmoothRect(inset, inset, e.NewSize().Width - 2 * inset,
-                                                         e.NewSize().Height - 2 * inset, radius,
-                                                         kSmoothing));
-                      }));
-    }
     return surface;
 }
 
@@ -18447,19 +18460,40 @@ FrameworkElement BuildSessions() {
     auto card = Surface(scroll, C().card, kCardRadius, {0, 0, 0, 0});
     card.Margin({0, kGap, 0, 0});
     panel.Children().Append(card);
-    g_open->sessionsSummary = winrt::make_weak(summary);
-    g_open->sessionsList = winrt::make_weak(list);
+    g_open->sessionsSummary = summary;
+    g_open->sessionsList = list;
     return panel;
+}
+
+void LetGo();
+
+// Lays the open popup out now, from here. A layout that doesn't settle (XAML's
+// layout cycle) then comes back as an error to catch, where XAML's own pass
+// would end explorer with it; the popup goes instead. False when it went.
+bool Settle(PCWSTR when) {
+    if (!Ours() || !folders::g_popup->content) {
+        return true;
+    }
+    try {
+        folders::g_popup->content.UpdateLayout();
+        return true;
+    } catch (...) {
+        HRESULT hr = winrt::to_hresult();
+        Wh_Log(L"Usage details layout failed (%s): %08X", when, hr);
+        core::DiagLine(L"Usage details layout failed (%s): %08X", when, hr);
+        LetGo();
+        return false;
+    }
 }
 
 // The rows again, with the current time: only the list's content changes, so
 // it keeps where it was scrolled to.
-void RenderSessions() {
+void DrawSessions() {
     if (!Ours()) {
         return;
     }
-    auto list = g_open->sessionsList.get();
-    auto summary = g_open->sessionsSummary.get();
+    auto list = g_open->sessionsList;
+    auto summary = g_open->sessionsSummary;
     if (!list || !summary) {
         return;
     }
@@ -18471,6 +18505,9 @@ void RenderSessions() {
                     snapshot->rows.begin() + std::min(snapshot->rows.size(), kMaxSessions));
     }
     summary.Text(Summary(rows));
+    if (g_open->renders++ < 2) {
+        core::DiagLine(L"Usage details rows %u", (unsigned)rows.size());
+    }
     list.Children().Clear();
     if (rows.empty()) {
         auto none = Text(snapshot ? L"최근 하루 동안의 Claude Code·Codex 세션이 없습니다"
@@ -18490,6 +18527,11 @@ void RenderSessions() {
         }
         list.Children().Append(SessionRow(rows[i], now));
     }
+}
+
+void RenderSessions() {
+    DrawSessions();
+    Settle(L"sessions");
 }
 
 void StopSessions() {
@@ -18520,6 +18562,9 @@ void StartSessions() {
                 return StopSessions();
             }
             RenderSessions();
+            if (!Ours()) {
+                return;  // let go of: its layout failed
+            }
             if (++g_open->ticks % kLookEveryTicks == 0) {
                 ai_sessions::Request();
             }
@@ -18566,7 +18611,7 @@ void Fill(Controls::StackPanel const& body) {
     }
     if (SessionsOn()) {
         body.Children().Append(BuildSessions());
-        RenderSessions();
+        DrawSessions();
     }
 }
 
@@ -18575,7 +18620,6 @@ void Fill(Controls::StackPanel const& body) {
 // room the folder popup keeps around its bubble, so it sits where theirs do.
 FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
     Controls::Grid shell;
-    shell.RequestedTheme(g_open->dark ? ElementTheme::Dark : ElementTheme::Light);  // the scroll bar
     Controls::Border shadowHost;
     Shapes::Path body;
     body.Fill(Brush(C().popup));
@@ -18584,7 +18628,7 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
     p.body = body;
     content.Margin({kPadding, kPadding, kPadding, kPadding});
     shell.Children().Append(shadowHost);
-    shell.Children().Append(body);
+    shell.Children().Append(Outline(shell, body, kPopupRadius, 0.5));
     shell.Children().Append(content);
     auto compositor = Hosting::ElementCompositionPreview::GetElementVisual(shadowHost).Compositor();
     auto sprite = compositor.CreateSpriteVisual();
@@ -18595,12 +18639,9 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
     shadow.Opacity((float)kShadowOpacity);
     sprite.Shadow(shadow);
     Hosting::ElementCompositionPreview::SetElementChildVisual(shadowHost, sprite);
-    folders::Keep(p, shell.SizeChanged(winrt::auto_revoke, [body, sprite](
+    folders::Keep(p, shell.SizeChanged(winrt::auto_revoke, [sprite](
                                                                auto&&, SizeChangedEventArgs const& e) {
-        auto size = e.NewSize();
-        body.Data(folders::SmoothRect(0.5, 0.5, size.Width - 1, size.Height - 1, kPopupRadius,
-                                      kSmoothing));
-        sprite.Size({size.Width, size.Height});
+        core::Guard(L"Usage shadow", [&] { sprite.Size({e.NewSize().Width, e.NewSize().Height}); });
     }));
     Controls::Grid room;
     room.Padding({folders::kShadowRoom, folders::kShadowRoom, folders::kShadowRoom,
@@ -18624,8 +18665,9 @@ void Refresh() {
     if (!Ours()) {
         return;
     }
-    if (auto body = g_open->body.get()) {
+    if (auto body = g_open->body) {
         Fill(body);
+        Settle(L"refresh");
     }
 }
 
@@ -18648,14 +18690,16 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
     GetCursorPos(&pt);
     folders::g_folderTaskbar = taskbar;
     folders::Popup& p = folders::NewPopup(kKey, anchor);
+    p.look.scale = 100;  // Bloom's sizes, not the folder popup's
     Open& open = g_open.emplace();
     open.dark = p.colors != &folders::kLightPalette;
     open.colors = MakeColors(open.dark);
     auto root = anchor.XamlRoot();
-    open.rasterization = (root ? root.RasterizationScale() : 1.0) * folders::UiScale(p.look);
+    open.rasterization = root ? root.RasterizationScale() : 1.0;
     Controls::StackPanel body;
     body.Width(kWidth);
-    open.body = winrt::make_weak(body);
+    open.body = body;
+    core::DiagLine(L"Usage details open");
     try {
         Fill(body);
         Controls::Flyout flyout;
@@ -18663,6 +18707,15 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
         flyout.Content(folders::Scaled(p, Bubble(p, body)));
         p.flyout = flyout;
         folders::Present(p, anchor, folders::TaskbarOnTop(pt));
+        folders::Keep(p, flyout.Opened(winrt::auto_revoke, [](auto&&, auto&&) {
+            core::Guard(L"Usage details opened", [] {
+                if (Ours() && folders::g_popup->content && Settle(L"opened")) {
+                    core::DiagLine(L"Usage details shown %.0fx%.0f",
+                                   folders::g_popup->content.ActualWidth(),
+                                   folders::g_popup->content.ActualHeight());
+                }
+            });
+        }));
         // Once closed it is let go of, after the folder popup's own handlers.
         folders::Keep(p, flyout.Closed(winrt::auto_revoke, [](auto&&, auto&&) {
             core::Guard(L"Usage details closed", [] {
@@ -18674,9 +18727,13 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
                 });
             });
         }));
+        if (!Settle(L"open")) {
+            return;
+        }
         StartSessions();
     } catch (...) {
         Wh_Log(L"Usage details failed: %08X", winrt::to_hresult());
+        core::DiagLine(L"Usage details failed: %08X", winrt::to_hresult());
         LetGo();
     }
 }
