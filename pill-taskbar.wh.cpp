@@ -16310,9 +16310,55 @@ bool InShellHost() {
     return n && n < ARRAYSIZE(path) && HasName(path, L"ShellHost.exe");
 }
 
+// Quick Settings opens at the edge Windows' own setting names, read from the registry
+// here. With the mod's edge set, that read gives the mod's edge, as the taskbars'
+// reads in explorer do. -1: Windows' setting.
+std::atomic<int> g_edge{-1};
+
+int EdgeSetting() {
+    switch (settings::g.pill.edge) {
+        case settings::Edge::kTop:
+            return ABE_TOP;
+        case settings::Edge::kBottom:
+            return ABE_BOTTOM;
+        default:
+            return -1;
+    }
+}
+
+using RegGetValueW_t = decltype(&RegGetValueW);
+RegGetValueW_t RegGetValueW_Original;
+LONG WINAPI RegGetValueW_Hook(HKEY key, LPCWSTR subKey, LPCWSTR value, DWORD flags,
+                              LPDWORD type, PVOID data, LPDWORD size) {
+    DWORD room = size ? *size : 0;
+    LONG ret = RegGetValueW_Original(key, subKey, value, flags, type, data, size);
+    int edge = g_edge;
+    if (edge < 0 || !value || !data || !size || room < sizeof(DWORD) ||
+        !(flags & RRF_RT_REG_DWORD) || _wcsicmp(value, L"TaskbarLocation") != 0) {
+        return ret;
+    }
+    *(DWORD*)data = (DWORD)edge;
+    *size = sizeof(DWORD);
+    if (type) {
+        *type = REG_DWORD;
+    }
+    return ERROR_SUCCESS;
+}
+
+void LoadShellHostSettings() {
+    g_on = settings::g.tray.panelsNearTray;
+    g_edge = EdgeSetting();
+}
+
 // Wh_ModInit in ShellHost: only this part runs there.
 bool InstallShellHost() {
-    g_on = settings::g.tray.panelsNearTray;
+    LoadShellHostSettings();
+    auto regGetValue =
+        (RegGetValueW_t)GetProcAddress(GetModuleHandle(L"kernelbase.dll"), "RegGetValueW");
+    if (!regGetValue || !WindhawkUtils::SetFunctionHook(regGetValue, RegGetValueW_Hook,
+                                                        &RegGetValueW_Original)) {
+        Wh_Log(L"No RegGetValueW hook: Quick Settings keeps Windows' edge");
+    }
     return WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
                                           &SetWindowPos_Original);
 }
@@ -17957,7 +18003,7 @@ BOOL Wh_ModSettingsChanged(BOOL* bReload) {
     Wh_Log(L">");
     settings::Load();
     if (g_shellHost) {
-        panels::g_on = settings::g.tray.panelsNearTray;
+        panels::LoadShellHostSettings();
         return TRUE;
     }
     if (hooks::Wanted() != hooks::g_features) {
