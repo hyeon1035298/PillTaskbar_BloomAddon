@@ -204,7 +204,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 - usage:
   - enabled: true
     $name: Bloom 사용량 표시
-    $description: Bloom이 내보낸 AI 사용량 파일을 읽어 트레이에 계정마다 주간 사용 %와 막대로 보여 줍니다. Bloom 설정의 홈 화면 > AI 사용량에서 파일 내보내기를 켜야 하고, 내보내기 폴더가 없으면 아무것도 만들지 않습니다
+    $description: Bloom이 내보낸 AI 사용량 파일을 읽어 트레이에 계정마다 주간 사용 %와 막대로 보여 줍니다. 숫자는 Bloom의 쓴 만큼·남은 만큼 설정을 따르고, 우클릭하면 반대로 바뀝니다. 클릭하면 한도마다 자세한 창이 열립니다. Bloom 설정의 홈 화면 > AI 사용량에서 파일 내보내기를 켜야 하고, 내보내기 폴더가 없으면 아무것도 만들지 않습니다
   - logoColor: brand
     $name: 로고 색
     $description: 트레이와 아일랜드에 보이는 계정 아이콘(Bloom 설정 › AI 계정에서 고른 파일, 고르지 않으면 Bloom에 들어 있는 Anthropic·OpenAI 로고)
@@ -217,6 +217,9 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - gapAfter: 14
     $name: 오른쪽 간격 (px)
     $description: 사용량 끝에서 오른쪽 트레이 아이콘까지의 간격입니다
+  - sessions: true
+    $name: 자세한 창에 세션 보기
+    $description: 사용량을 클릭해 여는 창에 이 PC의 Claude Code·Codex 세션(진행 상태, 이번 턴 토큰, 컨텍스트)을 보여 줍니다. 창이 열려 있는 동안에만 각 도구의 세션 기록 끝부분을 읽고, 대화 내용은 읽지 않습니다
   $name: 사용량
 - island:
   - enabled: true
@@ -487,6 +490,7 @@ struct Settings {
             bool enabled;
             LogoColor logoColor;
             int gapBefore, gapAfter;  // px, beside the meter in the tray
+            bool sessions;            // the details list Claude Code and Codex sessions
         } usage;
         struct {
             bool enabled;
@@ -588,6 +592,7 @@ void Load() {
     g.usage.logoColor = (LogoColor)Choice(L"usage.logoColor", {L"mono", L"brand"});
     g.usage.gapBefore = Clamped(L"usage.gapBefore", 0, 100);
     g.usage.gapAfter = Clamped(L"usage.gapAfter", 0, 100);
+    g.usage.sessions = Wh_GetIntSetting(L"usage.sessions");
 
     g.island.enabled = Wh_GetIntSetting(L"island.enabled");
     g.island.white = Choice(L"island.color", {L"black", L"white"}) == 1;
@@ -6369,6 +6374,13 @@ void Stop() {
 
 }  // namespace media
 
+// The usage meter's details, built on the folder popup further down.
+namespace usage_detail {
+void Toggle(HWND taskbar, FrameworkElement const& anchor);
+void Refresh();
+void Close();
+}  // namespace usage_detail
+
 // ============================================================================
 namespace usage {
 // ============================================================================
@@ -6426,6 +6438,8 @@ struct Model {
     bool online = true;
     int64_t writtenAt = 0;
     Tag tag = Tag::kNone;
+    // Bloom counts what is left ("show": "left") instead of what is used.
+    bool left = false;
     std::vector<Account> accounts;
 };
 
@@ -6546,6 +6560,7 @@ bool Parse(std::wstring const& text, Model& model) {
     model.online = Flag(root, L"online", true);
     model.writtenAt = (int64_t)Number(root, L"writtenAt", 0);
     model.tag = ParseTag(Text(root, L"tag"));
+    model.left = Text(root, L"show") == L"left";
     if (auto accounts = Field(root, L"accounts", wdj::JsonValueType::Array)) {
         for (auto const& item : accounts.GetArray()) {
             if (model.accounts.size() >= kMaxAccounts) {
@@ -6897,15 +6912,30 @@ const Limit* BarLimit(Account const& a) {
     return Weekly(a);
 }
 
+// Whether the numbers count what is left: Bloom's choice, until a right-click on
+// the meter turns it the other way here. A new choice of Bloom's comes first again.
+std::optional<bool> g_leftFlip;
+
+bool ShowsLeft(Model const& m) {
+    return g_leftFlip.value_or(m.left);
+}
+
 struct Value {
     enum Kind { kNumber, kUnknown, kNone } kind = kNone;
-    double percent = 0;
+    double percent = 0;  // used; the alert colors go by it either way
+    bool left = false;   // the number shown is what is left
+
+    // The whole percent shown: used, or what is left; the two add up to 100.
+    int Shown() const {
+        int used = (int)std::lround(percent);
+        return left ? std::max(0, 100 - used) : used;
+    }
 
     // The number alone; Text() has its unit.
     std::wstring Figure() const {
         switch (kind) {
             case kNumber:
-                return std::to_wstring((int)std::lround(percent));
+                return std::to_wstring(Shown());
             case kUnknown:
                 return L"?";
             default:
@@ -6914,20 +6944,25 @@ struct Value {
     }
 
     std::wstring Text() const {
-        return kind == kNumber ? Figure() + L"\u00A0%" : Figure();
+        return kind == kNumber ? Figure() + L"\u00A0%" + (left ? L" 남음" : L"") : Figure();
     }
 };
 
 // A number from an old fetch is hidden after a day; once its window has reset
 // the new window's use is unknown, which is 0 only while the data is fresh.
 Value Evaluate(Model const& m, Account const& a, Limit const* l, int64_t now) {
+    Value v;
+    v.left = ShowsLeft(m);
     if (!l || Age(a, now) > kGiveUpSeconds) {
-        return {};
+        return v;
     }
     if (l->resetsAt > 0 && l->resetsAt <= now) {
-        return Fresh(m, a, now) ? Value{Value::kNumber, 0} : Value{Value::kUnknown};
+        v.kind = Fresh(m, a, now) ? Value::kNumber : Value::kUnknown;
+        return v;
     }
-    return {Value::kNumber, std::clamp(l->used, 0.0, 100.0)};
+    v.kind = Value::kNumber;
+    v.percent = std::clamp(l->used, 0.0, 100.0);
+    return v;
 }
 
 bool Dim(Model const& m, Account const& a, int64_t now) {
@@ -7335,6 +7370,11 @@ struct Ui {
     UIElement::PointerEntered_revoker pointerEntered;
     FrameworkElement::ActualThemeChanged_revoker themeChanged;
     FrameworkElement::Loaded_revoker loaded;
+    UIElement::Tapped_revoker tapped;
+    UIElement::RightTapped_revoker rightTapped;
+    UIElement::ContextRequested_revoker contextRequested;
+    UIElement::PointerPressed_revoker pressed;
+    UIElement::PointerReleased_revoker released;
 };
 
 [[clang::no_destroy]] std::list<Ui> g_uis;
@@ -7539,7 +7579,8 @@ void Refresh(View& v,
              bool dark,
              UINT iconPx) {
     Value value = Evaluate(m, a, BarLimit(a), now);
-    double fraction = value.kind == Value::kNumber ? value.percent / 100 : 0;
+    // The bar fills with the number: growing as it is used, or shrinking with what is left.
+    double fraction = value.kind == Value::kNumber ? value.Shown() / 100.0 : 0;
     auto const& p = Palette(dark);
     if (v.icon) {
         // Its own colors, or one color.
@@ -7592,6 +7633,24 @@ void Refresh(View& v,
 }
 
 // Redraws every block with the current time, without rebuilding anything.
+void RefreshAll(Ui& ui);
+
+// A right-click on the meter: the numbers count the other way, on every
+// taskbar and the island.
+void FlipLeft() {
+    if (!g_model) {
+        return;
+    }
+    g_leftFlip = !ShowsLeft(*g_model);
+    for (auto& ui : g_uis) {
+        RefreshAll(ui);
+    }
+    if (g_onModel) {
+        core::Guard(L"Usage island", g_onModel);
+    }
+    core::Guard(L"Usage details", usage_detail::Refresh);
+}
+
 void RefreshAll(Ui& ui) {
     if (!ui.root || !g_model || ui.views.size() != g_model->accounts.size()) {
         return;
@@ -7636,6 +7695,52 @@ void EnsureRoot(Ui& ui) {
     ui.loaded = root.Loaded(winrt::auto_revoke, [p](auto&&, auto&&) {
         core::Guard(L"Usage loaded", [p] { RefreshAll(*p); });
     });
+    // Hit-testable between the blocks too. A click opens the details; a right-click
+    // turns the numbers, and its press, release and menu stop here, so the
+    // taskbar's own menu doesn't open over it.
+    root.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+    auto right = [](Input::PointerRoutedEventArgs const& e) {
+        auto props = e.GetCurrentPoint(nullptr).Properties();
+        return props.IsRightButtonPressed() ||
+               props.PointerUpdateKind() ==
+                   winrt::Windows::UI::Input::PointerUpdateKind::RightButtonReleased;
+    };
+    ui.pressed = root.PointerPressed(
+        winrt::auto_revoke, [right](auto&&, Input::PointerRoutedEventArgs const& e) {
+            core::Guard(L"Usage press", [&] {
+                if (right(e)) {
+                    e.Handled(true);
+                }
+            });
+        });
+    ui.released = root.PointerReleased(
+        winrt::auto_revoke, [right](auto&&, Input::PointerRoutedEventArgs const& e) {
+            core::Guard(L"Usage release", [&] {
+                if (right(e)) {
+                    e.Handled(true);
+                }
+            });
+        });
+    ui.rightTapped = root.RightTapped(
+        winrt::auto_revoke, [](auto&&, Input::RightTappedRoutedEventArgs const& e) {
+            core::Guard(L"Usage right-click", [&] {
+                e.Handled(true);
+                FlipLeft();
+            });
+        });
+    ui.contextRequested = root.ContextRequested(
+        winrt::auto_revoke, [](auto&&, Input::ContextRequestedEventArgs const& e) {
+            core::Guard(L"Usage menu", [&] { e.Handled(true); });
+        });
+    ui.tapped = root.Tapped(
+        winrt::auto_revoke, [p](auto&&, Input::TappedRoutedEventArgs const& e) {
+            core::Guard(L"Usage click", [&] {
+                e.Handled(true);
+                if (p->root) {
+                    usage_detail::Toggle(p->taskbar, p->root);
+                }
+            });
+        });
     ui.root = root;
 }
 
@@ -7687,12 +7792,16 @@ void Render() {
 }
 
 void OnModel(std::shared_ptr<const Model> model) {
+    if (g_model && model && g_model->left != model->left) {
+        g_leftFlip.reset();  // Bloom's own choice changed: it shows again
+    }
     g_model = std::move(model);
     SyncIcons(g_model.get());
     Render();
     if (g_onModel) {
         core::Guard(L"Usage island", g_onModel);
     }
+    core::Guard(L"Usage details", usage_detail::Refresh);
 }
 
 // ---- lifecycle -------------------------------------------------------------------------
@@ -7749,6 +7858,7 @@ void Apply(HWND hwnd) {
 }
 
 void Restore() {
+    core::Guard(L"Usage details", usage_detail::Close);
     for (HWND taskbar : g_taskbars) {
         widgets::Remove(taskbar, kWidgetName);
     }
@@ -16265,6 +16375,2095 @@ void WaitForWork() {
 }
 
 }  // namespace folders
+
+// ============================================================================
+namespace ai_sessions {
+// ============================================================================
+// What Claude Code and Codex are doing, from their own session logs on this PC,
+// for the usage details: each recent session's state, its turn's output tokens
+// and how full its context is. The reading follows TokenCat's (MIT, see
+// THIRD_PARTY.md), cut down: only the tail of each log, and of it only usage
+// numbers, times, ids, titles and model names, never what was said. Nothing is
+// read unless the details are open. A worker reads (one at a time); the rows go
+// to the taskbar thread.
+
+namespace wdj = winrt::Windows::Data::Json;
+
+enum class Source { kClaude, kCodex };
+// What a session is doing; kOutput is TokenCat's, shown as working.
+enum class State { kIdle, kWorking, kOutput, kTool, kInput, kStale, kComplete, kInterrupted, kUnfinished };
+
+constexpr uint64_t kTailBytes = 512 * 1024;      // from the end, on a log's first look
+constexpr uint64_t kHeadBytes = 64 * 1024;       // a Codex log's own session record
+constexpr uint64_t kReadBudget = 4 * 1024 * 1024;  // per log per look
+constexpr size_t kMaxLine = 256 * 1024;          // longer lines only end a tool call
+constexpr size_t kPrefixBytes = 16 * 1024;       // of a longer line, for that
+constexpr size_t kPerSource = 8;                 // newest logs read per tool
+constexpr int64_t kRecentSeconds = 24 * 3600;    // older logs are left out
+constexpr int kFindEvery = 5;                    // looks between two searches for logs
+constexpr size_t kMaxSet = 4096;                 // ids remembered per log
+
+// ---- a log's state (worker) ----------------------------------------------------
+
+struct PendingTool {
+    std::wstring id, name;
+};
+
+int64_t Unix(FILETIME const& t) {
+    ULARGE_INTEGER u{{t.dwLowDateTime, t.dwHighDateTime}};
+    return (int64_t)(u.QuadPart / 10000000ULL) - 11644473600LL;
+}
+
+// Days from 1970-01-01 to a civil date (H. Hinnant's days_from_civil).
+int64_t DaysFromCivil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// "2026-11-09T01:23:45.678Z" or with an offset, as Unix seconds; 0 when it isn't one.
+int64_t IsoTime(std::wstring_view text) {
+    auto digits = [&](size_t at, size_t n, int& out) {
+        out = 0;
+        for (size_t i = at; i < at + n; i++) {
+            if (i >= text.size() || !iswdigit(text[i])) {
+                return false;
+            }
+            out = out * 10 + (text[i] - L'0');
+        }
+        return true;
+    };
+    int y, mo, d, h, mi, s;
+    if (!digits(0, 4, y) || !digits(5, 2, mo) || !digits(8, 2, d) || !digits(11, 2, h) ||
+        !digits(14, 2, mi) || !digits(17, 2, s) || text[4] != L'-' || text[7] != L'-' ||
+        text[10] != L'T' || mo < 1 || mo > 12 || d < 1 || d > 31) {
+        return 0;
+    }
+    size_t zone = 19;
+    while (zone < text.size() && (text[zone] == L'.' || iswdigit(text[zone]))) {
+        zone++;
+    }
+    int offset = 0;
+    if (zone < text.size() && (text[zone] == L'+' || text[zone] == L'-')) {
+        int oh, om;
+        if (!digits(zone + 1, 2, oh) || !digits(zone + 4, 2, om)) {
+            return 0;
+        }
+        offset = (text[zone] == L'-' ? -1 : 1) * (oh * 3600 + om * 60);
+    } else if (zone >= text.size() || text[zone] != L'Z') {
+        return 0;
+    }
+    int64_t at = DaysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s - offset;
+    return at > 0 ? at : 0;
+}
+
+// A session title as a line: control characters become spaces, runs of space
+// one, at most 80 characters.
+std::wstring CleanTitle(std::wstring_view text) {
+    std::wstring out;
+    for (WCHAR c : text) {
+        bool space = c < 0x20 || c == 0x7F || iswspace(c);
+        if (space) {
+            if (!out.empty() && out.back() != L' ') {
+                out += L' ';
+            }
+        } else {
+            out += c;
+        }
+    }
+    while (!out.empty() && out.back() == L' ') {
+        out.pop_back();
+    }
+    if (out.size() > 80) {
+        out = out.substr(0, 79) + L"…";
+    }
+    return out;
+}
+
+// A bounded set of ids: forgets everything once full, as TokenCat's caps do.
+struct Seen {
+    std::unordered_set<std::wstring> ids;
+    // False when `id` was there already.
+    bool Insert(std::wstring const& id) {
+        if (ids.size() >= kMaxSet) {
+            ids.clear();
+        }
+        return ids.insert(id).second;
+    }
+};
+
+struct Log {
+    Source source = Source::kClaude;
+    std::wstring path;
+    // Where the next read starts; the file's creation time, to see it replaced.
+    uint64_t offset = 0;
+    int64_t created = 0;
+    bool started = false;
+    std::string partial;  // an unfinished last line
+
+    std::wstring sessionId, project, projectPath, model, effort;
+    std::wstring customTitle, aiTitle, summary;  // Claude, in that order of rank
+
+    // The turn.
+    int64_t startedAt = 0;  // its prompt's time, when it was seen
+    bool metadataOpen = false, softClosed = false;
+    std::wstring turnId, metadataTurnId;
+    int64_t activityStartedAt = 0;
+    State observed = State::kIdle;
+    std::vector<PendingTool> pending;
+    int output = 0;
+    bool hasUsage = false, accurate = true;
+    std::optional<int> cumulative;            // Codex: the total output so far
+    std::optional<std::pair<std::wstring, int>> turnUsage;  // Codex: the turn's total
+    bool usageRecords = false;                // Codex: token_usage_record lines
+    std::unordered_map<std::wstring, int> messages;  // Claude: output per message id
+    Seen previousMessages, records, responses, closedTurns;
+    // Codex: a fork replays its parent's turns before its own; those are skipped.
+    int64_t sessionCreated = 0;
+    bool ownTurnSeen = false, ignoringInherited = false;
+    std::wstring ignoredTurn;
+
+    int64_t lastActivity = 0, lastLogAt = 0;
+    int64_t lastOutputAt = 0;
+    int lastOutputDelta = 0;
+    int lastTurnOutput = 0;  // the last finished turn's
+    int64_t contextAt = 0;
+    int contextUsed = -1, contextWindow = 0;
+
+    bool TurnOpen() const { return (startedAt || metadataOpen) && !softClosed; }
+    int64_t LiveAt() const { return std::max(lastActivity, lastLogAt); }
+
+    static bool IsInputTool(std::wstring const& name) {
+        return name == L"AskUserQuestion" || name == L"ExitPlanMode" ||
+               name == L"request_user_input";
+    }
+
+    bool WaitsForInput() const {
+        return TurnOpen() && std::ranges::any_of(pending, [](PendingTool const& t) {
+                   return IsInputTool(t.name);
+               });
+    }
+
+    // How long an open turn may stay silent and still be running: a question
+    // waits for the person; Claude's tools can run for minutes, Codex's yield soon.
+    int64_t LiveHorizon() const {
+        return WaitsForInput() ? 86400 : pending.empty() ? 600 : source == Source::kClaude ? 900 : 120;
+    }
+
+    bool IsActive(int64_t now) const {
+        if (!TurnOpen() || !LiveAt()) {
+            return false;
+        }
+        int64_t age = now - LiveAt();
+        return age >= -5 && age <= LiveHorizon();
+    }
+
+    State Activity(int64_t now) const {
+        if (!TurnOpen()) {
+            // A turn whose start fell before the tail: running only while it writes.
+            bool running = observed == State::kWorking || observed == State::kOutput ||
+                           observed == State::kTool;
+            return running && now - LiveAt() > 600 ? State::kIdle : observed;
+        }
+        if (WaitsForInput()) {
+            return IsActive(now) ? State::kInput : State::kUnfinished;
+        }
+        if (IsActive(now)) {
+            return observed;
+        }
+        return LiveAt() && now - LiveAt() <= 1800 ? State::kStale : State::kUnfinished;
+    }
+
+    // The tool that holds an open turn: one waiting for the person, else the newest.
+    std::wstring RunningTool() const {
+        for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+            if (IsInputTool(it->name)) {
+                return it->name;
+            }
+        }
+        return pending.empty() ? L"" : pending.back().name;
+    }
+
+    std::optional<int> TurnOutput() const {
+        if (!TurnOpen()) {
+            return std::nullopt;
+        }
+        if (turnUsage && turnUsage->first == (!turnId.empty() ? turnId : metadataTurnId)) {
+            return turnUsage->second;
+        }
+        return startedAt && accurate ? std::optional<int>(output) : std::nullopt;
+    }
+
+    std::wstring Title() const {
+        return !customTitle.empty() ? customTitle : !aiTitle.empty() ? aiTitle : summary;
+    }
+
+    void SetProject(std::wstring const& cwd) {
+        if (cwd.empty() || cwd == projectPath) {
+            return;
+        }
+        projectPath = cwd;
+        size_t end = cwd.find_last_not_of(L"\\/");
+        size_t start = end == std::wstring::npos ? 0 : cwd.find_last_of(L"\\/", end);
+        project = end == std::wstring::npos
+                      ? cwd
+                      : cwd.substr(start == std::wstring::npos ? 0 : start + 1,
+                                   end - (start == std::wstring::npos ? 0 : start + 1) + 1);
+    }
+
+    void AddTool(std::wstring const& id, std::wstring const& name) {
+        std::erase_if(pending, [&](PendingTool const& t) { return t.id == id; });
+        pending.push_back({id, name});
+        if (pending.size() > 256) {
+            pending.erase(pending.begin());
+        }
+    }
+
+    bool RemoveTool(std::wstring const& id) {
+        auto it = std::ranges::find(pending, id, &PendingTool::id);
+        if (it == pending.end()) {
+            return false;
+        }
+        pending.erase(it);
+        return true;
+    }
+
+    void RecordOutput(int tokens, int64_t at) {
+        if (tokens <= 0) {
+            return;
+        }
+        if (at) {
+            lastActivity = std::max(lastActivity, at);
+        }
+        lastOutputAt = at;
+        lastOutputDelta = tokens;
+    }
+
+    void Begin(std::wstring const& id, int64_t at) {
+        startedAt = at;
+        softClosed = metadataOpen = false;
+        metadataTurnId.clear();
+        activityStartedAt = at;
+        observed = State::kWorking;
+        lastOutputAt = 0;
+        lastOutputDelta = 0;
+        pending.clear();
+        turnId = id;
+        turnUsage.reset();
+        output = 0;
+        hasUsage = false;
+        accurate = true;
+        for (auto const& [message, count] : messages) {
+            previousMessages.Insert(message);
+        }
+        messages.clear();
+    }
+
+    void RecordCompletion() {
+        std::optional<int> total;
+        if (turnUsage && turnUsage->first == (!turnId.empty() ? turnId : metadataTurnId)) {
+            total = turnUsage->second;
+        } else if (hasUsage && accurate && startedAt) {
+            total = output;
+        }
+        if (total && *total > 0) {
+            lastTurnOutput = *total;
+        }
+    }
+
+    void CloseTurn(State state, int64_t at) {
+        if (state == State::kComplete && (startedAt || metadataOpen)) {
+            RecordCompletion();
+        }
+        startedAt = 0;
+        turnId.clear();
+        turnUsage.reset();
+        softClosed = metadataOpen = false;
+        metadataTurnId.clear();
+        activityStartedAt = 0;
+        observed = state;
+        pending.clear();
+        if (at) {
+            lastActivity = std::max(lastActivity, at);
+        }
+    }
+};
+
+// ---- reading a record (worker) ----------------------------------------------------------
+
+wdj::JsonObject Object(wdj::IJsonValue const& value) {
+    return value && value.ValueType() == wdj::JsonValueType::Object ? value.GetObject() : nullptr;
+}
+
+wdj::JsonObject Child(wdj::JsonObject const& obj, PCWSTR key) {
+    return obj ? Object(obj.TryLookup(key)) : nullptr;
+}
+
+std::wstring Str(wdj::JsonObject const& obj, PCWSTR key) {
+    if (!obj) {
+        return {};
+    }
+    auto value = obj.TryLookup(key);
+    return value && value.ValueType() == wdj::JsonValueType::String
+               ? std::wstring(value.GetString())
+               : std::wstring();
+}
+
+bool True(wdj::JsonObject const& obj, PCWSTR key) {
+    if (!obj) {
+        return false;
+    }
+    auto value = obj.TryLookup(key);
+    return value && value.ValueType() == wdj::JsonValueType::Boolean && value.GetBoolean();
+}
+
+// A whole non-negative count, as TokenCat takes one.
+std::optional<int> Count(wdj::JsonObject const& obj, PCWSTR key) {
+    if (!obj) {
+        return std::nullopt;
+    }
+    auto value = obj.TryLookup(key);
+    if (!value || value.ValueType() != wdj::JsonValueType::Number) {
+        return std::nullopt;
+    }
+    double n = value.GetNumber();
+    return n >= 0 && n <= std::numeric_limits<int>::max() && std::trunc(n) == n
+               ? std::optional<int>((int)n)
+               : std::nullopt;
+}
+
+int Add(int a, int b) {
+    return (int)std::min<int64_t>((int64_t)a + b, std::numeric_limits<int>::max());
+}
+
+int64_t TimeOf(wdj::JsonObject const& obj, PCWSTR key) {
+    if (!obj) {
+        return 0;
+    }
+    auto value = obj.TryLookup(key);
+    if (!value) {
+        return 0;
+    }
+    if (value.ValueType() == wdj::JsonValueType::String) {
+        return IsoTime(std::wstring(value.GetString()));
+    }
+    if (value.ValueType() == wdj::JsonValueType::Number) {
+        double s = value.GetNumber();
+        return s > 0 && s < 253370764800.0 ? (int64_t)s : 0;
+    }
+    return 0;
+}
+
+// An array of objects, or none when anything in it isn't one.
+std::vector<wdj::JsonObject> Objects(wdj::JsonObject const& obj, PCWSTR key) {
+    std::vector<wdj::JsonObject> out;
+    if (!obj) {
+        return out;
+    }
+    auto value = obj.TryLookup(key);
+    if (!value || value.ValueType() != wdj::JsonValueType::Array) {
+        return out;
+    }
+    for (auto const& item : value.GetArray()) {
+        if (item.ValueType() != wdj::JsonValueType::Object) {
+            return {};
+        }
+        out.push_back(item.GetObject());
+    }
+    return out;
+}
+
+// A short client name (an effort level); anything else is dropped.
+std::wstring Label(std::wstring const& text) {
+    if (text.empty() || text.size() > 48) {
+        return {};
+    }
+    for (WCHAR c : text) {
+        if (!iswalnum(c) && c != L' ' && c != L'_' && c != L'.' && c != L':' && c != L'-') {
+            return {};
+        }
+    }
+    return text;
+}
+
+void Metadata(Log& g, wdj::JsonObject const& record) {
+    std::wstring type = Str(record, L"type");
+    if (g.source == Source::kCodex) {
+        auto payload = Child(record, L"payload");
+        if (type != L"session_meta" || !payload || g.sessionCreated) {
+            return;
+        }
+        // A fork replays its parent's session record after its own; the first stands.
+        g.sessionCreated = TimeOf(payload, L"timestamp");
+        if (!g.sessionCreated) {
+            g.sessionCreated = 1;  // seen, without a time
+        }
+        g.SetProject(Str(payload, L"cwd"));
+        return;
+    }
+    if (True(record, L"isSidechain")) {
+        return;
+    }
+    g.SetProject(Str(record, L"cwd"));
+    if (type == L"custom-title") {
+        if (auto t = CleanTitle(Str(record, L"customTitle")); !t.empty()) g.customTitle = t;
+    } else if (type == L"ai-title") {
+        if (auto t = CleanTitle(Str(record, L"aiTitle")); !t.empty()) g.aiTitle = t;
+    } else if (type == L"summary") {
+        if (auto t = CleanTitle(Str(record, L"summary")); !t.empty()) g.summary = t;
+    }
+}
+
+void Codex(Log& g, wdj::JsonObject const& record, int64_t at) {
+    std::wstring type = Str(record, L"type");
+    auto payload = Child(record, L"payload");
+    bool ownSnapshot = g.ownTurnSeen && !g.ignoringInherited;
+    if (type == L"token_usage_record") {
+        auto delta = Count(Child(payload, L"usage"), L"output_tokens");
+        if (g.ignoringInherited || !delta) {
+            return;
+        }
+        std::wstring id = Str(payload, L"turn_id");
+        std::wstring current = !g.turnId.empty() ? g.turnId : g.metadataTurnId;
+        if (!id.empty() && !current.empty() && id != current) {
+            return;
+        }
+        if (auto response = Str(payload, L"response_id");
+            !response.empty() && !g.responses.Insert(response)) {
+            return;
+        }
+        g.usageRecords = true;
+        if (!id.empty() && id == current) {
+            if (auto total = Count(Child(payload, L"turn_token_usage"), L"output_tokens")) {
+                g.turnUsage = {id, *total};
+            }
+        }
+        g.RecordOutput(*delta, at);
+        if (g.startedAt) {
+            g.output = Add(g.output, *delta);
+            g.hasUsage = true;
+        }
+        return;
+    }
+    if (type == L"turn_context") {
+        std::wstring model = Str(payload, L"model");
+        if (model.empty() || g.ignoringInherited) {
+            return;
+        }
+        g.model = model;
+        std::wstring effort = Label(Str(payload, L"effort"));
+        if (effort.empty()) {
+            effort = Label(Str(Child(Child(payload, L"collaboration_mode"), L"settings"),
+                               L"reasoning_effort"));
+        }
+        if (!effort.empty()) {
+            g.effort = effort;
+        }
+        g.SetProject(Str(payload, L"cwd"));
+        // A turn whose start fell before the tail is known by its context.
+        std::wstring id = Str(payload, L"turn_id");
+        if (!id.empty() && !g.TurnOpen() && g.closedTurns.ids.count(id) == 0) {
+            g.metadataOpen = true;
+            g.metadataTurnId = id;
+            g.activityStartedAt = at;
+            g.observed = State::kWorking;
+            g.ownTurnSeen = true;
+            if (at) {
+                g.lastActivity = std::max(g.lastActivity, at);
+            }
+        }
+        return;
+    }
+    if (type == L"response_item" && !g.ignoringInherited && (g.startedAt || g.metadataOpen)) {
+        std::wstring item = Str(payload, L"type");
+        std::optional<State> tool =
+            g.pending.empty() ? std::nullopt : std::optional<State>(State::kTool);
+        std::optional<State> phase;
+        if (item == L"function_call" || item == L"custom_tool_call") {
+            if (auto id = Str(payload, L"call_id"); !id.empty()) {
+                g.AddTool(id, Str(payload, L"name"));
+            }
+            phase = State::kTool;
+        } else if (item == L"function_call_output" || item == L"custom_tool_call_output") {
+            g.RemoveTool(Str(payload, L"call_id"));
+            phase = g.pending.empty() ? State::kWorking : State::kTool;
+        } else if (item == L"reasoning") {
+            phase = tool.value_or(State::kWorking);
+        } else if (item == L"agent_message" ||
+                   (item == L"message" && Str(payload, L"role") == L"assistant")) {
+            phase = tool.value_or(State::kOutput);
+        }
+        if (phase) {
+            g.observed = *phase;
+            if (at) {
+                g.lastActivity = std::max(g.lastActivity, at);
+            }
+        }
+        return;
+    }
+    if (type != L"event_msg") {
+        return;
+    }
+    std::wstring event = Str(payload, L"type");
+    if (event == L"task_started") {
+        std::wstring id = Str(payload, L"turn_id");
+        int64_t start = TimeOf(payload, L"started_at");
+        if (!start) {
+            start = at;
+        }
+        // A parent's turn, replayed into a fork with the fork's write time.
+        if (start && g.sessionCreated > 1 && start < g.sessionCreated - 1) {
+            if (!g.startedAt) {
+                g.ignoringInherited = true;
+                g.ignoredTurn = id;
+                g.model.clear();
+                g.effort.clear();
+                g.cumulative.reset();
+            }
+            return;
+        }
+        if (!id.empty() && (g.closedTurns.ids.count(id) || id == g.turnId)) {
+            return;
+        }
+        g.ignoringInherited = false;
+        g.ignoredTurn.clear();
+        g.Begin(id, start);
+        g.ownTurnSeen = true;
+        g.metadataOpen = true;
+        g.metadataTurnId = id;
+        if (at) {
+            g.lastActivity = at;
+        }
+    } else if (event == L"token_count") {
+        auto info = Child(payload, L"info");
+        if (ownSnapshot && at && info && at >= g.contextAt) {
+            // input_tokens already holds the cached input; the window comes with it.
+            if (auto input = Count(Child(info, L"last_token_usage"), L"input_tokens")) {
+                g.contextUsed = *input;
+                g.contextWindow = Count(info, L"model_context_window").value_or(0);
+                g.contextAt = at;
+            }
+        }
+        if (g.ignoringInherited || g.usageRecords || !info) {
+            return;
+        }
+        auto count = Count(Child(info, L"total_token_usage"), L"output_tokens");
+        if (!count) {
+            if (g.startedAt) {
+                g.accurate = false;
+            }
+            return;
+        }
+        auto last = Count(Child(info, L"last_token_usage"), L"output_tokens");
+        std::optional<int> delta =
+            g.cumulative ? (*count >= *g.cumulative ? std::optional<int>(*count - *g.cumulative) : last)
+                         : last;
+        g.cumulative = *count;
+        if (delta && *delta >= 0) {
+            g.RecordOutput(*delta, at);
+            if (g.startedAt) {
+                g.output = Add(g.output, *delta);
+                g.hasUsage = true;
+            }
+        } else if (g.startedAt) {
+            g.accurate = false;
+        }
+    } else if (event == L"task_complete") {
+        std::wstring id = Str(payload, L"turn_id");
+        if (g.ignoringInherited && id == g.ignoredTurn) {
+            return;
+        }
+        if (!((g.metadataOpen && id == g.metadataTurnId) || (g.startedAt && g.turnId == id))) {
+            return;
+        }
+        g.CloseTurn(State::kComplete, at);
+        if (!id.empty()) {
+            g.closedTurns.Insert(id);
+        }
+    } else if (event == L"turn_aborted" || event == L"task_aborted") {
+        if (g.ignoringInherited) {
+            return;
+        }
+        std::wstring id = Str(payload, L"turn_id");
+        std::wstring current = !g.turnId.empty() ? g.turnId : g.metadataTurnId;
+        if (!id.empty() && !current.empty() && id != current) {
+            return;
+        }
+        g.CloseTurn(State::kInterrupted, at);
+    }
+}
+
+enum class Input { kHuman, kInterrupted, kToolResult, kNone };
+
+// What a Claude user record is: a prompt that starts a turn, an interruption,
+// a tool's result, or neither (a slash command's echo).
+Input ClaudeInput(wdj::JsonObject const& record, wdj::JsonObject const& message) {
+    std::wstring text = Str(message, L"content");
+    auto blocks = Objects(message, L"content");
+    if (text.empty()) {
+        for (auto const& block : blocks) {
+            if (Str(block, L"type") == L"text") {
+                text = Str(block, L"text");
+                break;
+            }
+        }
+    }
+    if (text.starts_with(L"[Request interrupted")) {
+        return Input::kInterrupted;
+    }
+    if (std::ranges::any_of(blocks, [](auto const& b) { return Str(b, L"type") == L"tool_result"; })) {
+        return Input::kToolResult;
+    }
+    if (auto origin = Child(record, L"origin")) {
+        return Str(origin, L"kind").empty() ? Input::kNone : Input::kHuman;
+    }
+    if (text.starts_with(L"<command-name>") || text.starts_with(L"<command-message>") ||
+        text.starts_with(L"<local-command-")) {
+        return Input::kNone;
+    }
+    return !text.empty() || !blocks.empty() ? Input::kHuman : Input::kNone;
+}
+
+void Claude(Log& g, wdj::JsonObject const& record, int64_t at, int64_t previousLog) {
+    if (True(record, L"isSidechain")) {
+        return;
+    }
+    // Restored or branched sessions write earlier records again.
+    if (auto uuid = Str(record, L"uuid"); !uuid.empty() && !g.records.Insert(uuid)) {
+        return;
+    }
+    if (at && previousLog && at < previousLog - 600) {
+        return;
+    }
+    if (auto id = Str(record, L"sessionId"); !id.empty()) {
+        g.sessionId = id;
+    }
+    std::wstring type = Str(record, L"type");
+    auto message = Child(record, L"message");
+    if (type == L"user") {
+        bool prompt = (!True(record, L"isMeta") || Child(record, L"origin")) &&
+                      !True(record, L"isCompactSummary");
+        if (!prompt) {
+            return;
+        }
+        switch (ClaudeInput(record, message)) {
+            case Input::kHuman:
+                g.Begin(Str(record, L"uuid"), at);
+                if (at) {
+                    g.lastActivity = std::max(g.lastActivity, at);
+                }
+                break;
+            case Input::kInterrupted:
+                g.CloseTurn(State::kInterrupted, at);
+                break;
+            case Input::kToolResult:
+                g.softClosed = false;
+                g.metadataOpen = true;
+                for (auto const& block : Objects(message, L"content")) {
+                    if (Str(block, L"type") == L"tool_result") {
+                        g.RemoveTool(Str(block, L"tool_use_id"));
+                    }
+                }
+                g.observed = g.pending.empty() ? State::kWorking : State::kTool;
+                if (at) {
+                    g.lastActivity = std::max(g.lastActivity, at);
+                }
+                if (True(record, L"toolEndsTurn")) {
+                    g.CloseTurn(State::kComplete, at);
+                }
+                break;
+            default:
+                break;
+        }
+    } else if (type == L"assistant") {
+        auto usage = Child(message, L"usage");
+        auto count = Count(usage, L"output_tokens");
+        std::wstring id = Str(message, L"id");
+        if (!count || id.empty() || g.previousMessages.ids.count(id)) {
+            return;
+        }
+        std::wstring model = Str(message, L"model");
+        bool errored = True(record, L"isApiErrorMessage") || model == L"<synthetic>";
+        if (!errored) {
+            if (!model.empty()) {
+                g.model = model;
+            }
+            // Context held by this request: every input-side count. Claude logs
+            // no window size.
+            if (auto input = Count(usage, L"input_tokens"); input && at && at >= g.contextAt) {
+                g.contextUsed = Add(Add(*input, Count(usage, L"cache_creation_input_tokens").value_or(0)),
+                                    Count(usage, L"cache_read_input_tokens").value_or(0));
+                g.contextWindow = 0;
+                g.contextAt = at;
+            }
+        }
+        int prior = g.messages.contains(id) ? g.messages[id] : 0;
+        g.messages[id] = std::max(prior, *count);
+        if (at) {
+            g.lastActivity = std::max(g.lastActivity, at);
+        }
+        g.softClosed = false;
+        auto blocks = Objects(message, L"content");
+        auto has = [&](PCWSTR kind) {
+            return std::ranges::any_of(blocks, [&](auto const& b) { return Str(b, L"type") == kind; });
+        };
+        bool usesTool = has(L"tool_use");
+        if (usesTool) {
+            for (auto const& block : blocks) {
+                if (Str(block, L"type") == L"tool_use") {
+                    if (auto toolId = Str(block, L"id"); !toolId.empty()) {
+                        g.AddTool(toolId, Str(block, L"name"));
+                    }
+                }
+            }
+            g.observed = State::kTool;
+        } else if (has(L"text")) {
+            g.observed = g.pending.empty() ? State::kOutput : State::kTool;
+        } else if (has(L"thinking")) {
+            g.observed = g.pending.empty() ? State::kWorking : State::kTool;
+        }
+        if (*count > prior) {
+            if (g.startedAt) {
+                g.output = Add(g.output, *count - prior);
+                g.hasUsage = true;
+            }
+            g.RecordOutput(*count - prior, at);
+        }
+        if (errored) {
+            g.softClosed = true;
+            g.observed = State::kInterrupted;
+        } else if (!usesTool && g.pending.empty()) {
+            std::wstring stop = Str(message, L"stop_reason");
+            if (stop == L"end_turn" || stop == L"stop_sequence") {
+                g.softClosed = true;
+                g.observed = State::kComplete;
+                if (g.startedAt) {
+                    g.RecordCompletion();
+                }
+            }
+        }
+    } else if (type == L"system") {
+        if (at && g.startedAt && at < g.startedAt) {
+            return;  // an earlier turn's marker
+        }
+        std::wstring subtype = Str(record, L"subtype");
+        if (subtype == L"turn_duration" || subtype == L"stop_hook_summary") {
+            g.CloseTurn(State::kComplete, subtype == L"turn_duration" ? at : 0);
+        } else if (subtype == L"turn_aborted" || subtype == L"task_aborted" ||
+                   subtype == L"interrupted") {
+            g.CloseTurn(State::kInterrupted, at);
+        }
+    }
+}
+
+std::wstring Widen(std::string_view bytes) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), nullptr, 0);
+    std::wstring text(n > 0 ? n : 0, L'\0');
+    if (n > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), text.data(), n);
+    }
+    return text;
+}
+
+// A line too long to read whole still ends a tool call; its id is near the start.
+void Oversized(Log& g, std::string_view line) {
+    std::string_view head = line.substr(0, kPrefixBytes);
+    auto value = [&](std::string_view key) -> std::string {
+        std::string needle = "\"" + std::string(key) + "\":\"";
+        size_t at = head.find(needle);
+        if (at == std::string_view::npos) {
+            return {};
+        }
+        size_t start = at + needle.size(), end = head.find('"', start);
+        return end == std::string_view::npos ? std::string() : std::string(head.substr(start, end - start));
+    };
+    std::string id;
+    if (g.source == Source::kCodex) {
+        if (g.ignoringInherited || head.find("\"type\":\"response_item\"") == std::string_view::npos ||
+            (head.find("\"type\":\"function_call_output\"") == std::string_view::npos &&
+             head.find("\"type\":\"custom_tool_call_output\"") == std::string_view::npos)) {
+            return;
+        }
+        id = value("call_id");
+    } else {
+        if (head.find("\"type\":\"user\"") == std::string_view::npos ||
+            head.find("\"type\":\"tool_result\"") == std::string_view::npos ||
+            head.find("\"isSidechain\":true") != std::string_view::npos) {
+            return;
+        }
+        id = value("tool_use_id");
+    }
+    if (!id.empty() && g.RemoveTool(Widen(id)) && g.TurnOpen()) {
+        g.observed = g.pending.empty() ? State::kWorking : State::kTool;
+    }
+}
+
+void Line(Log& g, std::string_view line, bool metadataOnly) {
+    if (line.empty()) {
+        return;
+    }
+    if (line.size() > kMaxLine) {
+        if (!metadataOnly) {
+            Oversized(g, line);
+        }
+        return;
+    }
+    wdj::JsonObject record{nullptr};
+    if (!wdj::JsonObject::TryParse(Widen(line), record)) {
+        return;
+    }
+    Metadata(g, record);
+    if (metadataOnly) {
+        return;
+    }
+    int64_t at = TimeOf(record, L"timestamp");
+    int64_t previous = g.lastLogAt;
+    if (g.source == Source::kCodex) {
+        Codex(g, record, at);
+    } else {
+        Claude(g, record, at, previous);
+    }
+    if (at) {
+        g.lastLogAt = std::max(g.lastLogAt, at);
+    }
+}
+
+// ---- files (worker) -------------------------------------------------------------------
+
+bool ReadAt(HANDLE file, uint64_t at, size_t length, std::string& out) {
+    out.resize(length);
+    OVERLAPPED where{};
+    where.Offset = (DWORD)at;
+    where.OffsetHigh = (DWORD)(at >> 32);
+    DWORD got = 0;
+    if (length && !ReadFile(file, out.data(), (DWORD)length, &got, &where)) {
+        return false;
+    }
+    out.resize(got);
+    return true;
+}
+
+// Reads what was added to the log since the last look; a replaced or shorter
+// file starts over. The first look reads a Codex log's head for its own session
+// record, then only the tail.
+void Read(Log& g, uint64_t size, int64_t created) {
+    if (g.started && (created != g.created || size < g.offset)) {
+        Log fresh;
+        fresh.source = g.source;
+        fresh.path = g.path;
+        fresh.sessionId = g.sessionId;  // from the file name
+        g = std::move(fresh);
+    }
+    if (g.started && size == g.offset) {
+        return;
+    }
+    winrt::file_handle file{CreateFileW(g.path.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!file) {
+        return;
+    }
+    std::string bytes;
+    bool cut = false;  // the tail starts inside a line
+    if (!g.started) {
+        g.started = true;
+        g.created = created;
+        if (g.source == Source::kCodex && ReadAt(file.get(), 0, (size_t)std::min(size, kHeadBytes), bytes)) {
+            size_t end = bytes.size() == size ? bytes.size() : bytes.rfind('\n');
+            std::string_view head(bytes.data(), end == std::string::npos ? 0 : end);
+            for (size_t start = 0; start < head.size();) {
+                size_t next = head.find('\n', start);
+                if (next == std::string_view::npos) next = head.size();
+                Line(g, head.substr(start, next - start), true);
+                start = next + 1;
+            }
+        }
+        g.offset = size > kTailBytes ? size - kTailBytes : 0;
+        cut = g.offset > 0;
+    }
+    uint64_t from = g.offset;
+    size_t length = (size_t)std::min(size - from, kReadBudget);
+    if (!ReadAt(file.get(), from, length, bytes)) {
+        return;
+    }
+    g.offset = from + bytes.size();
+    std::string data = std::move(g.partial);
+    g.partial.clear();
+    data += bytes;
+    size_t start = 0;
+    if (cut) {
+        size_t first = data.find('\n');
+        start = first == std::string::npos ? data.size() : first + 1;
+    }
+    std::string_view view(data);
+    while (start < view.size()) {
+        size_t next = view.find('\n', start);
+        if (next == std::string_view::npos) {
+            if (view.size() - start <= kMaxLine) {
+                g.partial = std::string(view.substr(start));  // waits for its newline
+            }
+            break;
+        }
+        std::string_view line = view.substr(start, next - start);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        Line(g, line, false);
+        start = next + 1;
+    }
+}
+
+struct Found {
+    Source source = Source::kClaude;
+    std::wstring path;
+    int64_t written = 0;
+    uint64_t size = 0;
+    int64_t created = 0;
+};
+
+void FilesIn(Source source, std::wstring const& dir, PCWSTR pattern, std::vector<Found>& out,
+             bool (*skip)(std::wstring_view) = nullptr) {
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileExW((dir + L"\\" + pattern).c_str(), FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY || (skip && skip(data.cFileName))) {
+            continue;
+        }
+        out.push_back({source, dir + L"\\" + data.cFileName, Unix(data.ftLastWriteTime),
+                       (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow,
+                       Unix(data.ftCreationTime)});
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+}
+
+std::vector<std::wstring> Dirs(std::wstring const& dir) {
+    std::vector<std::wstring> out;
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &data,
+                                   FindExSearchLimitToDirectories, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE) {
+        return out;
+    }
+    do {
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && wcscmp(data.cFileName, L".") &&
+            wcscmp(data.cFileName, L"..") && !(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            out.push_back(dir + L"\\" + data.cFileName);
+        }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return out;
+}
+
+std::wstring Env(PCWSTR name) {
+    WCHAR value[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
+    return n && n < ARRAYSIZE(value) ? std::wstring(value) : std::wstring();
+}
+
+std::wstring Home() {
+    return Env(L"USERPROFILE");
+}
+
+// Claude Code's project folders: CLAUDE_CONFIG_DIR's (a comma list), the XDG
+// one, and ~\.claude's.
+std::vector<std::wstring> ClaudeRoots() {
+    std::vector<std::wstring> roots;
+    auto add = [&](std::wstring dir) {
+        while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/' || dir.back() == L' ')) {
+            dir.pop_back();
+        }
+        if (dir.empty() || !usage::LocalPath(dir)) {
+            return;
+        }
+        dir += L"\\projects";
+        if (std::ranges::none_of(roots, [&](auto const& r) { return _wcsicmp(r.c_str(), dir.c_str()) == 0; })) {
+            roots.push_back(dir);
+        }
+    };
+    std::wstring list = Env(L"CLAUDE_CONFIG_DIR");
+    for (size_t start = 0; start <= list.size();) {
+        size_t comma = list.find(L',', start);
+        if (comma == std::wstring::npos) comma = list.size();
+        size_t first = list.find_first_not_of(L' ', start);
+        if (first != std::wstring::npos && first < comma) add(list.substr(first, comma - first));
+        start = comma + 1;
+    }
+    std::wstring xdg = Env(L"XDG_CONFIG_HOME");
+    std::wstring home = Home();
+    if (!xdg.empty()) {
+        add(xdg + L"\\claude");
+    } else if (!home.empty()) {
+        add(home + L"\\.config\\claude");
+    }
+    if (!home.empty()) {
+        add(home + L"\\.claude");
+    }
+    return roots;
+}
+
+std::wstring CodexHome() {
+    std::wstring dir = Env(L"CODEX_HOME");
+    if (dir.empty() || !usage::LocalPath(dir)) {
+        std::wstring home = Home();
+        dir = home.empty() ? L"" : home + L"\\.codex";
+    }
+    return dir;
+}
+
+// The newest `count` of `found` written in the last day.
+std::vector<Found> Newest(std::vector<Found> found, int64_t now) {
+    std::erase_if(found, [&](Found const& f) { return now - f.written > kRecentSeconds; });
+    std::ranges::sort(found, std::greater{}, &Found::written);
+    if (found.size() > kPerSource) {
+        found.resize(kPerSource);
+    }
+    return found;
+}
+
+std::vector<Found> FindClaude(int64_t now) {
+    std::vector<Found> found;
+    for (auto const& root : ClaudeRoots()) {
+        for (auto const& project : Dirs(root)) {
+            FilesIn(Source::kClaude, project, L"*.jsonl", found, [](std::wstring_view name) {
+                return name.find(L".orphaned-") != std::wstring_view::npos;
+            });
+        }
+    }
+    return Newest(std::move(found), now);
+}
+
+// sessions\YYYY\MM\DD\rollout-*.jsonl; a session started days ago may still run,
+// so every day's folder is listed, newest first, until a day has nothing recent.
+std::vector<Found> FindCodex(int64_t now) {
+    std::vector<Found> found;
+    std::wstring home = CodexHome();
+    if (home.empty()) {
+        return found;
+    }
+    auto desc = [](std::vector<std::wstring> v) {
+        std::ranges::sort(v, std::greater{});
+        return v;
+    };
+    for (auto const& year : desc(Dirs(home + L"\\sessions"))) {
+        for (auto const& month : desc(Dirs(year))) {
+            for (auto const& day : desc(Dirs(month))) {
+                FilesIn(Source::kCodex, day, L"*.jsonl", found);
+            }
+        }
+    }
+    return Newest(std::move(found), now);
+}
+
+// The trailing UUID of rollout-<time>-<uuid>.jsonl, which names the thread.
+std::wstring CodexId(std::wstring const& path) {
+    size_t dot = path.rfind(L".jsonl");
+    if (dot == std::wstring::npos || dot < 36) {
+        return {};
+    }
+    std::wstring id = path.substr(dot - 36, 36);
+    std::ranges::transform(id, id.begin(), towlower);
+    return id;
+}
+
+// Codex keeps its thread names in session_index.jsonl ({id, thread_name,
+// updated_at}); the newest name of an id wins. Its tail is read again as it changes.
+struct Names {
+    std::wstring path;
+    uint64_t size = 0;
+    int64_t written = 0;
+    std::unordered_map<std::wstring, std::pair<int64_t, std::wstring>> byId;
+
+    void Update() {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (path.empty() || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+            return;
+        }
+        uint64_t now = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
+        int64_t at = Unix(data.ftLastWriteTime);
+        if (now == size && at == written) {
+            return;
+        }
+        size = now;
+        written = at;
+        winrt::file_handle file{CreateFileW(path.c_str(), GENERIC_READ,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        std::string bytes;
+        uint64_t from = size > kReadBudget ? size - kReadBudget : 0;
+        if (!file || !ReadAt(file.get(), from, (size_t)(size - from), bytes)) {
+            return;
+        }
+        std::string_view view(bytes);
+        size_t start = 0;
+        if (from > 0) {  // the tail starts inside a line
+            size_t first = view.find('\n');
+            start = first == std::string_view::npos ? view.size() : first + 1;
+        }
+        while (start < view.size()) {
+            size_t next = view.find('\n', start);
+            if (next == std::string_view::npos) break;
+            std::string_view line = view.substr(start, next - start);
+            start = next + 1;
+            wdj::JsonObject record{nullptr};
+            if (line.size() > 4096 || !wdj::JsonObject::TryParse(Widen(line), record)) continue;
+            std::wstring id = Str(record, L"id"), name = CleanTitle(Str(record, L"thread_name"));
+            if (id.empty() || name.empty()) continue;
+            std::ranges::transform(id, id.begin(), towlower);
+            int64_t updated = TimeOf(record, L"updated_at");
+            auto& entry = byId[id];
+            if (updated >= entry.first) entry = {updated, name};
+        }
+        if (byId.size() > 2048) {
+            byId.clear();  // read whole again on the next change
+            size = 0;
+        }
+    }
+};
+
+// ---- the rows (worker, then the taskbar thread) ----------------------------------------
+
+struct Row {
+    Source source = Source::kClaude;
+    State state = State::kIdle;
+    std::wstring tool;  // the running tool's name
+    std::wstring title, project, model, effort;
+    int64_t liveAt = 0, turnStartedAt = 0, lastOutputAt = 0;
+    int lastOutputDelta = 0, lastTurnOutput = 0;
+    std::optional<int> turnOutput;
+    int contextUsed = -1, contextWindow = 0;
+
+    bool Live() const {
+        return state == State::kInput || state == State::kTool || state == State::kWorking ||
+               state == State::kOutput || state == State::kStale;
+    }
+};
+
+struct Snapshot {
+    std::vector<Row> rows;
+    int64_t at = 0;
+};
+
+std::mutex g_lock;  // held by the one look at a time
+[[clang::no_destroy]] std::unordered_map<std::wstring, Log> g_logs;
+[[clang::no_destroy]] Names g_names;
+int g_looks = 0;
+std::atomic<bool> g_findNow{true};  // the next look searches for logs first
+std::vector<Found> g_found;
+std::atomic<bool> g_looking;
+std::atomic<bool> g_wanted;  // the details are open
+[[clang::no_destroy]] std::shared_ptr<const Snapshot> g_snapshot;  // taskbar thread
+void (*g_onRows)() = nullptr;  // taskbar thread
+
+Row RowOf(Log const& g, int64_t now) {
+    Row r;
+    r.source = g.source;
+    r.state = g.Activity(now);
+    r.tool = r.state == State::kTool || r.state == State::kInput ? g.RunningTool() : L"";
+    if (g.source == Source::kCodex) {
+        auto it = g_names.byId.find(g.sessionId);
+        r.title = it != g_names.byId.end() ? it->second.second : std::wstring();
+    } else {
+        r.title = g.Title();
+    }
+    r.project = g.project;
+    r.model = g.model;
+    r.effort = g.effort;
+    r.liveAt = g.LiveAt();
+    r.turnStartedAt = g.TurnOpen() ? g.activityStartedAt : 0;
+    r.lastOutputAt = g.lastOutputAt;
+    r.lastOutputDelta = g.lastOutputDelta;
+    r.lastTurnOutput = g.lastTurnOutput;
+    r.turnOutput = g.TurnOutput();
+    r.contextUsed = g.contextUsed;
+    r.contextWindow = g.contextWindow;
+    return r;
+}
+
+void Look() {
+    std::lock_guard guard(g_lock);
+    int64_t now = usage::Now();
+    if (g_findNow.exchange(false) || ++g_looks % kFindEvery == 0) {
+        g_found = FindClaude(now);
+        std::vector<Found> codex = FindCodex(now);
+        g_found.insert(g_found.end(), codex.begin(), codex.end());
+        std::wstring home = CodexHome();
+        g_names.path = home.empty() ? L"" : home + L"\\session_index.jsonl";
+        // Logs no longer among the newest are forgotten.
+        std::erase_if(g_logs, [](auto const& entry) {
+            return std::ranges::none_of(g_found, [&](Found const& f) { return f.path == entry.first; });
+        });
+    }
+    if (!g_wanted || core::g_unloading) {
+        return;
+    }
+    auto snapshot = std::make_shared<Snapshot>();
+    bool anyCodex = false;
+    for (auto& f : g_found) {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (!GetFileAttributesExW(f.path.c_str(), GetFileExInfoStandard, &data)) {
+            continue;
+        }
+        uint64_t size = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
+        bool codex = f.source == Source::kCodex;
+        auto [it, added] = g_logs.try_emplace(f.path);
+        Log& g = it->second;
+        if (added) {
+            g.source = codex ? Source::kCodex : Source::kClaude;
+            g.path = f.path;
+            if (codex) {
+                g.sessionId = CodexId(f.path);
+            }
+        }
+        anyCodex |= codex;
+        Read(g, size, Unix(data.ftCreationTime));
+        if (!g_wanted || core::g_unloading) {
+            return;
+        }
+    }
+    if (anyCodex) {
+        g_names.Update();
+    }
+    now = usage::Now();
+    for (auto const& [path, g] : g_logs) {
+        if (g.lastLogAt || g.lastActivity) {
+            snapshot->rows.push_back(RowOf(g, now));
+        }
+    }
+    // Live ones first, then by their last sign of life.
+    std::ranges::sort(snapshot->rows, [](Row const& a, Row const& b) {
+        if (a.Live() != b.Live()) return a.Live();
+        return a.liveAt > b.liveAt;
+    });
+    snapshot->at = now;
+    core::Post([snapshot] {
+        g_snapshot = snapshot;
+        if (g_onRows) {
+            g_onRows();
+        }
+    });
+}
+
+// Looks again unless a look is running; the worker holds a reference to the
+// module, so an unload waits for it to return.
+void Request() {
+    if (!g_wanted || core::g_unloading || g_looking.exchange(true)) {
+        return;
+    }
+    folders::StartJob([] {
+        try {
+            Look();
+        } catch (...) {
+            Wh_Log(L"Session look failed: %08X", winrt::to_hresult());
+        }
+        g_looking = false;
+    });
+}
+
+}  // namespace ai_sessions
+
+// ============================================================================
+namespace usage_detail {
+// ============================================================================
+// A click on the usage meter opens its details in the folder popup's glass
+// bubble: a card per account as Bloom's home draws them, with every limit's
+// number, bar and time to its reset. The numbers count used or left as the
+// meter does, and the switch at the top turns them as a right-click on the
+// meter does. Taskbar thread only.
+
+namespace wux = winrt::Windows::UI::Xaml;
+namespace theme = settings::theme;
+using winrt::Windows::UI::Color;
+
+// The popup's folder name: '|' never is in a folder's path.
+constexpr PCWSTR kKey = L"|usage";
+constexpr double kWidth = 312;
+constexpr double kPadding = 12;      // around the bubble's content
+constexpr double kCardPadding = 12;  // inside a card
+constexpr double kCardRadius = 14;
+constexpr double kGap = 8;           // between cards
+constexpr double kMarkSize = 16;
+constexpr double kBarHeight = 4;
+constexpr double kTitleSize = 14, kNameSize = 13, kTextSize = 12, kSmallSize = 11;
+
+// Set when the usage popup hooked the tray's hide timer itself (the folders,
+// which do it otherwise, are off); undone as it closes for good.
+bool g_ownsTimerHook = false;
+winrt::weak_ref<Controls::StackPanel> g_body;
+double g_rasterization = 1;  // the taskbar's pixels per DIP, for the logos
+
+bool Ours() {
+    return folders::g_popup && folders::g_popup->model.folder == kKey;
+}
+
+bool Dark(folders::Popup const& p) {
+    return p.colors != &folders::kLightPalette;
+}
+
+Controls::TextBlock Text(std::wstring const& text, double size, Color color,
+                         bool semi = false) {
+    Controls::TextBlock t;
+    t.Text(text);
+    t.FontSize(size);
+    t.FontFamily(Media::FontFamily{theme::kUsageFont});
+    t.Foreground(Media::SolidColorBrush(color));
+    if (semi) {
+        t.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    }
+    t.TextTrimming(TextTrimming::CharacterEllipsis);
+    t.VerticalAlignment(VerticalAlignment::Center);
+    return t;
+}
+
+Documents::Run Span(std::wstring const& text, double size, Color color, bool medium = false) {
+    Documents::Run run;
+    run.Text(text);
+    run.FontSize(size);
+    run.Foreground(Media::SolidColorBrush(color));
+    if (medium) {
+        run.FontWeight(winrt::Windows::UI::Text::FontWeights::Medium());
+    }
+    return run;
+}
+
+// A fill in the popup's smooth-cornered shape behind `content`, as wide as it is.
+Controls::Grid Card(folders::Popup& p, FrameworkElement const& content, uint32_t fill,
+                    double radius, Thickness padding) {
+    Controls::Grid card;
+    Shapes::Path shape;
+    shape.Fill(folders::Brush(fill));
+    content.Margin(padding);
+    card.Children().Append(shape);
+    card.Children().Append(content);
+    double smoothing = folders::Smoothing(p.look);
+    folders::Keep(p, card.SizeChanged(winrt::auto_revoke, [shape, radius, smoothing](
+                                                             auto&&, SizeChangedEventArgs const& e) {
+        shape.Data(folders::SmoothRect(0, 0, e.NewSize().Width, e.NewSize().Height, radius,
+                                       smoothing));
+    }));
+    return card;
+}
+
+// The local date and time of a Unix time: "11/12 (수) 18:00".
+std::wstring LocalTime(int64_t unix) {
+    ULARGE_INTEGER t;
+    t.QuadPart = (uint64_t)(unix + 11644473600LL) * 10000000ULL;
+    FILETIME file{t.LowPart, t.HighPart};
+    SYSTEMTIME utc, local;
+    if (unix <= 0 || !FileTimeToSystemTime(&file, &utc) ||
+        !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local)) {
+        return {};
+    }
+    static constexpr PCWSTR kDays[] = {L"일", L"월", L"화", L"수", L"목", L"금", L"토"};
+    WCHAR text[40];
+    swprintf_s(text, L"%u/%u (%ls) %02u:%02u", local.wMonth, local.wDay,
+               kDays[local.wDayOfWeek % 7], local.wHour, local.wMinute);
+    return text;
+}
+
+// The account's logo as the meter draws it: its icon, else its letter on a tile,
+// else its letter.
+FrameworkElement Mark(usage::Account const& a, usage::Label const& label, bool dark,
+                      double scale) {
+    auto const& u = usage::Palette(dark);
+    UINT px = (UINT)std::lround(kMarkSize * scale);
+    auto icon = a.hasIcon ? usage::IconAt(a.icon, px) : nullptr;
+    switch (usage::MarkOf(a, icon != nullptr)) {
+        case usage::Mark::kIcon: {
+            bool mono = settings::g.usage.logoColor != settings::LogoColor::kBrand;
+            Controls::Image image;
+            image.Width(kMarkSize);
+            image.Height(kMarkSize);
+            if (auto bitmap =
+                    usage::IconBitmap(*usage::Colored(icon, mono, usage::IconTint(mono, dark)))) {
+                image.Source(bitmap);
+            }
+            return image;
+        }
+        case usage::Mark::kTile: {
+            Controls::Border tile;
+            tile.Width(kMarkSize);
+            tile.Height(kMarkSize);
+            tile.CornerRadius(CornerRadiusHelper::FromUniformRadius(kMarkSize *
+                                                                    theme::kUsageTileRadius));
+            tile.Background(Media::SolidColorBrush(usage::TileFill(dark)));
+            auto letter = Text(label.letter, std::round(kMarkSize * theme::kUsageTileLetter),
+                               u.text, true);
+            letter.HorizontalAlignment(HorizontalAlignment::Center);
+            tile.Child(letter);
+            return tile;
+        }
+        default:
+            return Text(label.initial, kNameSize, u.text, true);
+    }
+}
+
+// A thin bar filled to `fraction` in `fill`.
+Controls::Grid Bar(double fraction, Color track, Color fill) {
+    Controls::Grid bar;
+    bar.Height(kBarHeight);
+    bar.Margin({0, 4, 0, 0});
+    auto columns = bar.ColumnDefinitions();
+    Controls::ColumnDefinition shown, rest;
+    shown.Width({fraction, GridUnitType::Star});
+    rest.Width({1 - fraction, GridUnitType::Star});
+    columns.Append(shown);
+    columns.Append(rest);
+    auto radius = CornerRadiusHelper::FromUniformRadius(kBarHeight / 2);
+    Controls::Border back, front;
+    back.CornerRadius(radius);
+    back.Background(Media::SolidColorBrush(track));
+    Controls::Grid::SetColumnSpan(back, 2);
+    front.CornerRadius(radius);
+    front.Background(Media::SolidColorBrush(fill));
+    bar.Children().Append(back);
+    if (fraction > 0) {
+        bar.Children().Append(front);
+    }
+    return bar;
+}
+
+// A limit: its name, then the number ("68% 남음") and the time to its reset;
+// under them its bar. The reset's date and time are in the tooltip.
+FrameworkElement LimitRow(usage::Model const& m, usage::Account const& a,
+                          usage::Limit const& l, int64_t now, bool dark) {
+    auto const& u = usage::Palette(dark);
+    usage::Value v = usage::Evaluate(m, a, &l, now);
+    Controls::StackPanel row;
+    row.Margin({0, 6, 0, 0});
+    Controls::Grid line;
+    Controls::ColumnDefinition name, figures;
+    figures.Width(GridLengthHelper::Auto());
+    line.ColumnDefinitions().Append(name);
+    line.ColumnDefinitions().Append(figures);
+    line.Children().Append(
+        Text(l.name.empty() ? usage::WindowName(l.mins) : l.name, kTextSize, u.muted));
+    Controls::TextBlock right;
+    right.FontFamily(Media::FontFamily{theme::kUsageFont});
+    right.VerticalAlignment(VerticalAlignment::Center);
+    Documents::Typography::SetNumeralAlignment(right, FontNumeralAlignment::Tabular);
+    bool danger = v.kind == usage::Value::kNumber && v.percent >= theme::kUsageDangerPercent;
+    if (danger) {  // a mark as well as the color
+        auto mark = Span(L"\xE7BA ", kSmallSize, u.dangerText);
+        mark.FontFamily(Media::FontFamily{L"Segoe Fluent Icons, Segoe MDL2 Assets"});
+        right.Inlines().Append(mark);
+    }
+    right.Inlines().Append(Span(v.Figure() + (v.kind == usage::Value::kNumber ? L"%" : L""),
+                                kTextSize, usage::FigureColor(v, dark), true));
+    if (v.kind == usage::Value::kNumber && v.left) {
+        right.Inlines().Append(Span(L" 남음", kSmallSize, u.muted));
+    }
+    if (v.kind == usage::Value::kNumber && l.resetsAt > now) {
+        right.Inlines().Append(Span(L"  " + usage::Duration(l.resetsAt - now) + L" 뒤 초기화",
+                                    kSmallSize, u.faint));
+    }
+    Controls::Grid::SetColumn(right, 1);
+    line.Children().Append(right);
+    row.Children().Append(line);
+    auto fill = u.text;
+    fill.A = theme::kUsageFillAlpha;
+    double fraction = v.kind == usage::Value::kNumber ? v.Shown() / 100.0 : 0;
+    row.Children().Append(Bar(fraction, u.track, usage::AlertColor(v, dark, false).value_or(fill)));
+    if (std::wstring at = LocalTime(l.resetsAt); !at.empty()) {
+        Controls::ToolTipService::SetToolTip(row, winrt::box_value(at + L" 초기화"));
+    }
+    return row;
+}
+
+// When the account's numbers came, or why they can't: what Bloom's home and the
+// meter's tooltip say.
+std::wstring Status(usage::Model const& m, usage::Account const& a, int64_t now) {
+    if (!m.online) {
+        return L"Bloom 꺼짐 · " + usage::Duration(std::max<int64_t>(0, now - m.writtenAt)) +
+               L" 전";
+    }
+    if (usage::Age(a, now) > usage::kGiveUpSeconds) {
+        return L"하루 넘게 갱신 없음";
+    }
+    return usage::Duration(usage::Age(a, now)) + L" 전 갱신";
+}
+
+// [mark][name][plan] … [when], then the limits; a signed-out account says so
+// instead. Old numbers are dimmed.
+FrameworkElement AccountCard(folders::Popup& p, usage::Model const& m, usage::Account const& a,
+                             usage::Label const& label, int64_t now, double scale) {
+    bool dark = Dark(p);
+    auto const& u = usage::Palette(dark);
+    Controls::StackPanel stack;
+    Controls::Grid head;
+    for (int c = 0; c < 4; c++) {
+        Controls::ColumnDefinition column;
+        column.Width(c == 1 ? GridLength{1, GridUnitType::Star} : GridLengthHelper::Auto());
+        head.ColumnDefinitions().Append(column);
+    }
+    auto mark = Mark(a, label, dark, scale);
+    mark.Margin({0, 0, 8, 0});
+    mark.VerticalAlignment(VerticalAlignment::Center);
+    head.Children().Append(mark);
+    auto name = Text(label.title, kNameSize, u.text, true);
+    Controls::Grid::SetColumn(name, 1);
+    head.Children().Append(name);
+    if (!a.plan.empty()) {
+        Controls::Border badge;
+        badge.CornerRadius(CornerRadiusHelper::FromUniformRadius(5));
+        badge.Background(folders::Brush(p.colors->field));
+        badge.Padding({6, 1, 6, 1});
+        badge.Margin({6, 0, 0, 0});
+        badge.VerticalAlignment(VerticalAlignment::Center);
+        badge.Child(Text(a.plan, kSmallSize, u.muted));
+        Controls::Grid::SetColumn(badge, 2);
+        head.Children().Append(badge);
+    }
+    auto when = Text(a.signedOut ? L"" : Status(m, a, now), kSmallSize, u.faint);
+    when.Margin({8, 0, 0, 0});
+    Controls::Grid::SetColumn(when, 3);
+    head.Children().Append(when);
+    stack.Children().Append(head);
+
+    if (a.signedOut) {
+        auto need = Text(L"로그인이 풀려 사용량을 받지 못했습니다", kTextSize, u.muted);
+        need.TextWrapping(TextWrapping::Wrap);
+        need.Margin({0, 6, 0, 0});
+        stack.Children().Append(need);
+    } else {
+        Controls::StackPanel rows;
+        rows.Opacity(usage::Dim(m, a, now) ? theme::kUsageDimOpacity : 1.0);
+        for (auto const& l : a.limits) {
+            rows.Children().Append(LimitRow(m, a, l, now, dark));
+        }
+        if (a.limits.empty()) {
+            auto none = Text(L"받은 한도가 없습니다", kTextSize, u.muted);
+            none.Margin({0, 6, 0, 0});
+            rows.Children().Append(none);
+        }
+        stack.Children().Append(rows);
+    }
+    return Card(p, stack, p.colors->field, kCardRadius,
+                {kCardPadding, kCardPadding - 2, kCardPadding, kCardPadding});
+}
+
+// "쓴 만큼 | 남은 만큼": the one shown lit; the other turns the numbers, as a
+// right-click on the meter does.
+FrameworkElement Switch(folders::Popup& p, bool left) {
+    constexpr double kSegmentWidth = 64, kSegmentHeight = 24;
+    bool dark = Dark(p);
+    auto const& u = usage::Palette(dark);
+    Controls::StackPanel segments;
+    segments.Orientation(Controls::Orientation::Horizontal);
+    segments.VerticalAlignment(VerticalAlignment::Center);
+    for (bool side : {false, true}) {
+        bool on = side == left;
+        auto text = Text(side ? L"남은 만큼" : L"쓴 만큼", kSmallSize, on ? u.text : u.muted, on);
+        text.HorizontalAlignment(HorizontalAlignment::Center);
+        auto segment = folders::Plate(p, kSegmentWidth, kSegmentHeight, kSegmentHeight / 2, text,
+                                      on ? p.colors->hover : 0);
+        Automation::AutomationProperties::SetName(segment, side ? L"남은 만큼" : L"쓴 만큼");
+        if (!on) {
+            folders::Keep(p, segment.Tapped(winrt::auto_revoke, [](auto&&, auto&&) {
+                core::Guard(L"Usage switch", usage::FlipLeft);
+            }));
+        }
+        segments.Children().Append(segment);
+    }
+    return segments;
+}
+
+// ---- sessions --------------------------------------------------------------------------
+// TokenCat's list, in this popup's look: a live session (working, running a tool,
+// waiting for an answer) gets three lines, the rest one.
+
+constexpr size_t kMaxSessions = 12;
+// The list keeps one height, scrolling past it, so the popup never grows over
+// the taskbar as sessions come and go.
+constexpr double kSessionsHeight = 228;
+constexpr int kLookEveryTicks = 2;  // a look every other second while open
+
+winrt::weak_ref<Controls::TextBlock> g_sessionsSummary;
+winrt::weak_ref<Controls::StackPanel> g_sessionsList;
+[[clang::no_destroy]] DispatcherTimer g_tick{nullptr};
+int g_ticks = 0;
+
+bool SessionsOn() {
+    return settings::g.usage.sessions;
+}
+
+// "4,020" below 100,000, then "123.4k", then "1.23M".
+std::wstring Tokens(int n) {
+    WCHAR text[32];
+    if (n < 100000) {
+        std::wstring digits = std::to_wstring(n), out;
+        for (size_t i = 0; i < digits.size(); i++) {
+            if (i && (digits.size() - i) % 3 == 0) {
+                out += L',';
+            }
+            out += digits[i];
+        }
+        return out;
+    }
+    if (n < 999950) {
+        swprintf_s(text, L"%.1fk", n / 1000.0);
+    } else {
+        swprintf_s(text, L"%.2fM", n / 1000000.0);
+    }
+    return text;
+}
+
+// "7.5k", "12k", "980".
+std::wstring Compact(int n) {
+    if (n < 1000) {
+        return std::to_wstring(n);
+    }
+    WCHAR text[32];
+    swprintf_s(text, L"%.1f", n < 999950 ? n / 1000.0 : n / 1000000.0);
+    std::wstring out = text;
+    if (out.ends_with(L".0")) {
+        out.resize(out.size() - 2);
+    }
+    return out + (n < 999950 ? L"k" : L"M");
+}
+
+// "방금", "40초 전", "3분 전", "2시간 전", "1일 전".
+std::wstring Ago(int64_t seconds) {
+    seconds = std::max<int64_t>(0, seconds);
+    if (seconds < 10) return L"방금";
+    if (seconds < 60) return std::to_wstring(seconds / 10 * 10) + L"초 전";
+    if (seconds < 3600) return std::to_wstring(seconds / 60) + L"분 전";
+    if (seconds < 86400) return std::to_wstring(seconds / 3600) + L"시간 전";
+    return std::to_wstring(seconds / 86400) + L"일 전";
+}
+
+// "0:41", "1:02:05".
+std::wstring Elapsed(int64_t seconds) {
+    seconds = std::max<int64_t>(0, seconds);
+    WCHAR text[32];
+    if (seconds >= 3600) {
+        swprintf_s(text, L"%lld:%02lld:%02lld", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    } else {
+        swprintf_s(text, L"%lld:%02lld", seconds / 60, seconds % 60);
+    }
+    return text;
+}
+
+// What a running tool is doing, by its name only.
+std::wstring ToolWords(std::wstring const& name) {
+    auto any = [&](std::initializer_list<PCWSTR> names) {
+        return std::ranges::any_of(names, [&](PCWSTR n) { return name == n; });
+    };
+    if (name.starts_with(L"mcp__") || any({L"ListMcpResourcesTool", L"ReadMcpResourceTool"})) {
+        return L"MCP 도구 실행";
+    }
+    if (any({L"Bash", L"BashOutput", L"exec", L"exec_command", L"shell", L"local_shell", L"js",
+             L"unified_exec"})) {
+        return L"명령 실행";
+    }
+    if (any({L"Read", L"Write", L"Edit", L"MultiEdit", L"NotebookEdit", L"Glob", L"Grep",
+             L"apply_patch"})) {
+        return L"파일 작업";
+    }
+    if (any({L"WebFetch", L"WebSearch", L"web_search", L"web_fetch"})) {
+        return L"웹 조회";
+    }
+    if (any({L"Task", L"Agent", L"Workflow", L"SendMessage", L"ListAgents", L"spawn_agent",
+             L"wait_agent", L"send_message", L"followup_task", L"list_agents", L"close_agent"})) {
+        return L"하위 에이전트 대기";
+    }
+    return L"도구 실행";
+}
+
+std::wstring StateWords(ai_sessions::Row const& r) {
+    using ai_sessions::State;
+    switch (r.state) {
+        case State::kInput:
+            return r.tool == L"ExitPlanMode" ? L"계획 승인 대기" : L"질문 답변 대기";
+        case State::kTool:
+            return ToolWords(r.tool);
+        case State::kWorking:
+        case State::kOutput:
+            return L"진행";
+        case State::kStale:
+            return L"로그 대기";
+        case State::kComplete:
+            return L"완료";
+        case State::kInterrupted:
+            return L"중단";
+        case State::kUnfinished:
+            return L"종료 기록 없음";
+        default:
+            return {};
+    }
+}
+
+std::wstring Client(ai_sessions::Row const& r) {
+    return r.source == ai_sessions::Source::kCodex ? L"Codex" : L"Claude Code";
+}
+
+Color ArgbColor(uint32_t argb) {
+    return {BYTE(argb >> 24), BYTE(argb >> 16), BYTE(argb >> 8), BYTE(argb)};
+}
+
+// The state's color: amber for a question, the accent while it runs.
+Color StateColor(folders::Popup const& p, ai_sessions::Row const& r) {
+    auto const& u = usage::Palette(Dark(p));
+    switch (r.state) {
+        case ai_sessions::State::kInput:
+            return u.warn;
+        case ai_sessions::State::kStale:
+            return u.muted;
+        default:
+            return ArgbColor(p.colors->accent);
+    }
+}
+
+// The state in a soft pill of its color.
+FrameworkElement Chip(folders::Popup const& p, ai_sessions::Row const& r) {
+    Color color = StateColor(p, r);
+    Color fill = color;
+    fill.A = 0x2E;
+    Controls::Border chip;
+    chip.CornerRadius(CornerRadiusHelper::FromUniformRadius(9));
+    chip.Background(Media::SolidColorBrush(fill));
+    chip.Padding({7, 1, 7, 2});
+    chip.Margin({0, 0, 6, 0});
+    chip.VerticalAlignment(VerticalAlignment::Center);
+    chip.Child(Text(StateWords(r), kSmallSize, color, true));
+    return chip;
+}
+
+// A line: `left` taking the room, `right` at its end.
+Controls::Grid Line(FrameworkElement const& left, FrameworkElement const& right) {
+    Controls::Grid line;
+    Controls::ColumnDefinition rest, end;
+    end.Width(GridLengthHelper::Auto());
+    line.ColumnDefinitions().Append(rest);
+    line.ColumnDefinitions().Append(end);
+    line.Children().Append(left);
+    if (right) {
+        right.Margin({8, 0, 0, 0});
+        Controls::Grid::SetColumn(right, 1);
+        line.Children().Append(right);
+    }
+    return line;
+}
+
+Controls::StackPanel Across(std::initializer_list<FrameworkElement> items) {
+    Controls::StackPanel row;
+    row.Orientation(Controls::Orientation::Horizontal);
+    for (auto const& item : items) {
+        if (item) row.Children().Append(item);
+    }
+    return row;
+}
+
+std::wstring Joined(std::initializer_list<std::wstring> parts) {
+    std::wstring out;
+    for (auto const& part : parts) {
+        if (part.empty()) continue;
+        if (!out.empty()) out += L" · ";
+        out += part;
+    }
+    return out;
+}
+
+FrameworkElement SessionRow(folders::Popup const& p, ai_sessions::Row const& r, int64_t now) {
+    bool dark = Dark(p);
+    auto const& u = usage::Palette(dark);
+    std::wstring title = !r.title.empty() ? r.title : !r.project.empty() ? r.project : L"프로젝트 미확인";
+    if (!r.Live()) {
+        // ● title  client … [state ·] 마지막 턴 7.5k  30분 전
+        Controls::Border dot;
+        dot.Width(6);
+        dot.Height(6);
+        dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+        dot.Background(Media::SolidColorBrush(u.faint));
+        dot.Margin({1, 0, 8, 0});
+        dot.VerticalAlignment(VerticalAlignment::Center);
+        auto name = Text(title, kTextSize, u.text);
+        auto client = Text(Client(r), kSmallSize, u.faint);
+        client.Margin({6, 0, 0, 0});
+        std::wstring state = r.state == ai_sessions::State::kComplete ||
+                                     r.state == ai_sessions::State::kIdle
+                                 ? L""
+                                 : StateWords(r);
+        std::wstring last = r.lastTurnOutput > 0 ? L"마지막 턴 " + Compact(r.lastTurnOutput) : L"";
+        auto right = Text(Joined({state, last, Ago(now - r.liveAt)}), kSmallSize, u.faint);
+        auto line = Line(Across({dot, name, client}), right);
+        line.Margin({0, 6, 0, 6});
+        return line;
+    }
+    Controls::StackPanel rows;
+    rows.Margin({0, 8, 0, 8});
+    rows.Spacing(2);
+    // [chip] title … 4,020 tok
+    FrameworkElement tokens{nullptr};
+    if (r.turnOutput) {
+        Controls::TextBlock t;
+        t.FontFamily(Media::FontFamily{theme::kUsageFont});
+        Documents::Typography::SetNumeralAlignment(t, FontNumeralAlignment::Tabular);
+        t.Inlines().Append(Span(Tokens(*r.turnOutput), kNameSize, u.text, true));
+        t.Inlines().Append(Span(L" tok", kSmallSize, u.muted));
+        t.VerticalAlignment(VerticalAlignment::Center);
+        tokens = t;
+    }
+    rows.Children().Append(Line(Across({Chip(p, r), Text(title, kNameSize, u.text, true)}), tokens));
+    // project · Claude Code · model · effort … 턴 0:41 / 입력 대기 3:12 / 활동 3분 전
+    std::wstring timer;
+    if (r.state == ai_sessions::State::kInput) {
+        timer = L"입력 대기 " + Elapsed(now - r.liveAt);
+    } else if (r.state == ai_sessions::State::kStale) {
+        timer = L"활동 " + Ago(now - r.liveAt);
+    } else if (r.turnStartedAt) {
+        timer = L"턴 " + Elapsed(now - r.turnStartedAt);
+    }
+    std::wstring client = Joined({r.title.empty() ? L"" : r.project, Client(r),
+                                  r.model.empty() ? L"모델 기록 대기" : r.model, r.effort});
+    rows.Children().Append(Line(Text(client, kSmallSize, u.muted),
+                                timer.empty() ? FrameworkElement{nullptr}
+                                              : FrameworkElement{Text(timer, kSmallSize, u.muted)}));
+    // +1,120 tok · 1분 전 … 컨텍스트 61% 사용 [bar] / 컨텍스트 182k
+    bool output = r.lastOutputDelta > 0 && r.lastOutputAt;
+    if (output || r.contextUsed >= 0) {
+        FrameworkElement context{nullptr};
+        if (r.contextUsed >= 0 && r.contextWindow > 0) {
+            int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
+            double fraction = std::min(1.0, (double)r.contextUsed / r.contextWindow);
+            auto bar = Bar(fraction, u.track, percent >= 85 ? u.warn : u.faint);
+            bar.Width(40);
+            bar.Margin({0, 0, 6, 0});
+            bar.VerticalAlignment(VerticalAlignment::Center);
+            context = Across({bar, Text(L"컨텍스트 " + std::to_wstring(percent) + L"% 사용",
+                                        kSmallSize, percent >= 85 ? u.warn : u.faint)});
+        } else if (r.contextUsed >= 0) {
+            context = Text(L"컨텍스트 " + Compact(r.contextUsed), kSmallSize, u.faint);
+        }
+        std::wstring recent =
+            output ? L"+" + Tokens(r.lastOutputDelta) + L" tok · " + Ago(now - r.lastOutputAt) : L"";
+        rows.Children().Append(Line(Text(recent, kSmallSize, u.faint), context));
+    }
+    return rows;
+}
+
+// "입력 필요 2 · 진행 1", else nothing running.
+std::wstring Summary(std::vector<ai_sessions::Row> const& rows) {
+    int input = 0, running = 0;
+    for (auto const& r : rows) {
+        if (r.state == ai_sessions::State::kInput) {
+            input++;
+        } else if (r.Live() && r.state != ai_sessions::State::kStale) {
+            running++;
+        }
+    }
+    return Joined({input ? L"입력 필요 " + std::to_wstring(input) : L"",
+                   running ? L"진행 " + std::to_wstring(running) : L""});
+}
+
+// "세션 … 입력 필요 1 · 진행 2", then the list in a card of a fixed height.
+FrameworkElement BuildSessions(folders::Popup& p) {
+    auto const& u = usage::Palette(Dark(p));
+    Controls::StackPanel panel;
+    auto summary = Text(L"", kSmallSize, u.muted);
+    auto head = Line(Text(L"세션", kNameSize, u.text, true), summary);
+    head.Margin({2, 14, 0, 0});
+    panel.Children().Append(head);
+    Controls::StackPanel list;
+    list.Margin({kCardPadding, 2, kCardPadding, 2});
+    Controls::ScrollViewer scroll;
+    scroll.Height(kSessionsHeight);
+    scroll.VerticalScrollBarVisibility(Controls::ScrollBarVisibility::Auto);
+    scroll.HorizontalScrollBarVisibility(Controls::ScrollBarVisibility::Disabled);
+    scroll.Content(list);
+    auto card = Card(p, scroll, p.colors->field, kCardRadius, {0, 0, 0, 0});
+    card.Margin({0, kGap, 0, 0});
+    panel.Children().Append(card);
+    g_sessionsSummary = winrt::make_weak(summary);
+    g_sessionsList = winrt::make_weak(list);
+    return panel;
+}
+
+// The rows again, with the current time: only the list's content changes, so
+// it keeps where it was scrolled to.
+void RenderSessions() {
+    auto list = g_sessionsList.get();
+    auto summary = g_sessionsSummary.get();
+    if (!Ours() || !list || !summary) {
+        return;
+    }
+    folders::Popup& p = *folders::g_popup;
+    auto const& u = usage::Palette(Dark(p));
+    auto snapshot = ai_sessions::g_snapshot;
+    int64_t now = usage::Now();
+    std::vector<ai_sessions::Row> rows;
+    if (snapshot) {
+        rows.assign(snapshot->rows.begin(),
+                    snapshot->rows.begin() + std::min(snapshot->rows.size(), kMaxSessions));
+    }
+    summary.Text(Summary(rows));
+    list.Children().Clear();
+    if (rows.empty()) {
+        auto none = Text(snapshot ? L"최근 하루 동안의 Claude Code·Codex 세션이 없습니다"
+                                  : L"세션 기록을 읽는 중…",
+                         kTextSize, u.muted);
+        none.TextWrapping(TextWrapping::Wrap);
+        none.Margin({0, 10, 0, 10});
+        list.Children().Append(none);
+        return;
+    }
+    for (size_t i = 0; i < rows.size(); i++) {
+        if (i) {
+            Controls::Border separator;
+            separator.Height(1);
+            separator.Background(folders::Brush(p.colors->border));
+            list.Children().Append(separator);
+        }
+        list.Children().Append(SessionRow(p, rows[i], now));
+    }
+}
+
+void StopSessions() {
+    ai_sessions::g_wanted = false;
+    ai_sessions::g_onRows = nullptr;
+    if (g_tick) {
+        g_tick.Stop();
+        g_tick = nullptr;
+    }
+}
+
+// While the details are open: the times every second, a look every other.
+void StartSessions() {
+    if (!SessionsOn()) {
+        return;
+    }
+    ai_sessions::g_wanted = true;
+    ai_sessions::g_findNow = true;
+    ai_sessions::g_onRows = RenderSessions;
+    ai_sessions::Request();
+    g_ticks = 0;
+    g_tick = DispatcherTimer();
+    g_tick.Interval(std::chrono::seconds(1));
+    g_tick.Tick([](auto&&, auto&&) {
+        core::Guard(L"Usage sessions", [] {
+            if (!Ours() || !folders::g_popup->flyout || !folders::g_popup->flyout.IsOpen()) {
+                return StopSessions();
+            }
+            RenderSessions();
+            if (++g_ticks % kLookEveryTicks == 0) {
+                ai_sessions::Request();
+            }
+        });
+    });
+    g_tick.Start();
+}
+
+// The popup's content, made again whenever the numbers or their way change.
+void Fill(folders::Popup& p, Controls::StackPanel const& body) {
+    body.Children().Clear();
+    auto model = usage::g_model;
+    bool dark = Dark(p);
+    auto const& u = usage::Palette(dark);
+    int64_t now = usage::Now();
+
+    Controls::Grid head;
+    Controls::ColumnDefinition title, toggle;
+    toggle.Width(GridLengthHelper::Auto());
+    head.ColumnDefinitions().Append(title);
+    head.ColumnDefinitions().Append(toggle);
+    head.Margin({2, 0, 0, 2});
+    head.Children().Append(Text(L"AI 사용량", kTitleSize, u.text, true));
+    if (model && !model->accounts.empty()) {
+        auto segments = Switch(p, usage::ShowsLeft(*model));
+        Controls::Grid::SetColumn(segments, 1);
+        head.Children().Append(segments);
+    }
+    body.Children().Append(head);
+
+    if (!model || model->accounts.empty()) {
+        auto none = Text(L"Bloom이 내보낸 사용량이 없습니다", kTextSize, u.muted);
+        none.Margin({2, 4, 0, 4});
+        body.Children().Append(none);
+    }
+    double scale = g_rasterization * folders::UiScale(p.look);
+    auto labels = model ? usage::Labels(*model) : std::vector<usage::Label>{};
+    for (size_t i = 0; model && i < model->accounts.size(); i++) {
+        auto card = AccountCard(p, *model, model->accounts[i], labels[i], now, scale);
+        card.Margin({0, kGap, 0, 0});
+        body.Children().Append(card);
+    }
+    if (SessionsOn()) {
+        body.Children().Append(BuildSessions(p));
+        RenderSessions();
+    }
+}
+
+void Refresh() {
+    if (!Ours()) {
+        return;
+    }
+    if (auto body = g_body.get()) {
+        Fill(*folders::g_popup, body);
+    }
+}
+
+// Opens the details over the meter, or closes them when the click that just
+// closed them was on the meter.
+void Toggle(HWND taskbar, FrameworkElement const& anchor) {
+    if (folders::JustClosed(kKey)) {
+        return;
+    }
+    if (Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen()) {
+        return folders::HideSelf(*folders::g_popup);
+    }
+    folders::NoteTaskbarThread();
+    if (!core::g_popupDropsTimer) {
+        core::g_popupDropsTimer = folders::PopupDropsTimer;
+        g_ownsTimerHook = true;
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    folders::g_folderTaskbar = taskbar;
+    auto root = anchor.XamlRoot();
+    g_rasterization = root ? root.RasterizationScale() : 1.0;
+    folders::Popup& p = folders::NewPopup(kKey, anchor);
+    Controls::StackPanel body;
+    body.Width(kWidth);
+    g_body = winrt::make_weak(body);
+    try {
+        Fill(p, body);
+        folders::PresentBubble(p, body, kPadding, anchor, folders::TaskbarOnTop(pt));
+        folders::Keep(p, p.flyout.Closed(winrt::auto_revoke, [](auto&&, auto&&) {
+            core::Guard(L"Usage details closed", StopSessions);
+        }));
+        StartSessions();
+    } catch (...) {
+        Wh_Log(L"Usage details failed: %08X", winrt::to_hresult());
+        StopSessions();
+        folders::ClosePopup();
+    }
+}
+
+// The meter goes (an unload, new settings): its popup and everything it set up
+// with it, which the folders otherwise undo on their own unload.
+void Close() {
+    StopSessions();
+    if (Ours()) {
+        folders::ClosePopup();
+    }
+    g_body = nullptr;
+    g_sessionsSummary = nullptr;
+    g_sessionsList = nullptr;
+    folders::DropGiveBack();
+    if (g_ownsTimerHook) {
+        core::g_popupDropsTimer = nullptr;
+        folders::g_popupHeld = nullptr;
+        g_ownsTimerHook = false;
+    }
+}
+
+}  // namespace usage_detail
 
 // ============================================================================
 namespace panels {
