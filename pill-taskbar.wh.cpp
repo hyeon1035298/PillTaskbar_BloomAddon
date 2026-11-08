@@ -20152,6 +20152,45 @@ void Restore() {
     }
 }
 
+// ---- explorer: tray icon menus (SystemTray.dll, taskbar thread) ---------------------
+// A tray icon's right-click menu (volume, network, the clock and bell, battery,
+// language) is a XAML MenuFlyout. ContextMenuPositionHelper::GetShowPosition puts its
+// right edge at the XAML root's width less a margin: the taskbar's right end, where
+// the stock tray ends. The tray's own right edge takes the width's place. Icons in the
+// overflow flyout are not under the tray frame and keep Windows' place.
+
+using GetShowPosition_t = void*(WINAPI*)(void* point, int location, double margin,
+                                          void* grid, double width, double height);
+GetShowPosition_t GetShowPosition_Original;
+
+void* WINAPI GetShowPosition_Hook(void* point, int location, double margin, void* grid,
+                                  double width, double height) {
+    // WindowsUdk TaskbarLocation: 1 top, 3 bottom.
+    if ((location == 1 || location == 3) && grid && !core::g_unloading) {
+        core::Guard(L"Tray menu", [&] {
+            auto icon = core::FromAbi(*(void**)grid);
+            auto tray = core::FindAncestor(icon, [](auto& p) {
+                return core::IsClass(p, L"SystemTray.SystemTrayFrame");
+            });
+            if (tray && tray.ActualWidth() > 0) {
+                auto r = tray.TransformToVisual(nullptr).TransformBounds(
+                    {0, 0, (float)tray.ActualWidth(), (float)tray.ActualHeight()});
+                double right = r.X + r.Width;
+                if (right > 0 && right < width) {
+                    width = right;
+                }
+            }
+        });
+    }
+    return GetShowPosition_Original(point, location, margin, grid, width, height);
+}
+
+void CollectSystemTray(std::vector<WindhawkUtils::SYMBOL_HOOK>& list) {
+    list.push_back(
+        {{LR"(struct winrt::Windows::Foundation::Point __cdecl ContextMenuPositionHelper::GetShowPosition(enum winrt::WindowsUdk::UI::Shell::TaskbarLocation,double,struct winrt::Windows::UI::Xaml::Controls::Grid const &,double,double))"},
+         &GetShowPosition_Original, GetShowPosition_Hook, true});
+}
+
 // ---- ShellHost: Quick Settings -------------------------------------------------------
 
 std::atomic<bool> g_on;  // the setting, in ShellHost
@@ -20945,6 +20984,9 @@ void Collect() {
         g_systemTrayHooks.push_back(
             {{LR"(public: __cdecl winrt::SystemTray::implementation::IconView::IconView(void))"},
              &IconView_IconView_Original, IconView_IconView_Hook});
+    }
+    if (g_features.panels) {
+        panels::CollectSystemTray(g_systemTrayHooks);
     }
 }
 
