@@ -9160,18 +9160,23 @@ MeterOutline const& OutlineOf(int kind) {
         }
         return o;
     }();
+    // The processor's pins end where the module's body and feet do, so both stand as tall
+    // and as wide.
     static const MeterOutline cpu = [] {
-        MeterOutline o{{3.1f, 2.6f, kMeterW - 6.2f, kMeterH - 5.2f}, 2.8f, {}};
-        float reach = 2.3f;
-        float bottom = o.body.y + o.body.h - kMeterStroke / 2;
+        Box4 b = ram.body;
+        float bottom = ram.pins[0].y + ram.pins[0].h;
+        float reach = 1.8f;  // how far the pins stand out of the body
+        MeterOutline o{{b.x + reach, b.y + reach, b.w - 2 * reach, bottom - b.y - 2 * reach}, 2.8f, {}};
+        float cx = o.body.x + o.body.w / 2, cy = o.body.y + o.body.h / 2;
+        float lower = o.body.y + o.body.h - kMeterStroke / 2;
         float right = o.body.x + o.body.w - kMeterStroke / 2;
         for (float x : {-5.2f, 0.0f, 5.2f}) {
-            o.pins.push_back({kMeterW / 2 + x - kPinW / 2, o.body.y - reach, kPinW, reach + kMeterStroke / 2});
-            o.pins.push_back({kMeterW / 2 + x - kPinW / 2, bottom, kPinW, reach + kMeterStroke / 2});
+            o.pins.push_back({cx + x - kPinW / 2, o.body.y - reach, kPinW, reach + kMeterStroke / 2});
+            o.pins.push_back({cx + x - kPinW / 2, lower, kPinW, reach + kMeterStroke / 2});
         }
         for (float y : {-2.6f, 2.6f}) {
-            o.pins.push_back({o.body.x - reach, kMeterH / 2 + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
-            o.pins.push_back({right, kMeterH / 2 + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
+            o.pins.push_back({o.body.x - reach, cy + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
+            o.pins.push_back({right, cy + y - kPinW / 2, reach + kMeterStroke / 2, kPinW});
         }
         return o;
     }();
@@ -9433,11 +9438,11 @@ void DrawContent(Island& g,
             }
             x = left + m.width + gap;
         }
-        float boxGap = std::round(4 * c.unit);
+        // Memory and CPU are two items, as far apart as any two.
         for (auto [kind, percent] : c.system) {
             DrawSystem(g, dc, kind, percent, c.systemStyle, x, std::round((h - kMeterH * c.unit) / 2),
                        c.unit);
-            x += kMeterW * c.unit + boxGap;
+            x += kMeterW * c.unit + gap;
         }
         dc->PopAxisAlignedClip();
     });
@@ -9589,9 +9594,8 @@ Content Measure(Island& g, float height, float room, settings::Slot slot) {
             }
             c.systemStyle = f.style;
             c.unit = std::round(height * (float)theme::kIslandSystemSize) / kMeterH;
-            float n = (float)c.system.size();
-            add(n * kMeterW * c.unit + (n - 1) * std::round(4 * c.unit));
             for (auto [kind, percent] : c.system) {
+                add(kMeterW * c.unit);
                 c.key += std::to_wstring(kind) + L":" + std::to_wstring(percent) + L",";
             }
             c.key += std::to_wstring(f.style) + std::to_wstring((int)DarkIsland());
