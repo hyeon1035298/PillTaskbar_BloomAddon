@@ -109,6 +109,31 @@ island.showMedia	Show playing track
 island.showMedia#about	Shows album art and title when the media player is on
 island.showUsage	Show AI usage
 island.showUsage#about	Shows when Bloom usage is on and the Bloom file exists
+island.showMemory	Show memory use
+island.showMemory#about	Shows while the Memory Clean add-on is on, drawn like its taskbar icon
+island.showCpu	Show CPU use
+island.showCpu#about	Shows while the Memory Clean add-on is on
+island.clockAt	Clock on
+island.clockAt#about	The middle island, or an island against the left or right corner of the screen
+island.clockAt=center	Middle
+island.clockAt=left	Left
+island.clockAt=right	Right
+island.mediaAt	Playing track on
+island.mediaAt=center	Middle
+island.mediaAt=left	Left
+island.mediaAt=right	Right
+island.usageAt	AI usage on
+island.usageAt=center	Middle
+island.usageAt=left	Left
+island.usageAt=right	Right
+island.memoryAt	Memory use on
+island.memoryAt=center	Middle
+island.memoryAt=left	Left
+island.memoryAt=right	Right
+island.cpuAt	CPU use on
+island.cpuAt=center	Middle
+island.cpuAt=left	Left
+island.cpuAt=right	Right
 island.height	Height (px)
 island.height#about	At 100% scale, from 20 to 60
 island.width	Width (px)
