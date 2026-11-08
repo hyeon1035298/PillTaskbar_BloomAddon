@@ -394,6 +394,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 
 #undef GetCurrentTime
 
+#include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.Numerics.h>
@@ -18661,6 +18662,48 @@ void LetGo() {
     g_open.reset();
 }
 
+// While the popup shows, an error XAML meets in its own pass (which would end
+// explorer) is written to the diagnostics in XAML's words. Where explorer's
+// XAML has an application, the error is marked handled and the popup goes.
+void WatchErrors(folders::Popup& p) {
+    try {
+        if (auto app = Application::Current()) {
+            folders::Keep(p, app.UnhandledException(
+                                 winrt::auto_revoke, [](auto&&, UnhandledExceptionEventArgs const& e) {
+                                     core::Guard(L"Usage details error", [&] {
+                                         if (!Ours()) {
+                                             return;
+                                         }
+                                         core::DiagLine(L"Usage details XAML error %08X: %s",
+                                                        (int32_t)e.Exception(), e.Message().c_str());
+                                         e.Handled(true);
+                                         core::Post([] {
+                                             if (Ours()) {
+                                                 LetGo();
+                                             }
+                                         });
+                                     });
+                                 }));
+        }
+    } catch (...) {
+    }
+    try {
+        folders::Keep(p, winrt::Windows::ApplicationModel::Core::CoreApplication::UnhandledErrorDetected(
+                             winrt::auto_revoke, [](auto&&, auto const& e) {
+                                 if (!Ours()) {
+                                     return;
+                                 }
+                                 try {
+                                     e.UnhandledError().Propagate();  // only to read it
+                                 } catch (...) {
+                                     core::DiagLine(L"Usage details XAML error %08X: %s",
+                                                    winrt::to_hresult(), winrt::to_message().c_str());
+                                 }
+                             }));
+    } catch (...) {
+    }
+}
+
 void Refresh() {
     if (!Ours()) {
         return;
@@ -18727,6 +18770,7 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
                 });
             });
         }));
+        WatchErrors(p);
         if (!Settle(L"open")) {
             return;
         }
