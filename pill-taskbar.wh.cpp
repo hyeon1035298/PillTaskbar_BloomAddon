@@ -5364,6 +5364,102 @@ void EvaluateCenter() {
     core::DiagLine(L"Notification center holds %p", g_centerTaskbar);
 }
 
+// ---- a closed window's focus ------------------------------------------------------------
+// A window opened from the taskbar (Settings from a tray icon's menu) hands the focus
+// back to the taskbar as it closes, and Windows keeps an auto-hidden taskbar out while
+// it has the focus, until another window is clicked. When the front window before the
+// taskbar closed, hid or went down and the pointer is not on the taskbar, the focus
+// goes on to the next window on its monitor, else the desktop, so the taskbar goes in.
+// A taskbar taken by a click or a key (Win+T) keeps it: the window before is still there.
+
+HWND g_front, g_frontBefore;  // taskbar thread
+
+bool Gone(HWND window) {
+    DWORD cloaked = 0;
+    return !IsWindow(window) || !IsWindowVisible(window) || IsIconic(window) ||
+           (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+            cloaked);
+}
+
+// The highest window on `monitor` that a click could have put in front: shown, not a
+// tool window, not the taskbar's, not cloaked.
+HWND NextWindowOn(HMONITOR monitor) {
+    for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        if (Gone(w) || core::IsTaskbarWindow(w) || w == GetShellWindow() ||
+            (GetWindowLongPtr(w, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) ||
+            MonitorFromWindow(w, MONITOR_DEFAULTTONULL) != monitor) {
+            continue;
+        }
+        return w;
+    }
+    return nullptr;
+}
+
+// A closing window gives up the focus before it hides: while the taskbar stays in
+// front, the window before is looked at again every kFrontLookMs, kFrontLooks times.
+constexpr UINT kFrontLookMs = 100;
+constexpr int kFrontLooks = 10;
+UINT_PTR g_frontTimer;
+int g_frontLooks;
+
+void EndFrontLook() {
+    if (g_frontTimer) {
+        KillTimer(nullptr, std::exchange(g_frontTimer, 0));
+    }
+}
+
+// True when it is settled: the focus moved on, or there is nothing to do.
+bool MoveFocusFromTaskbar() {
+    HWND front = g_front;
+    APPBARDATA data{.cbSize = sizeof(data)};
+    if (!Active() || !front || !core::IsTaskbarWindow(front) || !g_frontBefore ||
+        !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE)) {
+        return true;
+    }
+    // A later event replaces g_front; until then, a lagging foreground or a window
+    // before that is still closing is looked at again.
+    if (GetForegroundWindow() != front || !Gone(g_frontBefore)) {
+        return false;
+    }
+    POINT pt;
+    RECT bar;
+    if (!GetCursorPos(&pt) || !GetWindowRect(front, &bar) || PtInRect(&bar, pt)) {
+        return true;
+    }
+    HWND next = NextWindowOn(core::MonitorOf(front));
+    HWND to = next ? next : GetShellWindow();
+    bool moved = to && SetForegroundWindow(to);
+    core::DiagLine(L"Taskbar %p in front after %p went: focus to %p %d", front, g_frontBefore,
+                   to, moved);
+    return true;
+}
+
+void CALLBACK FrontLook(HWND, UINT, UINT_PTR, DWORD) {
+    core::Guard(L"Taskbar front", [] {
+        if (MoveFocusFromTaskbar() || --g_frontLooks <= 0) {
+            EndFrontLook();
+        }
+    });
+}
+
+// `front` is the event's window: explorer's GetForegroundWindow still names the
+// window before for a moment after the event. No window, as one closes, is skipped.
+void EvaluateTaskbarFront(HWND front) {
+    if (!front || !IsWindow(front) || front == g_front) {
+        return;
+    }
+    g_frontBefore = std::exchange(g_front, front);
+    EndFrontLook();
+    if (core::IsTaskbarWindow(front)) {
+        core::DiagLine(L"Taskbar %p in front after %p (gone %d)", front, g_frontBefore,
+                       g_frontBefore && Gone(g_frontBefore));
+    }
+    if (!MoveFocusFromTaskbar()) {
+        g_frontLooks = kFrontLooks;
+        g_frontTimer = SetTimer(nullptr, 0, kFrontLookMs, FrontLook);
+    }
+}
+
 // The held taskbar's hide check skips its ticks while the pointer is on the panel
 // or on the way to it; on the taskbar the check keeps it out itself. A tick that
 // would take the taskbar in closes the panel instead, and the taskbar follows once
@@ -5434,6 +5530,7 @@ void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWORD,
         core::Post([window] {
             EvaluateForeground();
             EvaluateCenter();
+            EvaluateTaskbarFront(window);
             if (window == GetForegroundWindow()) {
                 return;
             }
@@ -5509,6 +5606,8 @@ void UnwatchLauncher() {
     core::g_dropsTimer = nullptr;
     EndCenter();
     EndLauncherLook();
+    EndFrontLook();
+    g_front = g_frontBefore = nullptr;
     if (HWINEVENTHOOK hook = std::exchange(g_foregroundHook, nullptr)) {
         if (!UnhookWinEvent(hook)) {
             g_leftoverHook = hook;
