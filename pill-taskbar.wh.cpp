@@ -219,7 +219,10 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 사용량 끝에서 오른쪽 트레이 아이콘까지의 간격입니다
   - sessions: true
     $name: 자세한 창에 세션 보기
-    $description: 사용량을 클릭해 여는 창에 이 PC의 Claude Code·Codex 세션(진행 상태, 이번 턴 토큰, 컨텍스트)을 보여 줍니다. 창이 열려 있는 동안에만 각 도구의 세션 기록 끝부분을 읽고, 대화 내용은 읽지 않습니다
+    $description: 사용량을 클릭해 여는 창에 이 PC의 Claude Code·Codex 세션(진행 상태, 이번 턴 토큰, 컨텍스트)을 보여 줍니다. 창이 열려 있는 동안에만 각 도구의 세션 기록 끝부분을 읽고, 대화 내용은 읽지 않습니다(아래 채팅 패널을 켜면 고른 세션의 최근 대화만 읽습니다)
+  - chat: false
+    $name: 세션 채팅 패널 (실험)
+    $description: 자세한 창에서 세션을 누르면 창이 넓어지며 오른쪽에 그 세션의 최근 대화와 입력창이 나옵니다(오른쪽 클릭은 세션 정보). 거기서 답장하거나 진행 중인 턴에 끼워 넣고, 모델·노력·울트라코드·권한을 바꾸고, 새 세션을 엽니다. 보내기와 바꾸기는 Claude 데스크톱 앱과 Codex 앱의 화면을 UI 자동화로 대신 조작해 앱이 하게 하며, 토큰이나 자격 증명은 건드리지 않습니다. 약관상 그레이존입니다. Anthropic 소비자 약관은 API 키나 명시적 허락 없이 자동·비인간 수단(봇, 스크립트 등)으로 서비스에 접근하는 것을 막고 있어, 사람이 고른 글을 앱 화면에 대신 넣는 이 방식이 해당하는지 분명하지 않습니다. 쓰는 책임은 사용자에게 있습니다. 세션 보기가 켜져 있어야 동작합니다
   $name: 사용량
 - island:
   - enabled: true
@@ -426,6 +429,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 #include <shlguid.h>  // shlobj.h leaves it out under INITGUID
 #include <shlwapi.h>
 #include <tlhelp32.h>
+#include <uiautomation.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -537,6 +541,7 @@ struct Settings {
             LogoColor logoColor;
             int gapBefore, gapAfter;  // px, beside the meter in the tray
             bool sessions;            // the details list Claude Code and Codex sessions
+            bool chat;                // a picked session opens its chat panel beside them
             bool operator==(const Usage&) const = default;
         } usage;
         struct Island {
@@ -645,6 +650,7 @@ void Load() {
     g.usage.gapBefore = Clamped(L"usage.gapBefore", 0, 100);
     g.usage.gapAfter = Clamped(L"usage.gapAfter", 0, 100);
     g.usage.sessions = Wh_GetIntSetting(L"usage.sessions");
+    g.usage.chat = Wh_GetIntSetting(L"usage.chat");
 
     g.island.enabled = Wh_GetIntSetting(L"island.enabled");
     g.island.white = Choice(L"island.color", {L"black", L"white"}) == 1;
@@ -14636,6 +14642,9 @@ struct Popup {
     std::shared_ptr<void> foreground;  // the foreground hook while it shows
     wux::DispatcherTimer watch{nullptr};  // WatchTick, while it shows
     bool activating = false;  // its taskbar was asked to the front since the pointer came onto it
+    // Until then another window coming to the front leaves it open: one it
+    // asked for itself (the usage details' chat opening an app's session).
+    ULONGLONG keepUntil = 0;
     // Every handler the popup attached, revoked as these go: XAML raises some events
     // (LostFocus) after the fact, and none may reach a closed popup or unloaded code.
     std::vector<std::shared_ptr<void>> handlers;
@@ -15038,6 +15047,7 @@ void CALLBACK OnForeground(HWINEVENTHOOK hook, DWORD, HWND window, LONG, LONG, D
         // Outside whatever XAML call let the event in.
         RunOnTaskbar([hook, name = ClassOf(window)] {
             if (!g_popup || g_popup->foreground.get() != hook || !g_popup->flyout.IsOpen()) return;
+            if (GetTickCount64() < g_popup->keepUntil) return;
             core::DiagLine(L"Popup closes: foreground %s", name.c_str());
             HideSelf(*g_popup);
         });
@@ -15051,7 +15061,8 @@ void ReleasePopupHold();
 
 // Shows the popup's flyout over the taskbar, in its own window: the taskbar's XAML root
 // is only as tall as the taskbar. It opens on the chosen side, `gap` from the button.
-void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
+// `shiftX` moves it off the anchor's middle (its window holds more on one side).
+void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop, double shiftX) {
     p.anchor = winrt::make_weak(anchor);
     p.taskbarOnTop = taskbarOnTop;
     p.taskbar = g_folderTaskbar;
@@ -15108,7 +15119,7 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
     options.Placement(below ? wux::Controls::Primitives::FlyoutPlacementMode::Bottom
                             : wux::Controls::Primitives::FlyoutPlacementMode::Top);
     options.Position(wf::IReference<wf::Point>(wf::Point{
-        float(anchor.ActualWidth() / 2), below ? float(anchor.ActualHeight()) + offset : -offset}));
+        float(anchor.ActualWidth() / 2 + shiftX), below ? float(anchor.ActualHeight()) + offset : -offset}));
     p.flyout.ShowAt(anchor, options);
     Wh_Log(L"popup shows, open: %d", p.flyout.IsOpen());
 }
@@ -15153,7 +15164,7 @@ void PresentBubble(Popup& p, const wux::FrameworkElement& body, double padding,
     flyout.FlyoutPresenterStyle(BarePresenter());
     flyout.Content(Scaled(p, BuildBubble(p, body, padding)));
     p.flyout = flyout;
-    Present(p, anchor, taskbarOnTop);
+    Present(p, anchor, taskbarOnTop, 0);
 }
 
 void ShowRenamePopup(const std::wstring& folder, const wux::FrameworkElement& anchor,
@@ -17099,9 +17110,10 @@ namespace ai_sessions {
 // for the usage details: each recent session's state, its turn's output tokens
 // and how full its context is. The reading follows TokenCat's (MIT, see
 // THIRD_PARTY.md), cut down: only the tail of each log, and of it only usage
-// numbers, times, ids, titles and model names, never what was said. Nothing is
-// read unless the details are open. A worker reads (one at a time); the rows go
-// to the taskbar thread.
+// numbers, times, ids, titles and model names, never what was said; only the
+// chat panel, when it is on, reads the one session picked in it (Conversation,
+// at the end). Nothing is read unless the details are open. A worker reads (one
+// at a time); the rows go to the taskbar thread.
 
 namespace wdj = winrt::Windows::Data::Json;
 
@@ -17231,6 +17243,7 @@ struct Log {
     std::string partial;  // an unfinished last line
 
     std::wstring sessionId, project, projectPath, model, effort;
+    std::wstring sandbox, approval;  // Codex: its turn's sandbox and approval policy
     std::wstring customTitle, aiTitle, summary;  // Claude, in that order of rank
 
     // The turn.
@@ -17615,6 +17628,12 @@ void Codex(Log& g, wdj::JsonObject const& record, int64_t at) {
         }
         if (!effort.empty()) {
             g.effort = effort;
+        }
+        if (auto sandbox = Label(Str(Child(payload, L"sandbox_policy"), L"type")); !sandbox.empty()) {
+            g.sandbox = sandbox;
+        }
+        if (auto approval = Label(Str(payload, L"approval_policy")); !approval.empty()) {
+            g.approval = approval;
         }
         g.SetProject(Str(payload, L"cwd"));
         // A turn whose start fell before the tail is known by its context.
@@ -18372,6 +18391,11 @@ struct Row {
     std::vector<Row> children;  // sessions it started (the desktop app's side sessions)
     size_t agentsTotal = 0;     // its subagents of the last hour, read or not
     std::wstring spawnedBy;     // the log id of the session that started it
+    // For the chat panel: its log, and for a session of the Claude desktop app
+    // its record there (id, the title its pane shows, permission mode,
+    // Ultracode: -1 unknown); Codex's sandbox and approval policy.
+    std::wstring logPath, record, appTitle, mode, sandbox, approval;
+    int ultracode = -1;
     int64_t liveAt = 0, turnStartedAt = 0, lastOutputAt = 0;
     int lastOutputDelta = 0, lastTurnOutput = 0;
     std::optional<int> turnOutput;
@@ -18399,34 +18423,22 @@ std::atomic<bool> g_wanted;  // the details are open
 [[clang::no_destroy]] std::shared_ptr<const Snapshot> g_snapshot;  // taskbar thread
 void (*g_onRows)() = nullptr;  // taskbar thread
 
-// ---- sessions another session started (worker) -------------------------------
+// ---- the Claude desktop app's records (worker) ---------------------------------
 // The Claude desktop app keeps a record per session in %APPDATA%\Claude\
 // claude-code-sessions\<account>\<org>\local_<id>.json: its log's id
-// ("cliSessionId") and, for one another session started, "spawnedFrom":
-// {"sessionId":"local_…"}. Only those two are looked for, in the bytes of the
-// records written in the last day; a record is read again only when it changes.
+// ("cliSessionId"), for one another session started "spawnedFrom":
+// {"sessionId":"local_…"}, and the title, model, effort, permission mode and
+// Ultracode it shows. Only these are taken from the records written in the
+// last day; a record is read again only when it changes.
 
 struct Spawn {
     int64_t written = 0;
     std::wstring log, parent;  // its log's id, and the record id of the session that started it
+    std::wstring title, model, effort, mode;
+    int ultracode = -1;
 };
 [[clang::no_destroy]] std::unordered_map<std::wstring, Spawn> g_spawns;  // by record id; under g_lock
 constexpr size_t kMaxRecordBytes = 512 * 1024;
-
-// The string after `"key":` from `from` on; empty when there is none.
-std::string JsonString(std::string const& bytes, std::string_view key, size_t from = 0) {
-    std::string needle = "\"" + std::string(key) + "\"";
-    size_t at = bytes.find(needle, from);
-    if (at == std::string::npos) return {};
-    at = bytes.find_first_not_of(" \t\r\n:", at + needle.size());
-    if (at == std::string::npos || bytes[at] != '"') return {};
-    size_t end = bytes.find('"', at + 1);
-    return end == std::string::npos || end - at > 128 ? std::string() : bytes.substr(at + 1, end - at - 1);
-}
-
-std::wstring Ascii(std::string const& text) {
-    return std::wstring(text.begin(), text.end());
-}
 
 void FindSpawns(int64_t now) {
     std::wstring app = Env(L"APPDATA");
@@ -18454,12 +18466,25 @@ void FindSpawns(int64_t now) {
                                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
         std::string bytes;
-        if (!file || !ReadAt(file.get(), 0, (size_t)f.size, bytes)) {
+        wdj::JsonObject record{nullptr};
+        if (!file || !ReadAt(file.get(), 0, (size_t)f.size, bytes) ||
+            !wdj::JsonObject::TryParse(Widen(bytes), record)) {
             continue;
         }
-        Spawn spawn{f.written, Ascii(JsonString(bytes, "cliSessionId")), {}};
-        if (size_t from = bytes.find("\"spawnedFrom\""); from != std::string::npos) {
-            spawn.parent = Ascii(JsonString(bytes, "sessionId", from));
+        Spawn spawn;
+        spawn.written = f.written;
+        spawn.log = Label(Str(record, L"cliSessionId"));
+        spawn.parent = Label(Str(Child(record, L"spawnedFrom"), L"sessionId"));
+        // As is: the app's pane is found by it.
+        if (auto title = Str(record, L"title"); title.size() <= 400) spawn.title = title;
+        spawn.model = CleanTitle(Str(record, L"model"));
+        spawn.effort = Label(Str(record, L"effort"));
+        spawn.mode = Label(Str(record, L"permissionMode"));
+        if (auto settings = Child(record, L"sessionSettings")) {
+            if (auto value = settings.TryLookup(L"ultracode");
+                value && value.ValueType() == wdj::JsonValueType::Boolean) {
+                spawn.ultracode = value.GetBoolean();
+            }
         }
         if (!spawn.log.empty()) {
             next.emplace(id, std::move(spawn));
@@ -18587,6 +18612,21 @@ Row RowOf(Log const& g, int64_t now) {
     }
     r.model = g.model;
     r.effort = g.effort;
+    r.logPath = g.path;
+    r.sandbox = g.sandbox;
+    r.approval = g.approval;
+    if (!g.subagent && g.source == Source::kClaude) {
+        for (auto const& [id, spawn] : g_spawns) {
+            if (_wcsicmp(spawn.log.c_str(), g.sessionId.c_str()) != 0) continue;
+            r.record = id;
+            r.appTitle = spawn.title;
+            r.mode = spawn.mode;
+            r.ultracode = spawn.ultracode;
+            if (!spawn.model.empty()) r.model = spawn.model;
+            if (!spawn.effort.empty()) r.effort = spawn.effort;
+            break;
+        }
+    }
     r.liveAt = g.LiveAt();
     r.turnStartedAt = g.TurnOpen() ? g.activityStartedAt : 0;
     r.lastOutputAt = g.lastOutputAt;
@@ -18746,7 +18786,1129 @@ void Request() {
     });
 }
 
+// ---- one session's recent conversation, for the chat panel (worker) --------------------
+// Read only with the chat panel on and a session picked in it: the end of that
+// one log, and of it what the person wrote, the answers' text and the tools'
+// names. Read again as the log grows; let go as the panel closes.
+
+struct Said {
+    enum class Who { kMe, kReply, kTool };
+    Who who = Who::kReply;
+    std::wstring text;  // a tool line: the tools' names
+    int64_t at = 0;
+    bool steered = false;  // sent while a turn ran
+    int tools = 1;         // tools in a row, one line
+};
+
+constexpr uint64_t kChatTailBytes = 512 * 1024;
+constexpr size_t kChatKeep = 40;
+constexpr size_t kSaidChars = 1500;
+
+struct Conversation {
+    Source source = Source::kClaude;
+    std::wstring path;
+    uint64_t offset = 0;
+    int64_t created = 0;
+    bool started = false;
+    std::string partial;
+    std::vector<Said> said;
+};
+
+// Line ends as \n, no blank runs of more than one line, no space at the ends.
+std::wstring Tidy(std::wstring text) {
+    std::erase(text, L'\r');
+    std::wstring out;
+    int newlines = 0;
+    for (WCHAR c : text) {
+        if (c == L'\n') {
+            if (++newlines > 2) continue;
+        } else {
+            newlines = 0;
+        }
+        out += c;
+    }
+    size_t start = out.find_first_not_of(L" \t\n"), end = out.find_last_not_of(L" \t\n");
+    return start == std::wstring::npos ? L"" : out.substr(start, end - start + 1);
+}
+
+void Say(Conversation& c, Said::Who who, std::wstring text, int64_t at, bool steered = false) {
+    text = Tidy(std::move(text));
+    if (text.empty()) return;
+    if (text.size() > kSaidChars) text = text.substr(0, kSaidChars - 1) + L"…";
+    if (who == Said::Who::kTool && !c.said.empty() && c.said.back().who == Said::Who::kTool) {
+        Said& last = c.said.back();
+        last.tools++;
+        if (last.text.size() < 60 && last.text.find(text) == std::wstring::npos) last.text += L", " + text;
+        last.at = at;
+        return;
+    }
+    c.said.push_back({who, std::move(text), at, steered});
+    if (c.said.size() > kChatKeep) c.said.erase(c.said.begin());
+}
+
+void TakeClaude(Conversation& c, wdj::JsonObject const& r, int64_t at) {
+    if (True(r, L"isSidechain") || True(r, L"isMeta") || True(r, L"isCompactSummary")) return;
+    std::wstring type = Str(r, L"type");
+    if (type == L"attachment") {
+        auto a = Child(r, L"attachment");
+        if (Str(a, L"type") == L"queued_command" && Str(Child(a, L"origin"), L"kind") == L"human") {
+            Say(c, Said::Who::kMe, Str(a, L"prompt"), at, true);
+        }
+        return;
+    }
+    auto message = Child(r, L"message");
+    auto content = message ? message.TryLookup(L"content") : nullptr;
+    if (!content) return;
+    if (type == L"user") {
+        std::wstring text;
+        auto add = [&](std::wstring part) {
+            part = Tidy(std::move(part));
+            // The app's and the harness's own insertions come as tags.
+            if (part.empty() || part[0] == L'<' || part.starts_with(L"[Request interrupted")) return;
+            text += (text.empty() ? L"" : L"\n") + part;
+        };
+        if (content.ValueType() == wdj::JsonValueType::String) {
+            add(std::wstring(content.GetString()));
+        } else if (content.ValueType() == wdj::JsonValueType::Array) {
+            for (auto const& item : content.GetArray()) {
+                auto o = Object(item);
+                std::wstring kind = Str(o, L"type");
+                if (kind == L"tool_result") return;
+                if (kind == L"text") add(Str(o, L"text"));
+                if (kind == L"image") text += (text.empty() ? L"" : L" ") + std::wstring(L"[이미지]");
+            }
+        }
+        Say(c, Said::Who::kMe, text, at);
+    } else if (type == L"assistant" && content.ValueType() == wdj::JsonValueType::Array) {
+        for (auto const& item : content.GetArray()) {
+            auto o = Object(item);
+            std::wstring kind = Str(o, L"type");
+            if (kind == L"text") Say(c, Said::Who::kReply, Str(o, L"text"), at);
+            if (kind == L"tool_use") Say(c, Said::Who::kTool, Str(o, L"name"), at);
+        }
+    }
+}
+
+void TakeCodex(Conversation& c, wdj::JsonObject const& r, int64_t at) {
+    if (Str(r, L"type") != L"response_item") return;
+    auto p = Child(r, L"payload");
+    std::wstring item = Str(p, L"type");
+    if (item == L"message") {
+        std::wstring role = Str(p, L"role");
+        if (role != L"user" && role != L"assistant") return;
+        std::wstring text;
+        for (auto const& o : Objects(p, L"content")) {
+            std::wstring kind = Str(o, L"type");
+            if (kind == L"input_text" || kind == L"output_text" || kind == L"text") {
+                std::wstring part = Tidy(Str(o, L"text"));
+                // Codex's own insertions: its environment, the AGENTS.md text.
+                if (role == L"user" && (part.empty() || part[0] == L'<' || part.starts_with(L"# AGENTS.md"))) continue;
+                text += (text.empty() ? L"" : L"\n") + part;
+            } else if (kind == L"input_image") {
+                text += (text.empty() ? L"" : L" ") + std::wstring(L"[이미지]");
+            }
+        }
+        Say(c, role == L"user" ? Said::Who::kMe : Said::Who::kReply, text, at);
+    } else if (item == L"function_call" || item == L"custom_tool_call") {
+        Say(c, Said::Who::kTool, Str(p, L"name"), at);
+    } else if (item == L"local_shell_call" || item == L"web_search_call") {
+        Say(c, Said::Who::kTool, item.substr(0, item.size() - 5), at);
+    }
+}
+
+void TakeLine(Conversation& c, std::string_view line) {
+    if (line.empty() || line.size() > kMaxLine) return;
+    // Most lines are tool output; those are passed over unparsed.
+    bool claude = c.source == Source::kClaude;
+    if (claude ? (line.find("\"type\":\"user\"") == std::string_view::npos &&
+                  line.find("\"type\":\"assistant\"") == std::string_view::npos &&
+                  line.find("\"queued_command\"") == std::string_view::npos) ||
+                     line.find("\"type\":\"tool_result\"") != std::string_view::npos
+               : line.find("\"type\":\"response_item\"") == std::string_view::npos ||
+                     line.find("_output\"") != std::string_view::npos ||
+                     line.find("\"type\":\"reasoning\"") != std::string_view::npos) {
+        return;
+    }
+    wdj::JsonObject record{nullptr};
+    if (!wdj::JsonObject::TryParse(Widen(line), record)) return;
+    int64_t at = TimeOf(record, L"timestamp");
+    claude ? TakeClaude(c, record, at) : TakeCodex(c, record, at);
+}
+
+// Reads what the log added since the last look, its tail at first; false when
+// nothing changed. A replaced or shorter log starts over.
+bool Update(Conversation& c) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (c.path.empty() || !GetFileAttributesExW(c.path.c_str(), GetFileExInfoStandard, &data)) return false;
+    uint64_t size = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
+    int64_t created = Unix(data.ftCreationTime);
+    if (c.started && (created != c.created || size < c.offset)) {
+        c.started = false;
+        c.partial.clear();
+        c.said.clear();
+    }
+    if (c.started && size == c.offset) return false;
+    bool cut = false;
+    if (!c.started || size - c.offset > kChatTailBytes) {
+        c.started = true;
+        c.created = created;
+        c.partial.clear();
+        c.offset = size > kChatTailBytes ? size - kChatTailBytes : 0;
+        cut = c.offset > 0;
+    }
+    winrt::file_handle file{CreateFileW(c.path.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    std::string bytes;
+    if (!file || !ReadAt(file.get(), c.offset, (size_t)(size - c.offset), bytes)) return false;
+    c.offset += bytes.size();
+    std::string text = std::move(c.partial);
+    c.partial.clear();
+    text += bytes;
+    std::string_view view(text);
+    size_t start = 0;
+    if (cut) {
+        size_t first = view.find('\n');
+        start = first == std::string_view::npos ? view.size() : first + 1;
+    }
+    while (start < view.size()) {
+        size_t next = view.find('\n', start);
+        if (next == std::string_view::npos) {
+            c.partial.assign(view.substr(start));
+            break;
+        }
+        TakeLine(c, view.substr(start, next - start));
+        start = next + 1;
+    }
+    return true;
+}
+
+// ---- Codex's models (worker) ------------------------------------------------------------
+// The models the Codex app lists and each one's reasoning levels, from the
+// cache Codex keeps of them (models_cache.json in its home).
+
+struct CodexModel {
+    std::wstring slug, name, standard;
+    std::vector<std::wstring> efforts;
+};
+
+std::vector<CodexModel> CodexModels() {
+    std::vector<CodexModel> out;
+    std::wstring home = CodexHome();
+    if (home.empty()) return out;
+    std::wstring path = home + L"\\models_cache.json";
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) || data.nFileSizeHigh ||
+        data.nFileSizeLow > 4 * 1024 * 1024) {
+        return out;
+    }
+    winrt::file_handle file{CreateFileW(path.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    std::string bytes;
+    wdj::JsonObject root{nullptr};
+    if (!file || !ReadAt(file.get(), 0, data.nFileSizeLow, bytes) || !wdj::JsonObject::TryParse(Widen(bytes), root)) {
+        return out;
+    }
+    std::vector<std::pair<double, CodexModel>> listed;
+    for (auto const& m : Objects(root, L"models")) {
+        if (Str(m, L"visibility") != L"list") continue;
+        CodexModel model;
+        model.slug = Label(Str(m, L"slug"));
+        model.name = CleanTitle(Str(m, L"display_name"));
+        model.standard = Label(Str(m, L"default_reasoning_level"));
+        for (auto const& level : Objects(m, L"supported_reasoning_levels")) {
+            if (auto effort = Label(Str(level, L"effort")); !effort.empty()) model.efforts.push_back(effort);
+        }
+        if (model.slug.empty()) continue;
+        if (model.name.empty()) model.name = model.slug;
+        auto priority = m.TryLookup(L"priority");
+        double rank = priority && priority.ValueType() == wdj::JsonValueType::Number ? priority.GetNumber() : 1e9;
+        listed.push_back({rank, std::move(model)});
+    }
+    std::ranges::stable_sort(listed, {}, &std::pair<double, CodexModel>::first);
+    for (auto& [rank, model] : listed) out.push_back(std::move(model));
+    return out;
+}
+
 }  // namespace ai_sessions
+
+// ============================================================================
+namespace app_drive {
+// ============================================================================
+// The chat panel's hands on the Claude desktop app and the Codex app: their own
+// windows, through UI Automation, so the app itself sends and changes what it
+// shows. Text goes into a session's prompt box as its value and the app's send
+// button is invoked; menus are expanded and their items invoked. Nothing is
+// typed, except Esc and → posted to the window to close a menu it opened or to
+// open a submenu; only a session not on screen is opened by the app's own link,
+// which brings its window forward. Only accessible names are read from the
+// apps; no token or credential is touched, and a confirmation the app asks for
+// is left to the person. Worker threads only: every call waits on the other
+// process.
+
+using Microsoft::WRL::ComPtr;
+
+enum class App { kClaude, kCodex };
+using Labels = std::vector<std::wstring>;
+
+// What the apps show, Korean then English (Claude 4.23118).
+constexpr PCWSTR kRename[] = {L", 세션 이름 바꾸기", L", rename session"};
+constexpr PCWSTR kPrompt[] = {L"프롬프트", L"Prompt"};
+constexpr PCWSTR kSend[] = {L"보내기", L"Send"};
+constexpr PCWSTR kStop[] = {L"중지", L"Stop"};
+constexpr PCWSTR kModel[] = {L"모델: ", L"Model: "};
+constexpr PCWSTR kEffort[] = {L"노력", L"Effort"};
+constexpr PCWSTR kFolder[] = {L"폴더: ", L"Folder: "};
+constexpr PCWSTR kTrust[] = {L"이 워크스페이스를 신뢰하시겠습니까?", L"Trust this workspace?"};
+constexpr PCWSTR kUltracode[] = {L"울트라코드", L"Ultracode"};
+constexpr PCWSTR kUsage[] = {L"사용량", L"Usage"};
+// A confirmation over the app: its button, or its question.
+constexpr PCWSTR kConfirmButton[] = {L"활성화", L"Enable"};
+constexpr PCWSTR kConfirmText[] = {L"노력 수준을 변경하시겠습니까?", L"Change effort level?"};
+// The Codex app (OpenAI.Codex), as its window showed it in October.
+constexpr PCWSTR kCodexNewChat[] = {L"새 채팅", L"New chat"};
+constexpr PCWSTR kCodexNewIn[] = {L"에서 새 대화 시작", L"New chat in "};
+constexpr PCWSTR kCodexModelMenu[] = {L"모델", L"Model"};
+constexpr PCWSTR kCodexPowerMenu[] = {L"파워", L"Power", L"추론", L"Reasoning"};
+constexpr PCWSTR kCodexMode[] = {L"모드 전환", L"Switch mode"};
+
+template <size_t N>
+bool Is(std::wstring const& text, PCWSTR const (&words)[N]) {
+    return std::ranges::any_of(words, [&](PCWSTR w) { return text == w; });
+}
+
+template <size_t N>
+bool StartsWith(std::wstring const& text, PCWSTR const (&words)[N], std::wstring* rest = nullptr) {
+    for (PCWSTR w : words) {
+        if (text.starts_with(w)) {
+            if (rest) *rest = text.substr(wcslen(w));
+            return true;
+        }
+    }
+    return false;
+}
+
+template <size_t N>
+bool Contains(std::wstring const& text, PCWSTR const (&words)[N]) {
+    return std::ranges::any_of(words, [&](PCWSTR w) { return text.find(w) != std::wstring::npos; });
+}
+
+// `label` as the start of an item's name: all of it, or before a space or a
+// bracket ("중간(추천)").
+bool Leads(std::wstring const& name, std::wstring const& label) {
+    return !label.empty() && name.starts_with(label) &&
+           (name.size() == label.size() || wcschr(L" (\u00A0\u00B7,", name[label.size()]));
+}
+
+bool LeadsAny(std::wstring const& name, Labels const& labels) {
+    return std::ranges::any_of(labels, [&](std::wstring const& l) { return Leads(name, l); });
+}
+
+bool Stopping() {
+    return core::g_unloading;
+}
+
+void Wait(int ms) {
+    for (int waited = 0; waited < ms && !Stopping(); waited += 50) {
+        Sleep(50);
+    }
+}
+
+// Polls `done` until it holds, up to `ms`; false when it never did or the mod goes.
+template <typename F>
+bool WaitFor(int ms, F&& done) {
+    for (int waited = 0; !Stopping(); waited += 150) {
+        if (done()) return true;
+        if (waited >= ms) return false;
+        Sleep(150);
+    }
+    return false;
+}
+
+// ---- windows ----------------------------------------------------------------------
+
+std::wstring ImageOf(HWND window) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    winrt::handle process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+    WCHAR path[MAX_PATH];
+    DWORD size = ARRAYSIZE(path);
+    if (!process || !QueryFullProcessImageNameW(process.get(), 0, path, &size)) return {};
+    return std::wstring(path, size);
+}
+
+// The app's main window: a visible Chromium window of claude.exe titled
+// "Claude", or of the Codex app's package.
+HWND FindWindowOf(App app) {
+    struct Look {
+        App app;
+        HWND found = nullptr;
+    } look{app};
+    EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            auto& l = *reinterpret_cast<Look*>(param);
+            WCHAR cls[64], title[64];
+            if (!IsWindowVisible(window) || !GetClassNameW(window, cls, ARRAYSIZE(cls)) ||
+                wcscmp(cls, L"Chrome_WidgetWin_1") != 0) {
+                return TRUE;
+            }
+            GetWindowTextW(window, title, ARRAYSIZE(title));
+            std::wstring image = ImageOf(window);
+            std::wstring file = image.substr(image.find_last_of(L'\\') + 1);
+            bool ours = l.app == App::kClaude
+                            ? _wcsicmp(file.c_str(), L"claude.exe") == 0 && wcscmp(title, L"Claude") == 0
+                            : StrStrIW(image.c_str(), L"OpenAI.Codex") && title[0];
+            if (!ours) return TRUE;
+            l.found = window;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&look));
+    return look.found;
+}
+
+// Opens a claude:// link the way a click on one would.
+bool OpenLink(std::wstring const& url) {
+    return (INT_PTR)ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+}
+
+std::wstring UrlPart(std::wstring const& text) {
+    std::string utf8;
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+    utf8.resize(n > 0 ? n : 0);
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), utf8.data(), n, nullptr, nullptr);
+    std::wstring out;
+    for (unsigned char c : utf8) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += (wchar_t)c;
+        } else {
+            WCHAR hex[4];
+            swprintf_s(hex, L"%%%02X", c);
+            out += hex;
+        }
+    }
+    return out;
+}
+
+// Esc or → to the app's page as keys; the window keeps its place and focus.
+void PostKey(HWND window, UINT vk) {
+    HWND to = FindWindowExW(window, nullptr, L"Chrome_RenderWidgetHostHWND", nullptr);
+    if (!to) to = window;
+    LPARAM scan = (LPARAM)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16;
+    LPARAM extended = vk == VK_RIGHT || vk == VK_LEFT || vk == VK_UP || vk == VK_DOWN ? 1 << 24 : 0;
+    PostMessageW(to, WM_KEYDOWN, vk, 1 | scan | extended);
+    PostMessageW(to, WM_KEYUP, vk, 1 | scan | extended | 0xC0000000);
+}
+
+// ---- UI Automation ---------------------------------------------------------------
+
+struct Node {
+    ComPtr<IUIAutomationElement> e;
+    std::wstring name, cls;
+    CONTROLTYPEID type = 0;
+    RECT r{};
+    bool expandable = false;
+
+    bool Is(CONTROLTYPEID t) const { return type == t; }
+    explicit operator bool() const { return e != nullptr; }
+};
+
+struct Ui {
+    App app = App::kClaude;
+    HWND window = nullptr;
+    ComPtr<IUIAutomation> uia;
+    ComPtr<IUIAutomationElement> root;
+    ComPtr<IUIAutomationCacheRequest> cache;
+
+    // False with `why` set when the app's window isn't there.
+    bool Open(App which, std::wstring& why) {
+        app = which;
+        window = FindWindowOf(which);
+        if (!window) {
+            why = which == App::kClaude ? L"Claude 앱 창이 열려 있지 않아요" : L"Codex 앱 창이 열려 있지 않아요";
+            return false;
+        }
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation,
+                                    reinterpret_cast<void**>(uia.GetAddressOf())))) {
+            why = L"UI 자동화를 쓸 수 없어요";
+            return false;
+        }
+        if (FAILED(uia->ElementFromHandle(window, &root)) || !root || FAILED(uia->CreateCacheRequest(&cache))) {
+            why = L"앱 창을 읽지 못했어요";
+            return false;
+        }
+        for (PROPERTYID p : {UIA_NamePropertyId, UIA_ControlTypePropertyId, UIA_BoundingRectanglePropertyId,
+                             UIA_ClassNamePropertyId, UIA_IsExpandCollapsePatternAvailablePropertyId}) {
+            cache->AddProperty(p);
+        }
+        return true;
+    }
+
+    // Every element of these types in the window (or under `under`), with
+    // its name, class and place, in one call to the app.
+    std::vector<Node> All(std::initializer_list<CONTROLTYPEID> types, IUIAutomationElement* under = nullptr) {
+        std::vector<Node> out;
+        ComPtr<IUIAutomationCondition> condition;
+        for (CONTROLTYPEID t : types) {
+            VARIANT v;
+            VariantInit(&v);
+            v.vt = VT_I4;
+            v.lVal = t;
+            ComPtr<IUIAutomationCondition> one;
+            if (FAILED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &one))) return out;
+            if (!condition) {
+                condition = one;
+            } else {
+                ComPtr<IUIAutomationCondition> either;
+                if (FAILED(uia->CreateOrCondition(condition.Get(), one.Get(), &either))) return out;
+                condition = either;
+            }
+        }
+        ComPtr<IUIAutomationElementArray> found;
+        if (!condition || FAILED((under ? under : root.Get())
+                                     ->FindAllBuildCache(TreeScope_Descendants, condition.Get(), cache.Get(), &found)) ||
+            !found) {
+            return out;
+        }
+        int count = 0;
+        found->get_Length(&count);
+        out.reserve(count);
+        for (int i = 0; i < count; i++) {
+            Node n;
+            if (FAILED(found->GetElement(i, &n.e)) || !n.e) continue;
+            BSTR text = nullptr;
+            if (SUCCEEDED(n.e->get_CachedName(&text)) && text) {
+                n.name.assign(text, SysStringLen(text));
+                SysFreeString(text);
+            }
+            text = nullptr;
+            if (SUCCEEDED(n.e->get_CachedClassName(&text)) && text) {
+                n.cls.assign(text, SysStringLen(text));
+                SysFreeString(text);
+            }
+            n.e->get_CachedControlType(&n.type);
+            n.e->get_CachedBoundingRectangle(&n.r);
+            VARIANT v;
+            VariantInit(&v);
+            if (SUCCEEDED(n.e->GetCachedPropertyValue(UIA_IsExpandCollapsePatternAvailablePropertyId, &v))) {
+                n.expandable = v.vt == VT_BOOL && v.boolVal;
+            }
+            VariantClear(&v);
+            out.push_back(std::move(n));
+        }
+        return out;
+    }
+};
+
+template <typename Pattern>
+ComPtr<Pattern> PatternOf(Node const& n, PATTERNID id, REFIID iid) {
+    ComPtr<Pattern> p;
+    if (n) n.e->GetCurrentPatternAs(id, iid, reinterpret_cast<void**>(p.GetAddressOf()));
+    return p;
+}
+
+bool Invoke(Node const& n) {
+    if (auto p = PatternOf<IUIAutomationInvokePattern>(n, UIA_InvokePatternId, IID_IUIAutomationInvokePattern)) {
+        return SUCCEEDED(p->Invoke());
+    }
+    if (auto p = PatternOf<IUIAutomationSelectionItemPattern>(n, UIA_SelectionItemPatternId,
+                                                               IID_IUIAutomationSelectionItemPattern)) {
+        return SUCCEEDED(p->Select());
+    }
+    if (auto p = PatternOf<IUIAutomationTogglePattern>(n, UIA_TogglePatternId, IID_IUIAutomationTogglePattern)) {
+        return SUCCEEDED(p->Toggle());
+    }
+    return false;
+}
+
+bool Expand(Node const& n) {
+    if (auto p = PatternOf<IUIAutomationExpandCollapsePattern>(n, UIA_ExpandCollapsePatternId,
+                                                               IID_IUIAutomationExpandCollapsePattern)) {
+        return SUCCEEDED(p->Expand());
+    }
+    return Invoke(n);
+}
+
+bool Selected(Node const& n) {
+    BOOL on = FALSE;
+    if (auto p = PatternOf<IUIAutomationSelectionItemPattern>(n, UIA_SelectionItemPatternId,
+                                                               IID_IUIAutomationSelectionItemPattern)) {
+        p->get_CurrentIsSelected(&on);
+    }
+    return on;
+}
+
+// -1 when it has no toggle.
+int Toggled(Node const& n) {
+    ToggleState state = ToggleState_Off;
+    auto p = PatternOf<IUIAutomationTogglePattern>(n, UIA_TogglePatternId, IID_IUIAutomationTogglePattern);
+    return p && SUCCEEDED(p->get_CurrentToggleState(&state)) ? state == ToggleState_On : -1;
+}
+
+bool SetValue(Node const& n, std::wstring const& text) {
+    auto p = PatternOf<IUIAutomationValuePattern>(n, UIA_ValuePatternId, IID_IUIAutomationValuePattern);
+    if (!p) return false;
+    BSTR value = SysAllocStringLen(text.data(), (UINT)text.size());
+    HRESULT hr = p->SetValue(value);
+    SysFreeString(value);
+    return SUCCEEDED(hr);
+}
+
+std::wstring ValueOf(Node const& n) {
+    std::wstring out;
+    BSTR value = nullptr;
+    auto p = PatternOf<IUIAutomationValuePattern>(n, UIA_ValuePatternId, IID_IUIAutomationValuePattern);
+    if (p && SUCCEEDED(p->get_CurrentValue(&value)) && value) {
+        out.assign(value, SysStringLen(value));
+        SysFreeString(value);
+    }
+    return out;
+}
+
+// Text as the apps hold it: line ends as \n, no space at the ends.
+std::wstring Plain(std::wstring text) {
+    std::erase(text, L'\r');
+    for (auto& c : text) {
+        if (c == L'\u00A0') c = L' ';
+    }
+    size_t start = text.find_first_not_of(L" \n\t"), end = text.find_last_not_of(L" \n\t");
+    return start == std::wstring::npos ? L"" : text.substr(start, end - start + 1);
+}
+
+// The same text, as far as a prompt box keeps it: runs of space and lines fold.
+bool SameText(std::wstring const& a, std::wstring const& b) {
+    auto squeeze = [](std::wstring t) {
+        t = Plain(std::move(t));
+        std::wstring out;
+        for (WCHAR c : t) {
+            if (c == L'\n' || c == L' ' || c == L'\t') {
+                if (!out.empty() && out.back() == L' ') continue;
+                c = L' ';
+            }
+            out += c;
+        }
+        return out;
+    };
+    return squeeze(a) == squeeze(b);
+}
+
+bool Overlap(LONG a1, LONG a2, LONG b1, LONG b2) {
+    return a1 < b2 && b1 < a2;
+}
+
+// ---- the Claude app's panes --------------------------------------------------------
+
+struct Pane {
+    Node edit, send, stop, model, mode, folder;
+};
+
+constexpr PCWSTR kNoPane = L"Claude 앱에 이 세션 칸이 없어요";
+
+// The pane of the session titled `title`: its prompt box under that header,
+// the send or stop button at the box's end and the model and permission
+// buttons under it. With no title, the new session screen (the box over the
+// folder button). False with `why` set.
+bool FindPane(Ui& u, std::wstring const& title, Pane& pane, std::wstring& why) {
+    pane = {};
+    auto nodes = u.All({UIA_ButtonControlTypeId, UIA_EditControlTypeId});
+    std::vector<Node const*> heads, edits, folders;
+    for (auto const& n : nodes) {
+        if (n.Is(UIA_EditControlTypeId) && Is(n.name, kPrompt)) {
+            edits.push_back(&n);
+        } else if (n.Is(UIA_ButtonControlTypeId)) {
+            if (!title.empty() && std::ranges::any_of(kRename, [&](PCWSTR s) { return n.name == title + s; })) {
+                heads.push_back(&n);
+            }
+            if (StartsWith(n.name, kFolder)) folders.push_back(&n);
+        }
+    }
+    Node const* edit = nullptr;
+    if (!title.empty()) {
+        if (heads.size() > 1) {
+            why = L"Claude 앱에 같은 제목의 칸이 둘 이상이라 고를 수 없어요";
+            return false;
+        }
+        if (heads.empty()) {
+            why = kNoPane;
+            return false;
+        }
+        RECT h = heads[0]->r;
+        for (auto const* e : edits) {
+            if (Overlap(e->r.left, e->r.right, h.left, h.right) && e->r.top > h.bottom) edit = e;
+        }
+    } else {
+        for (auto const* f : folders) {
+            for (auto const* e : edits) {
+                if (f->r.top >= e->r.bottom - 8 && f->r.top <= e->r.bottom + 100 &&
+                    Overlap(e->r.left - 160, e->r.right + 40, f->r.left, f->r.right)) {
+                    edit = e;
+                    pane.folder = *f;
+                }
+            }
+        }
+    }
+    if (!edit) {
+        why = L"Claude 앱에서 입력창을 찾지 못했어요";
+        return false;
+    }
+    pane.edit = *edit;
+    RECT e = edit->r;
+    auto nearest = [&](auto&& fits, auto&& distance) -> Node const* {
+        Node const* best = nullptr;
+        LONG bestDistance = LONG_MAX;
+        for (auto const& n : nodes) {
+            if (n.Is(UIA_ButtonControlTypeId) && fits(n) && distance(n) < bestDistance) {
+                best = &n;
+                bestDistance = distance(n);
+            }
+        }
+        return best;
+    };
+    auto atEnd = [&](Node const& n) {
+        return n.r.left >= e.right - 6 && n.r.left <= e.right + 160 &&
+               Overlap(n.r.top, n.r.bottom, e.top - 40, e.bottom + 40);
+    };
+    auto fromEnd = [&](Node const& n) { return n.r.left - e.right; };
+    if (auto const* n = nearest([&](Node const& n) { return Is(n.name, kSend) && atEnd(n); }, fromEnd)) {
+        pane.send = *n;
+    }
+    if (auto const* n = nearest([&](Node const& n) { return Is(n.name, kStop) && atEnd(n); }, fromEnd)) {
+        pane.stop = *n;
+    }
+    if (auto const* n = nearest(
+            [&](Node const& n) {
+                return StartsWith(n.name, kModel) && n.r.top >= e.bottom - 8 && n.r.top <= e.bottom + 100 &&
+                       Overlap(n.r.left, n.r.right, e.left - 160, e.right + 160);
+            },
+            [&](Node const& n) { return n.r.top - e.bottom; })) {
+        pane.model = *n;
+        RECT m = n->r;
+        if (auto const* k = nearest(
+                [&](Node const& k) {
+                    return k.expandable && std::abs(k.r.top - m.top) <= 8 && k.r.left >= m.right - 4 &&
+                           k.r.left <= m.right + 40 && !StartsWith(k.name, kUsage);
+                },
+                [&](Node const& k) { return k.r.left - m.right; })) {
+            pane.mode = *k;
+        }
+    }
+    return true;
+}
+
+// The workspace trust question over the app.
+bool AsksTrust(Ui& u) {
+    for (auto const& n : u.All({UIA_WindowControlTypeId, UIA_TextControlTypeId, UIA_GroupControlTypeId,
+                                UIA_PaneControlTypeId})) {
+        if (Is(n.name, kTrust)) return true;
+    }
+    return false;
+}
+
+// Another confirmation the app asks for (permissions off, a costlier effort).
+bool AsksConfirm(Ui& u) {
+    for (auto const& n : u.All({UIA_ButtonControlTypeId, UIA_TextControlTypeId})) {
+        if ((n.Is(UIA_ButtonControlTypeId) && Is(n.name, kConfirmButton)) ||
+            (n.Is(UIA_TextControlTypeId) && Is(n.name, kConfirmText))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- menus -------------------------------------------------------------------------------
+
+struct Menu {
+    Node menu;
+    std::vector<Node> items;  // what can be picked in it, top down
+};
+
+// The open menu named `name` (as the button or item that opened it); else,
+// with `other` set, the newest open one not named so (a submenu).
+Menu OpenMenu(Ui& u, std::wstring const& name, std::wstring const* other = nullptr) {
+    Menu m;
+    auto nodes = u.All({UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId,
+                        UIA_CheckBoxControlTypeId, UIA_ButtonControlTypeId});
+    for (auto const& n : nodes) {
+        if (n.Is(UIA_MenuControlTypeId) && n.name == name) m.menu = n;
+    }
+    if (!m.menu && other) {
+        for (auto const& n : nodes) {
+            if (n.Is(UIA_MenuControlTypeId) && n.name != *other) m.menu = n;
+        }
+    }
+    if (!m.menu) return m;
+    RECT r = m.menu.r;
+    for (auto const& n : nodes) {
+        if (!n.Is(UIA_MenuControlTypeId) && n.r.left >= r.left - 2 && n.r.right <= r.right + 2 &&
+            n.r.top >= r.top - 2 && n.r.bottom <= r.bottom + 2) {
+            m.items.push_back(n);
+        }
+    }
+    std::ranges::sort(m.items, [](Node const& a, Node const& b) { return a.r.top < b.r.top; });
+    return m;
+}
+
+// Closes the menus named so that are still open, Esc by Esc; never an Esc
+// with none open, which the app would take as stopping the turn.
+void CloseMenus(Ui& u, Labels const& names) {
+    for (int i = 0; i < 3; i++) {
+        bool open = false;
+        for (auto const& n : u.All({UIA_MenuControlTypeId})) {
+            open |= std::ranges::find(names, n.name) != names.end();
+        }
+        if (!open) return;
+        PostKey(u.window, VK_ESCAPE);
+        Wait(250);
+    }
+}
+
+// The button's menu, once it shows.
+Menu ExpandMenu(Ui& u, Node const& button) {
+    Menu m;
+    if (!Expand(button)) return m;
+    WaitFor(1500, [&] { return (m = OpenMenu(u, button.name)).menu && !m.items.empty(); });
+    return m;
+}
+
+// A submenu: the item focused, then → to it, as a keyboard opens it (the
+// app's submenus open on neither Expand nor Invoke).
+Menu ExpandSubmenu(Ui& u, Node const& item, std::wstring const& parent) {
+    Menu m;
+    item.e->SetFocus();
+    Wait(80);
+    PostKey(u.window, VK_RIGHT);
+    WaitFor(1500, [&] { return (m = OpenMenu(u, item.name, &parent)).menu && !m.items.empty(); });
+    return m;
+}
+
+// The radio items of a menu; the one leading with a label, else the `index`th.
+Node const* Pick(std::vector<Node> const& items, Labels const& labels, int index) {
+    std::vector<Node const*> radios;
+    for (auto const& n : items) {
+        if (n.Is(UIA_RadioButtonControlTypeId) || n.Is(UIA_MenuItemControlTypeId)) radios.push_back(&n);
+    }
+    for (auto const* n : radios) {
+        if (LeadsAny(n->name, labels)) return n;
+    }
+    std::erase_if(radios, [](Node const* n) { return !n->Is(UIA_RadioButtonControlTypeId); });
+    return index >= 0 && index < (int)radios.size() ? radios[index] : nullptr;
+}
+
+// ---- the Claude app ---------------------------------------------------------------------
+
+enum class Change { kModel, kEffort, kMode, kUltracode };
+
+// Finds the session's pane, opening it first through the app's link when no
+// pane shows it. `title` empty: the new session screen.
+bool PaneOf(Ui& u, std::wstring const& title, std::wstring const& record, Pane& pane, std::wstring& why) {
+    if (FindPane(u, title, pane, why)) return true;
+    if (title.empty() || record.empty() || why != kNoPane) return false;
+    if (!OpenLink(L"claude://code/continue?session=" + UrlPart(record))) return false;
+    return WaitFor(6000, [&] { return FindPane(u, title, pane, why); });
+}
+
+// Picks the item leading with one of `labels` (for an effort, the `index`th
+// level when none does) in the pane's model or permission menu, or sets
+// Ultracode to `on`. "" when it took.
+std::wstring SetClaude(Ui& u, Pane const& pane, Change what, Labels const& labels, int index, bool on) {
+    Node button = what == Change::kMode ? pane.mode : pane.model;
+    if (!button) return what == Change::kMode ? L"권한 버튼을 찾지 못했어요" : L"모델 버튼을 찾지 못했어요";
+    Menu menu = ExpandMenu(u, button);
+    if (!menu.menu) return L"앱 메뉴가 열리지 않았어요";
+    Labels opened{button.name};
+    std::wstring result;
+    if (what == Change::kModel || what == Change::kMode) {
+        std::vector<Node> radios;
+        for (auto const& n : menu.items) {
+            if (n.Is(UIA_RadioButtonControlTypeId)) radios.push_back(n);
+        }
+        Node const* item = Pick(radios, labels, -1);
+        if (!item) {
+            result = L"앱 메뉴에 '" + (labels.empty() ? L"" : labels[0]) + L"' 항목이 없어요";
+        } else if (!Selected(*item) && !Invoke(*item)) {
+            result = L"앱 메뉴를 누르지 못했어요";
+        }
+    } else {
+        Node effort;
+        std::optional<Node> toggle;
+        for (auto const& n : menu.items) {
+            if (StartsWith(n.name, kEffort)) effort = n;
+            if (Contains(n.name, kUltracode)) toggle = n;
+        }
+        Menu sub;
+        if (effort) {
+            sub = ExpandSubmenu(u, effort, button.name);
+            opened.push_back(sub.menu.name);
+            for (auto const& n : sub.items) {
+                if (Contains(n.name, kUltracode)) toggle = n;
+            }
+        }
+        if (what == Change::kEffort) {
+            Node const* item = sub.menu ? Pick(sub.items, labels, index) : nullptr;
+            if (!item) {
+                result = L"앱의 노력 메뉴에 그 단계가 없어요";
+            } else if (!Selected(*item) && !Invoke(*item)) {
+                result = L"앱 메뉴를 누르지 못했어요";
+            }
+        } else if (!toggle) {
+            result = L"앱 메뉴에서 울트라코드를 찾지 못했어요";
+        } else if (Toggled(*toggle) != (int)on && !Invoke(*toggle)) {
+            result = L"울트라코드를 바꾸지 못했어요";
+        }
+    }
+    Wait(300);
+    if (result.empty() && AsksConfirm(u)) return L"Claude 앱에 뜬 확인 창에서 직접 골라 주세요";
+    CloseMenus(u, opened);
+    return result;
+}
+
+std::wstring ChangeClaude(std::wstring const& title, std::wstring const& record, Change what, Labels const& labels,
+                          int index, bool on) {
+    Ui u;
+    Pane pane;
+    std::wstring why;
+    if (!u.Open(App::kClaude, why) || !PaneOf(u, title, record, pane, why)) return why;
+    return SetClaude(u, pane, what, labels, index, on);
+}
+
+// Puts `text` in the pane's prompt box and invokes send: the app sends it, into
+// the running turn when one runs. The box must be empty first, so nothing the
+// person was writing there is lost. "" when it went.
+std::wstring SendInPane(Ui& u, Pane& pane, std::wstring const& title, std::wstring const& text) {
+    std::wstring why;
+    if (!Plain(ValueOf(pane.edit)).empty()) return L"Claude 앱 입력창에 쓰던 글이 있어 보내지 않았어요";
+    if (!SetValue(pane.edit, text)) return L"입력창에 글을 넣지 못했어요";
+    if (!WaitFor(1500, [&] { return SameText(ValueOf(pane.edit), text); })) {
+        SetValue(pane.edit, L"");
+        return L"입력창에 넣은 글이 달라져 보내지 않았어요";
+    }
+    Pane now;
+    if (!WaitFor(1500, [&] { return FindPane(u, title, now, why) && now.send; })) {
+        SetValue(pane.edit, L"");
+        return L"보내기 버튼을 찾지 못했어요";
+    }
+    if (!Invoke(now.send)) return L"보내기를 누르지 못했어요";
+    if (!WaitFor(4000, [&] { return Plain(ValueOf(now.edit)).empty(); })) {
+        return L"보냈는지 확인하지 못했어요 (Claude 앱을 확인해 주세요)";
+    }
+    return {};
+}
+
+std::wstring SendClaude(std::wstring const& title, std::wstring const& record, std::wstring const& text) {
+    Ui u;
+    Pane pane;
+    std::wstring why;
+    if (!u.Open(App::kClaude, why) || !PaneOf(u, title, record, pane, why)) return why;
+    return SendInPane(u, pane, title, text);
+}
+
+struct NewSession {
+    std::wstring folder, text;
+    Labels model, effort, mode;  // empty: as the app has it
+    int effortIndex = -1;
+    int ultracode = -1;  // -1: as the app has it
+};
+
+bool SameFolder(std::wstring a, std::wstring b) {
+    auto trim = [](std::wstring& s) {
+        std::ranges::replace(s, L'/', L'\\');
+        while (s.size() > 3 && s.back() == L'\\') s.pop_back();
+    };
+    trim(a);
+    trim(b);
+    return !a.empty() && _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// A new Claude Code session in `folder`: the app's new session screen, the
+// folder from its own folder menu when it is there (one used before), else
+// through a link with the folder, whose workspace trust question the person
+// answers in the app (waited for, two minutes at most); then the model,
+// effort, Ultracode and permission, then the first message. `step` tells the
+// panel where it is.
+std::wstring StartClaude(NewSession const& s, std::function<void(std::wstring)> const& step) {
+    Ui u;
+    std::wstring why;
+    if (!u.Open(App::kClaude, why)) return why;
+    Pane pane;
+    if (!OpenLink(L"claude://code/new")) return L"Claude 앱의 새 세션 화면을 열지 못했어요";
+    if (!WaitFor(6000, [&] { return FindPane(u, L"", pane, why); })) return L"Claude 앱의 새 세션 화면을 찾지 못했어요";
+    std::wstring shown;
+    StartsWith(pane.folder.name, kFolder, &shown);
+    if (!SameFolder(shown, s.folder)) {
+        Menu folders = ExpandMenu(u, pane.folder);
+        Node const* item = nullptr;
+        for (auto const& n : folders.items) {
+            if (SameFolder(n.name, s.folder) || n.name.find(s.folder) != std::wstring::npos) item = &n;
+        }
+        if (item && Invoke(*item)) {
+            Wait(300);
+            CloseMenus(u, {pane.folder.name});
+        } else {
+            CloseMenus(u, {pane.folder.name});
+            step(L"Claude 앱에서 '작업 공간 신뢰'를 눌러 주세요");
+            if (!OpenLink(L"claude://code/new?folder=" + UrlPart(s.folder))) return L"새 세션 링크를 열지 못했어요";
+            WaitFor(6000, [&] { return AsksTrust(u); });
+            if (!WaitFor(120000, [&] { return !AsksTrust(u); })) return L"신뢰 확인을 기다리다 멈췄어요";
+        }
+        if (!WaitFor(4000, [&] {
+                return FindPane(u, L"", pane, why) && StartsWith(pane.folder.name, kFolder, &shown) &&
+                       SameFolder(shown, s.folder);
+            })) {
+            return L"폴더가 정해지지 않아 보내지 않았어요";
+        }
+    }
+    step(L"모델·노력·권한을 맞추는 중…");
+    std::wstring now;
+    if (!s.model.empty() && !(StartsWith(pane.model.name, kModel, &now) && LeadsAny(now, s.model))) {
+        if (auto e = SetClaude(u, pane, Change::kModel, s.model, -1, false); !e.empty()) return e;
+        FindPane(u, L"", pane, why);
+    }
+    if (!s.effort.empty() || s.effortIndex >= 0) {
+        if (auto e = SetClaude(u, pane, Change::kEffort, s.effort, s.effortIndex, false); !e.empty()) return e;
+        FindPane(u, L"", pane, why);
+    }
+    if (s.ultracode >= 0) {
+        if (auto e = SetClaude(u, pane, Change::kUltracode, {}, -1, s.ultracode == 1); !e.empty()) return e;
+        FindPane(u, L"", pane, why);
+    }
+    if (!s.mode.empty() && pane.mode && !LeadsAny(pane.mode.name, s.mode)) {
+        if (auto e = SetClaude(u, pane, Change::kMode, s.mode, -1, false); !e.empty()) return e;
+        FindPane(u, L"", pane, why);
+    }
+    step(L"첫 메시지를 보내는 중…");
+    return SendInPane(u, pane, L"", s.text);
+}
+
+// ---- the Codex app ---------------------------------------------------------------------
+// As its window showed it in October (D:\Claude\Codex_GUI_Control): one thread
+// on screen, its composer a ProseMirror box, the threads as sidebar buttons.
+// Not checked against the app since.
+
+Node CodexComposer(Ui& u) {
+    for (auto& n : u.All({UIA_EditControlTypeId})) {
+        if (n.cls.starts_with(L"ProseMirror")) return n;
+    }
+    return {};
+}
+
+Node ButtonWhere(Ui& u, std::function<bool(std::wstring const&)> const& match) {
+    for (auto& n : u.All({UIA_ButtonControlTypeId, UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId})) {
+        if (match(n.name)) return n;
+    }
+    return {};
+}
+
+bool OpenCodexThread(Ui& u, std::wstring const& title, std::wstring& why) {
+    Node thread = ButtonWhere(u, [&](std::wstring const& name) { return name == title; });
+    if (!thread) {
+        why = L"Codex 앱 사이드바에 이 스레드가 없어요";
+        return false;
+    }
+    Invoke(thread);
+    Wait(800);
+    return true;
+}
+
+std::wstring SendCodexHere(Ui& u, std::wstring const& text) {
+    Node box = CodexComposer(u);
+    if (!box) return L"Codex 입력창을 찾지 못했어요";
+    std::wstring before = Plain(ValueOf(box));
+    if (!before.empty() && before != Plain(box.name)) return L"Codex 앱 입력창에 쓰던 글이 있어 보내지 않았어요";
+    if (!SetValue(box, text) || !WaitFor(1500, [&] { return SameText(ValueOf(box), text); })) {
+        return L"Codex 입력창에 글을 넣지 못했어요";
+    }
+    Node send;
+    if (!WaitFor(1500, [&] { return bool(send = ButtonWhere(u, [](std::wstring const& n) { return Is(n, kSend); })); })) {
+        SetValue(box, L"");
+        return L"Codex가 응답 중이라 보내기 버튼이 없어요";
+    }
+    if (!Invoke(send)) return L"보내기를 누르지 못했어요";
+    if (!WaitFor(4000, [&] {
+            std::wstring v = Plain(ValueOf(box));
+            return v.empty() || v == Plain(box.name);
+        })) {
+        return L"보냈는지 확인하지 못했어요 (Codex 앱을 확인해 주세요)";
+    }
+    return {};
+}
+
+std::wstring SendCodex(std::wstring const& title, std::wstring const& text) {
+    Ui u;
+    std::wstring why;
+    if (!u.Open(App::kCodex, why) || !OpenCodexThread(u, title, why)) return why;
+    return SendCodexHere(u, text);
+}
+
+std::wstring SetCodex(Ui& u, Change what, Labels const& labels, int index) {
+    if (what == Change::kMode) {
+        Node mode = ButtonWhere(u, [](std::wstring const& n) { return StartsWith(n, kCodexMode); });
+        if (!mode) return L"Codex 모드 버튼을 찾지 못했어요";
+        Menu menu = ExpandMenu(u, mode);
+        Node const* item = Pick(menu.items, labels, -1);
+        std::wstring result = item && Invoke(*item) ? L"" : L"Codex 모드 메뉴에 그 항목이 없어요";
+        Wait(250);
+        CloseMenus(u, {mode.name});
+        return result;
+    }
+    Node model = ButtonWhere(u, [](std::wstring const& n) {
+        return n.starts_with(L"GPT") || n.find(L"Sol") != std::wstring::npos ||
+               n.find(L"Astra") != std::wstring::npos || n.find(L"Terra") != std::wstring::npos ||
+               n.find(L"Luna") != std::wstring::npos || n.find(L"Codex") != std::wstring::npos;
+    });
+    if (!model) return L"Codex 모델 버튼을 찾지 못했어요";
+    Menu menu = ExpandMenu(u, model);
+    Labels opened{model.name};
+    std::vector<Node> items = menu.items;
+    for (auto const& n : menu.items) {
+        if (what == Change::kModel ? StartsWith(n.name, kCodexModelMenu) : StartsWith(n.name, kCodexPowerMenu)) {
+            Menu inner = ExpandSubmenu(u, n, model.name);
+            opened.push_back(inner.menu.name);
+            items = inner.items;
+            break;
+        }
+    }
+    Node const* item = Pick(items, labels, index);
+    std::wstring result = item && Invoke(*item) ? L"" : L"Codex 메뉴에 그 항목이 없어요";
+    Wait(250);
+    CloseMenus(u, opened);
+    return result;
+}
+
+std::wstring ChangeCodex(std::wstring const& title, Change what, Labels const& labels, int index) {
+    Ui u;
+    std::wstring why;
+    if (!u.Open(App::kCodex, why) || !OpenCodexThread(u, title, why)) return why;
+    return SetCodex(u, what, labels, index);
+}
+
+// A new Codex chat, in the sidebar project named as the folder when there is
+// one, then the model, effort and permission, then the first message.
+std::wstring StartCodex(NewSession const& s, std::function<void(std::wstring)> const& step) {
+    Ui u;
+    std::wstring why;
+    if (!u.Open(App::kCodex, why)) return why;
+    std::wstring name = s.folder.substr(s.folder.find_last_of(L"\\/") + 1);
+    Node start = ButtonWhere(u, [&](std::wstring const& n) {
+        return n == name + kCodexNewIn[0] || n == kCodexNewIn[1] + name;
+    });
+    if (!start) start = ButtonWhere(u, [](std::wstring const& n) { return Is(n, kCodexNewChat); });
+    if (!start || !Invoke(start)) return L"Codex 앱에서 새 채팅을 열지 못했어요";
+    Wait(800);
+    step(L"모델·노력을 맞추는 중…");
+    if (!s.model.empty()) {
+        if (auto e = SetCodex(u, Change::kModel, s.model, -1); !e.empty()) return e;
+    }
+    if (!s.effort.empty() || s.effortIndex >= 0) {
+        if (auto e = SetCodex(u, Change::kEffort, s.effort, s.effortIndex); !e.empty()) return e;
+    }
+    if (!s.mode.empty()) {
+        if (auto e = SetCodex(u, Change::kMode, s.mode, -1); !e.empty()) return e;
+    }
+    step(L"첫 메시지를 보내는 중…");
+    return SendCodexHere(u, s.text);
+}
+
+}  // namespace app_drive
 
 // ============================================================================
 namespace usage_detail {
@@ -18758,9 +19920,12 @@ namespace usage_detail {
 // holds the taskbar out and closes on a press elsewhere. Everything is made as
 // it opens and let go as it closes; nothing is read while it is closed. The
 // numbers count used or left as the meter does, and the switch at the top turns
-// them as a right-click on the meter does. Taskbar thread only.
+// them as a right-click on the meter does. With the chat panel on, a session
+// picked widens it with that session's chat (see "the chat panel"). Taskbar
+// thread only, but for the jobs it hands to workers.
 
 namespace wux = winrt::Windows::UI::Xaml;
+namespace comp = winrt::Windows::UI::Composition;
 using winrt::Windows::UI::Color;
 
 // ---- Bloom's design system -----------------------------------------------------------
@@ -18782,6 +19947,12 @@ constexpr PCWSTR kFont = L"Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Malgun Got
 constexpr PCWSTR kIconFont = L"Segoe Fluent Icons, Segoe MDL2 Assets";
 constexpr double kPopupRadius = 12, kCardRadius = 12, kSmoothing = 0.6;
 constexpr double kShadowBlur = 26, kShadowDepth = 6, kShadowOpacity = 0.3;  // LiftMenu
+constexpr double kLiftInset = 4;  // the shadow's box, in from the bubble's edge
+
+// The shadow's box for a bubble of `width` by `height`.
+wf::Numerics::float2 LiftSize(double width, double height) {
+    return {float(std::max(0.0, width - 2 * kLiftInset)), float(std::max(0.0, height - 2 * kLiftInset))};
+}
 
 // Bloom's Hsl (Palette.cs).
 void ToHsl(uint32_t argb, double& h, double& s, double& l) {
@@ -18899,6 +20070,24 @@ constexpr double kGap = 8;            // between cards
 constexpr double kMarkSize = 16;
 constexpr double kTitleSize = 14, kNameSize = 12.5, kTextSize = 11.5, kSmallSize = 11;
 
+// The chat panel's session (or new session) and what it shows; see "the chat panel".
+struct Chat {
+    std::wstring key;  // the row's; empty for a new session
+    bool fresh = false, codex = false;
+    std::wstring title, appTitle, record, logPath, folder;
+    std::wstring model, effort, mode;  // ids, as the logs and records name them; Codex's mode its sandbox
+    int ultracode = -1;
+    std::wstring cannot;  // why nothing can be sent from here
+    std::shared_ptr<const std::vector<ai_sessions::Said>> said;
+    std::wstring lastSaid;  // the last entry drawn, to scroll down as more come
+    std::shared_ptr<const std::vector<ai_sessions::CodexModel>> codexModels;
+    std::wstring menu;  // the open popover: model, mode, folder
+    std::wstring status;
+    int tone = 0;  // the status: 0 plain, 1 done, 2 wrong
+    bool busy = false;
+    uint32_t generation = 0;
+};
+
 // What one opening holds; reset as it closes, so nothing stays between openings.
 struct Open {
     Colors colors{};
@@ -18915,7 +20104,34 @@ struct Open {
     // The list's state, by its elements' tags: the open session's key, what
     // the pointer is on and pressed, and the copy button just used.
     std::wstring expanded, hover, pressed, copied;
+    bool pressedRight = false;  // the press was the right button's
     int64_t copiedAt = 0;
+    bool shownOnce = false;
+    // The chat panel (with it on): made with the popup at no width, widened as
+    // a session is picked.
+    std::optional<Chat> chat;
+    uint32_t chatGeneration = 0;
+    Controls::Grid chatColumn{nullptr}, chatPanel{nullptr}, chatOverlay{nullptr};
+    Controls::StackPanel chatHead{nullptr}, chatSaid{nullptr}, chatChips{nullptr};
+    Controls::Border chatMeter{nullptr};
+    Controls::ScrollViewer chatScroll{nullptr};
+    Controls::TextBlock chatStatus{nullptr};
+    Controls::TextBox chatBox{nullptr}, folderBox{nullptr};
+    Controls::Border chatSend{nullptr};
+    std::vector<std::wstring> chatFolders;  // as the folder popover lists them
+    std::wstring chatHover, chatPressed;
+    // The bubble (`shell`, in its shadow's `room`) and its shadow, which the widening
+    // draws on the compositor; the running widening (+1 opening, -1 closing); the wide
+    // bubble's place from the narrow one's and the room each needs beside the other.
+    Controls::Grid room{nullptr}, shell{nullptr};
+    comp::SpriteVisual lift{nullptr};
+    comp::CompositionRoundedRectangleGeometry clipShape{nullptr};
+    comp::CompositionScopedBatch widenBatch{nullptr};
+    winrt::event_token widenDone{};
+    int widening = 0;
+    uint32_t widenRun = 0;
+    double widenTo = 0, slide = 0, spareLeft = 0, spareRight = 0;
+    int placeLogs = 0;
 };
 [[clang::no_destroy]] std::optional<Open> g_open;
 // Set when the popup hooked the tray's hide timer itself (the folders, which do
@@ -19593,6 +20809,12 @@ FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
 // under the pointer; a click opens its details under it.
 FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int64_t now);
 
+// The session whose chat is open (not closing).
+bool Chatting(std::wstring const& key) {
+    auto const& o = *g_open;
+    return !key.empty() && o.chat && !o.chat->fresh && o.chat->key == key && o.widenTo > 0;
+}
+
 FrameworkElement ChildLine(ai_sessions::Row const& c, int64_t now) {
     std::wstring key = KeyOf(c);
     std::wstring tag = key.empty() ? L"" : L"row|" + key;
@@ -19623,7 +20845,9 @@ FrameworkElement ChildLine(ai_sessions::Row const& c, int64_t now) {
     // Rows touch, their spacing inside them: a gap would be the parent's, and the pointer
     // crossing it would light the whole session.
     line.Padding({4, 4, 0, 4});
-    line.Background(Brush(!tag.empty() && g_open->hover == tag ? C().hover : 0));
+    line.Background(Brush(Chatting(key)                              ? C().accentSoft
+                          : !tag.empty() && g_open->hover == tag ? C().hover
+                                                                 : 0));
     line.Child(Columns(Across({elbow, mark}), what, when));
     Controls::ToolTipService::SetToolTip(line, winrt::box_value(L"이 세션이 띄운 하위 세션"));
     if (!tag.empty()) {
@@ -19697,6 +20921,32 @@ FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int
 // context used. A session not running is one line: "마지막 턴 1.5k · 2시간 전".
 // Then its subagents; an open one is outlined in the accent with its details
 // under it.
+// How full its context is: a ring in the accent, amber from 65 %, red from 80 % (the
+// number too); none while unknown.
+FrameworkElement ContextMeter(ai_sessions::Row const& r, std::wstring const& before = {}) {
+    if (r.contextUsed < 0 || r.contextWindow <= 0) return nullptr;
+    int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
+    bool red = percent >= 80, amber = !red && percent >= 65;
+    uint32_t ink = red ? C().danger : amber ? (g_open->dark ? C().warn : 0xFFB7791F) : C().accent;
+    Controls::StackPanel context;
+    context.Orientation(Controls::Orientation::Horizontal);
+    context.Background(Brush(0));  // so the tooltip shows over the gap too
+    if (!before.empty()) {
+        auto words = Text(before, kSmallSize, C().faint);
+        words.Margin({0, 0, 6, 0});
+        context.Children().Append(words);
+    }
+    auto ring = Ring(percent / 100.0, ink, 11);
+    ring.VerticalAlignment(VerticalAlignment::Center);
+    ring.Margin({0, 0, 4, 0});
+    context.Children().Append(ring);
+    context.Children().Append(
+        Text(std::to_wstring(percent) + L"%", kSmallSize, red ? C().danger : amber ? C().warn : C().faint));
+    Controls::ToolTipService::SetToolTip(context, winrt::box_value(L"컨텍스트 " + Compact(r.contextUsed) + L" / " +
+                                                                        Compact(r.contextWindow)));
+    return context;
+}
+
 FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
     using ai_sessions::State;
     std::wstring key = KeyOf(r);
@@ -19784,23 +21034,8 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
                           kSmallSize, C().faint);
         third.Margin({0, 2, 0, 0});
         put(third, 2, 1);
-        if (r.contextUsed >= 0 && r.contextWindow > 0) {
-            // How full: a ring in the accent, amber from 65 %, red from 80 % (the number too).
-            int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
-            bool red = percent >= 80, amber = !red && percent >= 65;
-            uint32_t ink = red ? C().danger : amber ? (g_open->dark ? C().warn : 0xFFB7791F) : C().accent;
-            Controls::StackPanel context;
-            context.Orientation(Controls::Orientation::Horizontal);
-            context.Background(Brush(0));  // so the tooltip shows over the gap too
-            auto ring = Ring(percent / 100.0, ink, 11);
-            ring.VerticalAlignment(VerticalAlignment::Center);
-            ring.Margin({0, 0, 4, 0});
-            context.Children().Append(ring);
-            context.Children().Append(
-                Text(std::to_wstring(percent) + L"%", kSmallSize, red ? C().danger : amber ? C().warn : C().faint));
+        if (auto context = ContextMeter(r)) {
             context.Margin({0, 2, 0, 0});
-            Controls::ToolTipService::SetToolTip(context, winrt::box_value(L"컨텍스트 " + Compact(r.contextUsed) +
-                                                                                L" / " + Compact(r.contextWindow)));
             put(context, 2, 2);
         }
     }
@@ -19840,9 +21075,10 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
     item.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
     item.Padding({9, 8, 10, 8});
     item.BorderThickness({1, 1, 1, 1});
-    item.BorderBrush(Brush(open ? C().accent : 0));
+    bool lit = open || Chatting(key);
+    item.BorderBrush(Brush(lit ? C().accent : 0));
     std::wstring tag = key.empty() ? L"" : L"row|" + key;
-    item.Background(Brush(open                                    ? C().accentSoft
+    item.Background(Brush(lit                                     ? C().accentSoft
                           : !tag.empty() && g_open->hover == tag ? C().hover
                                                                  : 0));
     item.Child(stack);
@@ -19901,6 +21137,9 @@ std::wstring TagAt(wf::IInspectable const& source) {
 }
 
 void RenderSessions();
+bool ChatOn();
+void OpenChat(ai_sessions::Row const* r);
+void CloseChat();
 
 ai_sessions::Row const* RowByKey(ai_sessions::Snapshot const* snapshot, std::wstring const& key) {
     if (!snapshot || key.empty()) {
@@ -19922,15 +21161,30 @@ ai_sessions::Row const* RowByKey(ai_sessions::Snapshot const* snapshot, std::wst
 }
 
 // A click on the list, by the tag it landed on.
-void Act(std::wstring const& tag) {
+// A click on the list (`right`: with the right button, which only opens a session's details).
+void Act(std::wstring const& tag, bool right) {
     size_t bar = tag.find(L'|');
     if (bar == std::wstring::npos || !Ours()) {
         return;
     }
     std::wstring what = tag.substr(0, bar), key = tag.substr(bar + 1);
+    if (right && what != L"row") {
+        return;
+    }
     auto snapshot = ai_sessions::g_snapshot;  // held while its row is used
     if (what == L"none") {
         return;
+    } else if (what == L"new") {
+        if (ChatOn()) OpenChat(nullptr);
+    } else if (what == L"row" && ChatOn() && !right) {
+        // With the chat panel, a click opens a session's chat (on the open one, closes
+        // it); a right-click its details.
+        if (Chatting(key)) {
+            return CloseChat();
+        }
+        if (auto const* r = RowByKey(snapshot.get(), key)) {
+            OpenChat(r);
+        }
     } else if (what == L"row") {
         g_open->expanded = g_open->expanded == key ? L"" : key;
     } else if (auto const* r = RowByKey(snapshot.get(), key)) {
@@ -19962,8 +21216,10 @@ void WatchList(Controls::StackPanel const& list) {
     auto& p = *folders::g_popup;
     folders::Keep(p, list.PointerPressed(winrt::auto_revoke, [](auto&&, Input::PointerRoutedEventArgs const& e) {
         core::Guard(L"Usage list press", [&] {
-            if (Ours() && e.GetCurrentPoint(nullptr).Properties().IsLeftButtonPressed()) {
+            auto button = e.GetCurrentPoint(nullptr).Properties();
+            if (Ours() && (button.IsLeftButtonPressed() || button.IsRightButtonPressed())) {
                 g_open->pressed = TagAt(e.OriginalSource());
+                g_open->pressedRight = button.IsRightButtonPressed();
             }
         });
     }));
@@ -19976,7 +21232,8 @@ void WatchList(Controls::StackPanel const& list) {
             bool same = !tag.empty() && tag == g_open->pressed;
             g_open->pressed.clear();
             if (same) {
-                core::Post([tag] { core::Guard(L"Usage list click", [&] { Act(tag); }); });
+                bool right = g_open->pressedRight;
+                core::Post([tag, right] { core::Guard(L"Usage list click", [&] { Act(tag, right); }); });
             }
         });
     }));
@@ -20005,7 +21262,22 @@ void WatchList(Controls::StackPanel const& list) {
 FrameworkElement BuildSessions() {
     Controls::StackPanel panel;
     auto summary = Text(L"", kSmallSize, C().dim);
-    auto head = Line(Text(L"세션", kNameSize, C().text, Semi()), summary);
+    FrameworkElement title = Text(L"세션", kNameSize, C().text, Semi());
+    if (ChatOn()) {
+        Controls::Border add;
+        add.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+        add.Padding({7, 2, 8, 3});
+        add.Margin({8, 0, 0, 0});
+        add.Background(Brush(C().tile));
+        auto plus = Text(L"\xE710", 9, C().dim);
+        plus.FontFamily(Media::FontFamily{kIconFont});
+        plus.Margin({0, 0, 4, 0});
+        add.Child(Across({plus, Text(L"새 세션", kSmallSize, C().text, Medium())}));
+        SetTag(add, L"new|");
+        Automation::AutomationProperties::SetName(add, L"새 세션");
+        title = Across({title, add});
+    }
+    auto head = Line(title, summary);
     head.Margin({2, 14, 2, 0});
     panel.Children().Append(head);
     Controls::StackPanel list;
@@ -20022,7 +21294,7 @@ FrameworkElement BuildSessions() {
     panel.Children().Append(card);
     g_open->sessionsSummary = summary;
     g_open->sessionsList = list;
-    WatchList(list);
+    WatchList(ChatOn() ? panel : list);  // the new session button is in the head
     return panel;
 }
 
@@ -20125,6 +21397,1335 @@ void StopSessions() {
     }
 }
 
+// ---- the chat panel ---------------------------------------------------------------------
+// With the chat panel on, a session picked in the list (or "새 세션") widens the
+// popup, which moves to the taskbar's middle as it does: at the right, the
+// session's recent conversation from its log, a box to write in, and chips for
+// the model with its effort (and Claude's Ultracode) and for the permission
+// mode, each opening a popover. Sending and changing go through app_drive on a
+// worker, one at a time; the panel says how it went.
+
+constexpr double kChatWidth = 340, kChatGap = 12;
+constexpr int kWidenMs = 380, kNarrowMs = 280;
+constexpr ULONGLONG kKeepOpenMs = 12000;  // an app's window may come forward meanwhile
+constexpr size_t kSaidShown = 16;
+constexpr size_t kFoldersShown = 8;
+
+std::mutex g_driveLock;  // one job on the apps at a time
+std::mutex g_chatLock;
+[[clang::no_destroy]] ai_sessions::Conversation g_conversation;  // under g_chatLock
+std::atomic<bool> g_chatLooking;
+
+bool ChatOn() {
+    return SessionsOn() && settings::g.usage.chat;
+}
+
+struct Option {
+    std::wstring id, label, about;
+    app_drive::Labels app;          // as the app's menus name it
+    uint32_t dark = 0, light = 0;  // a permission's colour (Bloom's preset accents)
+};
+
+std::vector<Option> const& ClaudeModels() {
+    [[clang::no_destroy]] static const std::vector<Option> k{
+        {L"claude-opus-5-5", L"Opus 5.5", L"", {L"Opus 5.5"}},
+        {L"claude-fable-5-1", L"Fable 5.1", L"", {L"Fable 5.1"}},
+        {L"claude-sonnet-5-5", L"Sonnet 5.5", L"", {L"Sonnet 5.5"}},
+        {L"claude-haiku-5-5", L"Haiku 5.5", L"", {L"Haiku 5.5"}},
+    };
+    return k;
+}
+
+// Claude Code's levels; Codex's by its models' ids, ultra among them.
+std::vector<Option> const& Efforts(bool codex) {
+    [[clang::no_destroy]] static const std::vector<Option> claude{
+        {L"low", L"낮음", L"", {L"낮음", L"Low"}},
+        {L"medium", L"중간", L"", {L"중간", L"Medium"}},
+        {L"high", L"높음", L"", {L"높음", L"High"}},
+        {L"xhigh", L"엑스트라", L"", {L"엑스트라", L"Extra high", L"Extra"}},
+        {L"max", L"최대", L"", {L"최대", L"Max"}},
+    };
+    [[clang::no_destroy]] static const std::vector<Option> gpt{
+        {L"minimal", L"최소", L"", {L"최소", L"Minimal"}},
+        {L"low", L"낮음", L"", {L"낮음", L"Low"}},
+        {L"medium", L"중간", L"", {L"중간", L"Medium"}},
+        {L"high", L"높음", L"", {L"높음", L"High"}},
+        {L"xhigh", L"매우 높음", L"", {L"매우 높음", L"Extra high", L"xhigh"}},
+        {L"max", L"최대", L"", {L"최대", L"Max"}},
+        {L"ultra", L"울트라", L"", {L"울트라", L"Ultra"}},
+    };
+    return codex ? gpt : claude;
+}
+
+std::vector<Option> const& Modes(bool codex) {
+    [[clang::no_destroy]] static const std::vector<Option> claude{
+        {L"auto", L"자동", L"Claude가 권한 결정을 처리합니다 (기본값)", {L"자동", L"Auto"}, 0xFF5ED3AE, 0xFF168F6C},
+        {L"default", L"수동", L"변경하기 전에 항상 확인합니다", {L"수동", L"Manual", L"Ask"}, 0xFFA1A1AA, 0xFF52525B},
+        {L"acceptEdits", L"편집 자동 수락", L"모든 파일 편집을 자동으로 수락합니다", {L"편집 자동 수락", L"Accept edits"},
+         0xFFB49CFF, 0xFF7B5BDB},
+        {L"plan", L"계획", L"변경하기 전에 계획부터 세웁니다", {L"계획", L"Plan"}, 0xFF72B6FF, 0xFF2F72D6},
+        {L"bypassPermissions", L"권한 무시", L"모든 권한 확인을 건너뜁니다. 켜는 확인은 Claude 앱에서 직접 눌러 주세요",
+         {L"권한 무시", L"Bypass permissions"}, 0xFFE77578, 0xFFB3363A},
+    };
+    [[clang::no_destroy]] static const std::vector<Option> gpt{
+        {L"read-only", L"읽기 전용", L"파일을 읽기만 하고, 바꿀 때마다 묻습니다", {L"읽기 전용", L"Read only"}, 0xFFA1A1AA,
+         0xFF52525B},
+        {L"workspace-write", L"작업 폴더", L"작업 폴더 안에서는 묻지 않고 고칩니다", {L"자동", L"Auto", L"작업 폴더"},
+         0xFF5ED3AE, 0xFF168F6C},
+        {L"danger-full-access", L"전체 권한", L"폴더 밖과 네트워크까지 묻지 않습니다",
+         {L"전체 액세스", L"Full access", L"전체 권한"}, 0xFFE77578, 0xFFB3363A},
+    };
+    return codex ? gpt : claude;
+}
+
+Option const* FindOption(std::vector<Option> const& list, std::wstring const& id) {
+    auto it = std::ranges::find(list, id, &Option::id);
+    return it == list.end() ? nullptr : &*it;
+}
+
+uint32_t ModeColor(Option const& o) {
+    return g_open->dark ? o.dark : o.light;
+}
+
+// "Opus 5.5" for claude-opus-5-5, also for one not listed; Codex's by its cache.
+std::wstring ModelLabel(Chat const& c) {
+    if (c.model.empty()) return L"앱 기본값";
+    if (c.codex) {
+        if (c.codexModels) {
+            for (auto const& m : *c.codexModels) {
+                if (m.slug == c.model) return m.name;
+            }
+        }
+        return c.model;
+    }
+    if (auto const* o = FindOption(ClaudeModels(), c.model)) return o->label;
+    std::wstring id = c.model.substr(0, c.model.find(L'['));
+    if (!id.starts_with(L"claude-")) return id;
+    std::vector<std::wstring> parts;
+    for (size_t at = 7; at <= id.size();) {
+        size_t next = id.find(L'-', at);
+        if (next == std::wstring::npos) next = id.size();
+        parts.push_back(id.substr(at, next - at));
+        at = next + 1;
+    }
+    if (parts.size() > 1 && parts.back().size() == 8) parts.pop_back();  // a date
+    std::wstring out;
+    for (size_t i = 0; i < parts.size(); i++) {
+        std::wstring part = parts[i];
+        if (i == 0 && !part.empty()) part[0] = towupper(part[0]);
+        out += (i == 0 ? L"" : i == 1 ? L" " : L".") + part;
+    }
+    return out;
+}
+
+// The levels the chat's model offers, in order.
+std::vector<Option> EffortsOf(Chat const& c) {
+    auto const& all = Efforts(c.codex);
+    if (!c.codex) return all;
+    std::vector<Option> out;
+    if (c.codexModels) {
+        for (auto const& m : *c.codexModels) {
+            if (m.slug != c.model) continue;
+            for (auto const& id : m.efforts) {
+                auto const* known = FindOption(all, id);
+                out.push_back(known ? *known : Option{id, id, L"", {id}});
+            }
+            return out;
+        }
+    }
+    for (auto const& o : all) {
+        if (o.id != L"minimal") out.push_back(o);
+    }
+    return out;
+}
+
+std::wstring FolderName(std::wstring const& path) {
+    size_t end = path.find_last_not_of(L"\\/");
+    if (end == std::wstring::npos) return path;
+    size_t start = path.find_last_of(L"\\/", end);
+    return path.substr(start == std::wstring::npos ? 0 : start + 1, end - (start == std::wstring::npos ? 0 : start + 1) + 1);
+}
+
+// Project folders of the sessions read, newest first.
+std::vector<std::wstring> RecentFolders() {
+    std::vector<std::wstring> out;
+    auto snapshot = ai_sessions::g_snapshot;
+    std::function<void(std::vector<ai_sessions::Row> const&)> add = [&](std::vector<ai_sessions::Row> const& rows) {
+        for (auto const& r : rows) {
+            bool absolute = r.projectPath.size() > 2 && r.projectPath[1] == L':';
+            if (absolute && out.size() < kFoldersShown &&
+                std::ranges::none_of(out, [&](std::wstring const& f) { return app_drive::SameFolder(f, r.projectPath); })) {
+                out.push_back(r.projectPath);
+            }
+            add(r.children);
+        }
+    };
+    if (snapshot) add(snapshot->rows);
+    return out;
+}
+
+void SetStatus(std::wstring text, int tone) {
+    g_open->chat->status = std::move(text);
+    g_open->chat->tone = tone;
+}
+
+// ---- its pieces ----------------------------------------------------------------------------
+
+Controls::TextBlock Glyph(PCWSTR glyph, double size, uint32_t color) {
+    auto t = Text(glyph, size, color);
+    t.FontFamily(Media::FontFamily{kIconFont});
+    return t;
+}
+
+// ▮▮▮▯▯: the level among the model's, rising.
+FrameworkElement Bars(size_t level, size_t count) {
+    Controls::StackPanel bars;
+    bars.Orientation(Controls::Orientation::Horizontal);
+    bars.Spacing(1.5);
+    bars.Height(10);
+    bars.VerticalAlignment(VerticalAlignment::Center);
+    for (size_t i = 0; i < count; i++) {
+        Controls::Border bar;
+        bar.Width(3);
+        bar.Height(4 + 6.0 * i / std::max<size_t>(1, count - 1));
+        bar.CornerRadius(CornerRadiusHelper::FromUniformRadius(1));
+        bar.VerticalAlignment(VerticalAlignment::Bottom);
+        bar.Background(Brush(i <= level ? C().accent : C().edge));
+        bars.Children().Append(bar);
+    }
+    return bars;
+}
+
+// A chip under the box: `lead`, its label, `trail`, ▾; lit while its popover is open.
+Controls::Border Chip(std::wstring const& tag, FrameworkElement const& lead, std::wstring const& label,
+                      FrameworkElement const& trail, bool open, double maxWidth) {
+    Controls::Border chip;
+    chip.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+    chip.Padding({8, 4, 7, 4});
+    chip.Margin({0, 0, 6, 0});
+    chip.BorderThickness({1, 1, 1, 1});
+    chip.BorderBrush(Brush(open ? C().accent : 0));
+    chip.Background(Brush(open ? C().accentSoft : g_open->chatHover == tag ? C().edge : C().tile));
+    auto text = Text(label, kSmallSize, C().text, Medium());
+    text.MaxWidth(maxWidth);
+    if (lead) lead.Margin({0, 0, 5, 0});
+    if (trail) trail.Margin({6, 0, 0, 0});
+    auto chevron = Glyph(L"\xE70D", 8, C().faint);
+    chevron.Margin({6, 1, 0, 0});
+    chip.Child(Across({lead, text, trail, chevron}));
+    SetTag(chip, tag);
+    Automation::AutomationProperties::SetName(chip, label);
+    return chip;
+}
+
+// A row in a popover, lit under the pointer by its own handlers (the popover
+// is made only as it opens or changes).
+Controls::Border MenuRow(std::wstring const& tag, FrameworkElement const& content, bool current) {
+    Controls::Border row;
+    row.CornerRadius(CornerRadiusHelper::FromUniformRadius(7));
+    row.Padding({8, 6, 8, 6});
+    uint32_t rest = current ? C().accentSoft : 0, lit = current ? C().accentSoft : C().hover;
+    row.Background(Brush(rest));
+    row.Child(content);
+    SetTag(row, tag);
+    if (folders::g_popup) {
+        folders::Keep(*folders::g_popup, row.PointerEntered(winrt::auto_revoke, [lit](auto const& sender, auto&&) {
+                          if (auto b = sender.template try_as<Controls::Border>()) b.Background(Brush(lit));
+                      }));
+        folders::Keep(*folders::g_popup, row.PointerExited(winrt::auto_revoke, [rest](auto const& sender, auto&&) {
+                          if (auto b = sender.template try_as<Controls::Border>()) b.Background(Brush(rest));
+                      }));
+    }
+    return row;
+}
+
+FrameworkElement Check(bool on) {
+    return on ? Glyph(L"\xE73E", 11, C().accentText) : nullptr;
+}
+
+Controls::TextBlock Caption(std::wstring const& text, double top) {
+    auto t = Text(text, kSmallSize, C().faint, Medium());
+    t.Margin({4, top, 4, 4});
+    return t;
+}
+
+// A switch as HeroUI draws one.
+FrameworkElement Switch(bool on) {
+    Controls::Border track;
+    track.Width(30);
+    track.Height(17);
+    track.CornerRadius(CornerRadiusHelper::FromUniformRadius(8.5));
+    track.Background(Brush(on ? C().accent : C().edge));
+    Controls::Border knob;
+    knob.Width(13);
+    knob.Height(13);
+    knob.CornerRadius(CornerRadiusHelper::FromUniformRadius(6.5));
+    knob.Background(Brush(0xFFFFFFFF));
+    knob.Margin({2, 0, 2, 0});
+    knob.HorizontalAlignment(on ? HorizontalAlignment::Right : HorizontalAlignment::Left);
+    knob.VerticalAlignment(VerticalAlignment::Center);
+    track.Child(knob);
+    track.VerticalAlignment(VerticalAlignment::Center);
+    return track;
+}
+
+// ---- drawing it ------------------------------------------------------------------------------
+
+void DrawChatHead() {
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    auto head = o.chatHead;
+    head.Children().Clear();
+    auto snapshot = ai_sessions::g_snapshot;
+    auto const* r = c.fresh ? nullptr : RowByKey(snapshot.get(), c.key);
+    FrameworkElement mark{nullptr};
+    if (r) {
+        mark = StateMark(*r, 9);
+        mark.Margin({1, 0, 8, 0});
+    }
+    auto title = Text(c.fresh ? L"새 세션" : !c.title.empty() ? c.title : L"제목 없는 세션", kTitleSize - 0.5, C().text, Semi());
+    Controls::Border close;
+    close.Width(24);
+    close.Height(24);
+    close.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    close.Background(Brush(o.chatHover == L"chat|close" ? C().edge : 0));
+    auto x = Glyph(L"\xE711", 10, C().dim);
+    x.HorizontalAlignment(HorizontalAlignment::Center);
+    close.Child(x);
+    SetTag(close, L"chat|close");
+    Automation::AutomationProperties::SetName(close, L"채팅 닫기");
+    Controls::ToolTipService::SetToolTip(close, winrt::box_value(L"채팅 닫기"));
+    head.Children().Append(Columns(mark, title, close));
+    std::wstring line;
+    uint32_t ink = C().dim;
+    std::wstring app = c.codex ? L"Codex" : L"Claude";
+    if (c.fresh) {
+        line = app + L" 앱에서 새 대화를 시작해요";
+    } else if (!c.cannot.empty()) {
+        line = c.cannot;
+        ink = C().warn;
+    } else {
+        bool live = r && (r->Live() || r->state == ai_sessions::State::kInput);
+        line = Joined({app, r ? StateWords(*r) : L"", live ? L"보내면 진행 중인 턴에 끼워 넣어요" : L"보내면 새 턴을 시작해요"});
+    }
+    auto sub = Text(line, kSmallSize, ink);
+    sub.TextWrapping(TextWrapping::Wrap);
+    sub.MaxLines(2);
+    sub.Margin({0, 3, 0, 0});
+    head.Children().Append(sub);
+    o.chatMeter.Child(r ? ContextMeter(*r, L"컨텍스트") : nullptr);
+}
+
+void DrawSaid() {
+    auto& c = *g_open->chat;
+    auto list = g_open->chatSaid;
+    list.Children().Clear();
+    auto note = [&](std::wstring const& text) {
+        auto n = Text(text, kSmallSize, C().dim);
+        n.TextWrapping(TextWrapping::Wrap);
+        n.Margin({10, 10, 10, 10});
+        list.Children().Append(n);
+    };
+    if (c.fresh) {
+        return note(L"첫 메시지를 보내면 앱에서 새 세션이 시작돼요. 폴더, 모델, 권한은 아래 칩에서 고릅니다.");
+    }
+    if (c.logPath.empty()) return note(L"이 세션의 기록 파일을 모릅니다");
+    if (!c.said) return note(L"대화 기록을 읽는 중…");
+    if (c.said->empty()) return note(L"기록 끝부분에 대화가 없어요");
+    size_t from = c.said->size() > kSaidShown ? c.said->size() - kSaidShown : 0;
+    for (size_t i = from; i < c.said->size(); i++) {
+        auto const& s = (*c.said)[i];
+        if (s.who == ai_sessions::Said::Who::kTool) {
+            auto icon = Glyph(L"\xE756", 10, C().faint);
+            icon.Margin({0, 0, 6, 0});
+            std::wstring words = s.tools > 1 ? L"도구 " + std::to_wstring(s.tools) + L"개 · " + s.text
+                                             : ToolWords(s.text) + L" · " + s.text;
+            auto line = Across({icon, Text(words, kSmallSize, C().faint)});
+            line.Margin({6, 3, 6, 3});
+            list.Children().Append(line);
+            continue;
+        }
+        bool me = s.who == ai_sessions::Said::Who::kMe;
+        auto text = Text(s.text, kTextSize, C().text);
+        text.TextWrapping(TextWrapping::Wrap);
+        text.MaxLines(me ? 10 : 16);
+        Controls::StackPanel inside;
+        if (me && s.steered) {
+            auto mark = Text(L"턴 중에 보냄", 10, C().accentText, Medium());
+            mark.Margin({0, 0, 0, 2});
+            inside.Children().Append(mark);
+        }
+        inside.Children().Append(text);
+        Controls::Border bubble;
+        bubble.CornerRadius(me ? CornerRadius{12, 12, 4, 12} : CornerRadius{12, 12, 12, 4});
+        bubble.Background(Brush(me ? C().accentSoft : C().tile));
+        bubble.Padding({10, 7, 10, 8});
+        bubble.MaxWidth(me ? 260 : 300);
+        bubble.HorizontalAlignment(me ? HorizontalAlignment::Right : HorizontalAlignment::Left);
+        bubble.Margin({0, 3, 0, 3});
+        bubble.Child(inside);
+        list.Children().Append(bubble);
+    }
+}
+
+void DrawChips() {
+    auto& c = *g_open->chat;
+    auto chips = g_open->chatChips;
+    chips.Children().Clear();
+    if (c.fresh) {
+        chips.Children().Append(Chip(L"menu|folder", Glyph(L"\xE8B7", 11, C().dim),
+                                     c.folder.empty() ? L"폴더 고르기" : FolderName(c.folder), nullptr,
+                                     c.menu == L"folder", 84));
+    }
+    auto efforts = EffortsOf(c);
+    auto level = std::ranges::find(efforts, c.effort, &Option::id);
+    FrameworkElement bars{nullptr};
+    if (level != efforts.end()) bars = Bars(size_t(level - efforts.begin()), efforts.size());
+    std::wstring model = ModelLabel(c) + (!c.codex && c.ultracode == 1 ? L" · 울트라코드" : L"");
+    chips.Children().Append(Chip(L"menu|model", nullptr, model, bars, c.menu == L"model", c.fresh ? 92 : 150));
+    auto const* mode = FindOption(Modes(c.codex), c.mode);
+    chips.Children().Append(Chip(L"menu|mode", Glyph(L"\xEA18", 11, mode ? ModeColor(*mode) : C().dim),
+                                 mode ? mode->label : c.mode.empty() ? L"앱 기본값" : c.mode, nullptr,
+                                 c.menu == L"mode", c.fresh ? 70 : 110));
+}
+
+void DrawStatus() {
+    auto& c = *g_open->chat;
+    auto status = g_open->chatStatus;
+    status.Text(c.status);
+    status.Foreground(Brush(c.tone == 1 ? C().accentText : c.tone == 2 ? C().danger : C().dim));
+    status.Visibility(c.status.empty() ? Visibility::Collapsed : Visibility::Visible);
+}
+
+void DrawSendButton() {
+    auto& o = *g_open;
+    bool ready = o.chat && !o.chat->busy && o.chat->cannot.empty() && !ai_sessions::Tidy(std::wstring(o.chatBox.Text())).empty();
+    o.chatSend.Background(Brush(ready ? C().accent : o.chatHover == L"chat|send" ? C().edge : C().tile));
+    if (auto glyph = o.chatSend.Child().try_as<Controls::TextBlock>()) {
+        glyph.Foreground(Brush(ready ? 0xFFFFFFFF : C().faint));
+    }
+}
+
+void DrawModelMenu(Controls::StackPanel const& pop) {
+    auto& c = *g_open->chat;
+    // Claude | ChatGPT: the session's own lit; a new session picks.
+    Controls::Grid segments;
+    segments.Background(Brush(C().tile));
+    segments.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+    segments.Padding({2, 2, 2, 2});
+    for (int i = 0; i < 2; i++) {
+        Controls::ColumnDefinition column;
+        segments.ColumnDefinitions().Append(column);
+        bool codex = i == 1, on = c.codex == codex, can = c.fresh || on;
+        Controls::Border cell;
+        cell.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+        cell.Padding({0, 5, 0, 5});
+        cell.Background(Brush(on ? (g_open->dark ? 0xFF3F3F46 : 0xFFFFFFFF) : 0));
+        auto label = Text(codex ? L"ChatGPT" : L"Claude", kSmallSize, on ? C().text : can ? C().dim : C().faint,
+                          on ? Semi() : Medium());
+        label.HorizontalAlignment(HorizontalAlignment::Center);
+        cell.Child(label);
+        SetTag(cell, can && !on ? (codex ? L"platform|codex" : L"platform|claude") : L"none|");
+        if (!can) Controls::ToolTipService::SetToolTip(cell, winrt::box_value(L"이 세션의 앱은 바꿀 수 없어요"));
+        Controls::Grid::SetColumn(cell, i);
+        segments.Children().Append(cell);
+    }
+    pop.Children().Append(segments);
+
+    pop.Children().Append(Caption(L"모델", 10));
+    std::vector<std::pair<std::wstring, std::wstring>> models;  // id, label
+    if (!c.codex) {
+        for (auto const& m : ClaudeModels()) models.push_back({m.id, m.label});
+    } else if (c.codexModels) {
+        for (auto const& m : *c.codexModels) models.push_back({m.slug, m.name});
+    }
+    if (models.empty()) {
+        auto none = Text(c.codex ? L"Codex 모델 목록을 읽는 중…" : L"", kSmallSize, C().dim);
+        none.Margin({4, 0, 4, 4});
+        pop.Children().Append(none);
+    }
+    for (auto const& [id, label] : models) {
+        bool current = id == c.model;
+        pop.Children().Append(MenuRow(L"model|" + id, Columns(nullptr, Text(label, kNameSize, C().text, Medium()), Check(current)), current));
+    }
+
+    auto efforts = EffortsOf(c);
+    auto level = std::ranges::find(efforts, c.effort, &Option::id);
+    auto now = Text(level != efforts.end() ? level->label : L"앱 기본값", kSmallSize, C().text, Medium());
+    auto effortHead = Columns(nullptr, Caption(L"노력", 0), now);
+    now.Margin({8, 0, 4, 4});  // on the caption's line
+    effortHead.Margin({0, 12, 0, 0});
+    pop.Children().Append(effortHead);
+    // The levels as stops on a track, filled up to the one in use.
+    Controls::Grid track;
+    track.Height(22);
+    track.Margin({4, 0, 4, 0});
+    size_t n = efforts.size();
+    for (size_t i = 0; i < n; i++) {
+        Controls::ColumnDefinition column;
+        track.ColumnDefinitions().Append(column);
+    }
+    if (n > 1) {
+        Controls::Border line;
+        line.Height(3);
+        line.CornerRadius(CornerRadiusHelper::FromUniformRadius(1.5));
+        line.Background(Brush(C().edge));
+        line.VerticalAlignment(VerticalAlignment::Center);
+        Controls::Grid::SetColumnSpan(line, (int)n);
+        line.Margin({0, 0, 0, 0});
+        track.Children().Append(line);
+    }
+    for (size_t i = 0; i < n; i++) {
+        bool filled = level != efforts.end() && i <= size_t(level - efforts.begin());
+        bool at = level != efforts.end() && i == size_t(level - efforts.begin());
+        Controls::Border hit;  // the whole cell takes the click
+        hit.Background(Brush(0));
+        Controls::Border dot;
+        dot.Width(at ? 14 : 10);
+        dot.Height(at ? 14 : 10);
+        dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(at ? 7 : 5));
+        dot.Background(Brush(filled ? C().accent : (g_open->dark ? 0xFF3F3F46 : 0xFFE4E4E7)));
+        dot.BorderThickness({at ? 2.0 : 0, at ? 2.0 : 0, at ? 2.0 : 0, at ? 2.0 : 0});
+        dot.BorderBrush(Brush(0xFFFFFFFF));
+        dot.HorizontalAlignment(i == 0 ? HorizontalAlignment::Left : i + 1 == n ? HorizontalAlignment::Right : HorizontalAlignment::Center);
+        hit.Child(dot);
+        SetTag(hit, L"effort|" + efforts[i].id);
+        Automation::AutomationProperties::SetName(hit, efforts[i].label);
+        Controls::ToolTipService::SetToolTip(hit, winrt::box_value(efforts[i].label));
+        Controls::Grid::SetColumn(hit, (int)i);
+        track.Children().Append(hit);
+    }
+    pop.Children().Append(track);
+    auto ends = Line(Text(L"빠르게", 10.5, C().faint), Text(L"똑똑하게", 10.5, C().faint));
+    ends.Margin({4, 0, 4, 2});
+    pop.Children().Append(ends);
+
+    if (!c.codex) {
+        Controls::StackPanel words;
+        words.Children().Append(Text(L"울트라코드", kNameSize, C().text, Medium()));
+        auto about = Text(L"에이전트 여럿이 더 깊게 일합니다 · 사용량이 많아요", kSmallSize, C().faint);
+        about.TextWrapping(TextWrapping::Wrap);
+        words.Children().Append(about);
+        auto row = MenuRow(L"ultra|", Columns(nullptr, words, Switch(c.ultracode == 1)), false);
+        row.Margin({0, 8, 0, 0});
+        pop.Children().Append(row);
+    }
+}
+
+void DrawModeMenu(Controls::StackPanel const& pop) {
+    auto& c = *g_open->chat;
+    pop.Children().Append(Caption(c.codex ? L"권한 (Codex)" : L"권한", 2));
+    for (auto const& mode : Modes(c.codex)) {
+        bool current = mode.id == c.mode;
+        auto shield = Glyph(L"\xEA18", 14, ModeColor(mode));
+        shield.VerticalAlignment(VerticalAlignment::Top);
+        shield.Margin({0, 1, 9, 0});
+        Controls::StackPanel words;
+        words.Children().Append(Text(mode.label, kNameSize, C().text, Medium()));
+        auto about = Text(mode.about, kSmallSize, C().faint);
+        about.TextWrapping(TextWrapping::Wrap);
+        words.Children().Append(about);
+        pop.Children().Append(MenuRow(L"mode|" + mode.id, Columns(shield, words, Check(current)), current));
+    }
+}
+
+void DrawFolderMenu(Controls::StackPanel const& pop) {
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    pop.Children().Append(Caption(L"폴더", 2));
+    o.chatFolders = RecentFolders();
+    for (size_t i = 0; i < o.chatFolders.size(); i++) {
+        auto const& path = o.chatFolders[i];
+        bool current = app_drive::SameFolder(path, c.folder);
+        auto icon = Glyph(L"\xE8B7", 12, C().dim);
+        icon.VerticalAlignment(VerticalAlignment::Top);
+        icon.Margin({0, 2, 8, 0});
+        Controls::StackPanel words;
+        words.Children().Append(Text(FolderName(path), kNameSize, C().text, Medium()));
+        words.Children().Append(Text(path, kSmallSize, C().faint));
+        pop.Children().Append(MenuRow(L"folder|" + std::to_wstring(i), Columns(icon, words, Check(current)), current));
+    }
+    o.folderBox.Margin({0, 8, 0, 0});
+    pop.Children().Append(o.folderBox);
+}
+
+void DrawOverlay() {
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    auto overlay = o.chatOverlay;
+    // The path box is kept across popovers; it leaves the old one first.
+    if (auto parent = o.folderBox.Parent().try_as<Controls::Panel>()) {
+        uint32_t index;
+        if (parent.Children().IndexOf(o.folderBox, index)) parent.Children().RemoveAt(index);
+    }
+    overlay.Children().Clear();
+    if (c.menu.empty()) {
+        overlay.Visibility(Visibility::Collapsed);
+        return;
+    }
+    overlay.Visibility(Visibility::Visible);
+    Controls::Border backdrop;  // a click beside the popover closes it
+    backdrop.Background(Brush(0));
+    SetTag(backdrop, L"menu|close");
+    overlay.Children().Append(backdrop);
+    Controls::StackPanel pop;
+    pop.Spacing(1);
+    if (c.menu == L"model") DrawModelMenu(pop);
+    if (c.menu == L"mode") DrawModeMenu(pop);
+    if (c.menu == L"folder") DrawFolderMenu(pop);
+    Controls::Border card;
+    card.CornerRadius(CornerRadiusHelper::FromUniformRadius(12));
+    card.Background(Brush(o.dark ? 0xFF2E2E33 : 0xFFFFFFFF));
+    card.BorderThickness({1, 1, 1, 1});
+    card.BorderBrush(Brush(C().edge));
+    card.Padding({8, 8, 8, 8});
+    card.VerticalAlignment(VerticalAlignment::Bottom);
+    // Just over the chips.
+    double below = 0;
+    try {
+        below = o.chatPanel.ActualHeight() -
+                o.chatChips.TransformToVisual(o.chatPanel).TransformPoint({0, 0}).Y + 6;
+    } catch (...) {
+    }
+    card.Margin({0, 0, 0, std::max(0.0, below)});
+    card.Child(pop);
+    SetTag(card, L"none|");
+    overlay.Children().Append(card);
+}
+
+// The panel drawn again; the conversation only with `said`, scrolled down when
+// more came and it was at its end.
+void RenderChat(bool said) {
+    if (!Ours() || !g_open->chat || !g_open->chatPanel) return;
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    DrawChatHead();
+    bool down = false;
+    if (said) {
+        std::wstring last = c.said && !c.said->empty() ? c.said->back().text + std::to_wstring(c.said->back().at) +
+                                                             std::to_wstring(c.said->size())
+                                                       : L"";
+        bool atEnd = o.chatScroll.VerticalOffset() >= o.chatScroll.ScrollableHeight() - 8;
+        down = last != c.lastSaid && (atEnd || c.lastSaid.empty());
+        c.lastSaid = last;
+        DrawSaid();
+    }
+    DrawChips();
+    DrawStatus();
+    DrawSendButton();
+    DrawOverlay();
+    if (!Settle(L"chat")) return;
+    if (down) o.chatScroll.ChangeView(nullptr, wf::IReference<double>(o.chatScroll.ScrollableHeight()), nullptr, true);
+}
+
+// Under the pointer: only what lights.
+void HoverChat() {
+    if (!Ours() || !g_open->chat) return;
+    DrawChatHead();
+    DrawChips();
+    DrawSendButton();
+}
+
+// ---- reading and driving -------------------------------------------------------------------
+
+// The picked session's log, read again as it grows (one look at a time).
+void LookChat() {
+    if (!Ours() || !g_open->chat || g_open->chat->logPath.empty() || g_chatLooking.exchange(true)) return;
+    auto& c = *g_open->chat;
+    folders::StartJob([path = c.logPath, codex = c.codex, generation = c.generation] {
+        std::shared_ptr<const std::vector<ai_sessions::Said>> said;
+        try {
+            std::lock_guard guard(g_chatLock);
+            auto source = codex ? ai_sessions::Source::kCodex : ai_sessions::Source::kClaude;
+            if (g_conversation.path != path || g_conversation.source != source) {
+                g_conversation = ai_sessions::Conversation{};
+                g_conversation.path = path;
+                g_conversation.source = source;
+            }
+            if (ai_sessions::Update(g_conversation)) {
+                said = std::make_shared<const std::vector<ai_sessions::Said>>(g_conversation.said);
+            }
+        } catch (...) {
+            Wh_Log(L"Chat read failed: %08X", winrt::to_hresult());
+        }
+        g_chatLooking = false;
+        core::Post([said, generation] {
+            core::Guard(L"Usage chat said", [&] {
+                if (!Ours() || !g_open->chat) return;
+                if (g_open->chat->generation != generation) return LookChat();
+                if (!said && g_open->chat->said) return;
+                g_open->chat->said = said ? said : std::make_shared<const std::vector<ai_sessions::Said>>();
+                RenderChat(true);
+            });
+        });
+    });
+}
+
+void ForgetChat() {
+    folders::StartJob([] {
+        std::lock_guard guard(g_chatLock);
+        g_conversation = ai_sessions::Conversation{};
+    });
+}
+
+void LoadCodexModels() {
+    auto& c = *g_open->chat;
+    if (c.codexModels) return;
+    folders::StartJob([generation = c.generation] {
+        std::shared_ptr<const std::vector<ai_sessions::CodexModel>> models;
+        try {
+            models = std::make_shared<const std::vector<ai_sessions::CodexModel>>(ai_sessions::CodexModels());
+        } catch (...) {
+            return;
+        }
+        core::Post([models, generation] {
+            core::Guard(L"Usage chat models", [&] {
+                if (!Ours() || !g_open->chat || g_open->chat->generation != generation) return;
+                g_open->chat->codexModels = models;
+                RenderChat(false);
+            });
+        });
+    });
+}
+
+// `work` on a worker, after any other job on the apps; `done` back here with
+// what went wrong ("" when nothing did), unless another session was picked.
+// The popup stays open meanwhile when an app comes to the front.
+void RunDrive(std::function<std::wstring()> work, std::function<void(Chat&, std::wstring const&)> done) {
+    auto& c = *g_open->chat;
+    c.busy = true;
+    if (folders::g_popup) folders::g_popup->keepUntil = GetTickCount64() + kKeepOpenMs;
+    folders::StartJob([work = std::move(work), done = std::move(done), generation = c.generation] {
+        std::wstring error;
+        {
+            std::lock_guard guard(g_driveLock);
+            if (core::g_unloading) return;
+            try {
+                error = work();
+            } catch (...) {
+                error = L"앱을 다루다 오류가 났어요";
+                Wh_Log(L"Chat drive failed: %08X", winrt::to_hresult());
+            }
+        }
+        core::DiagLine(L"Usage chat job: %s", error.empty() ? L"done" : error.c_str());
+        core::Post([done, generation, error] {
+            core::Guard(L"Usage chat done", [&] {
+                if (folders::g_popup) folders::g_popup->keepUntil = GetTickCount64() + 1500;
+                if (!Ours() || !g_open->chat || g_open->chat->generation != generation) return;
+                g_open->chat->busy = false;
+                done(*g_open->chat, error);
+                RenderChat(false);
+                LookChat();
+            });
+        });
+    });
+}
+
+// Tells the panel where a long job is, from its worker.
+std::function<void(std::wstring)> StepTeller(uint32_t generation) {
+    return [generation](std::wstring step) {
+        core::Post([generation, step] {
+            core::Guard(L"Usage chat step", [&] {
+                if (!Ours() || !g_open->chat || g_open->chat->generation != generation) return;
+                SetStatus(step, 0);
+                RenderChat(false);
+            });
+        });
+    };
+}
+
+void ApplyChange(Chat& c, app_drive::Change what, std::wstring const& value) {
+    switch (what) {
+        case app_drive::Change::kModel: {
+            c.model = value;
+            auto efforts = EffortsOf(c);
+            if (c.codex && !c.effort.empty() && std::ranges::find(efforts, c.effort, &Option::id) == efforts.end()) {
+                c.effort.clear();
+            }
+            break;
+        }
+        case app_drive::Change::kEffort:
+            c.effort = value;
+            break;
+        case app_drive::Change::kMode:
+            c.mode = value;
+            break;
+        case app_drive::Change::kUltracode:
+            c.ultracode = value == L"on";
+            break;
+    }
+}
+
+// The app labels and the place in its menu of what `value` names.
+app_drive::Labels LabelsOf(Chat const& c, app_drive::Change what, std::wstring const& value, int& index) {
+    index = -1;
+    if (what == app_drive::Change::kModel) {
+        if (c.codex) {
+            Chat named = c;
+            named.model = value;
+            return {ModelLabel(named), value};
+        }
+        auto const* o = FindOption(ClaudeModels(), value);
+        return o ? o->app : app_drive::Labels{value};
+    }
+    if (what == app_drive::Change::kEffort) {
+        auto efforts = EffortsOf(c);
+        auto it = std::ranges::find(efforts, value, &Option::id);
+        if (it == efforts.end()) return {value};
+        index = int(it - efforts.begin());
+        return it->app;
+    }
+    if (what == app_drive::Change::kMode) {
+        auto const* o = FindOption(Modes(c.codex), value);
+        return o ? o->app : app_drive::Labels{value};
+    }
+    return {};
+}
+
+std::wstring ChangeWords(app_drive::Change what) {
+    switch (what) {
+        case app_drive::Change::kModel:
+            return L"모델을";
+        case app_drive::Change::kEffort:
+            return L"노력을";
+        case app_drive::Change::kMode:
+            return L"권한을";
+        default:
+            return L"울트라코드를";
+    }
+}
+
+// A pick in a popover: for a new session kept until it starts, else made in
+// the app at once.
+void PickIn(app_drive::Change what, std::wstring const& value) {
+    auto& c = *g_open->chat;
+    if (c.fresh) {
+        ApplyChange(c, what, value);
+        if (what == app_drive::Change::kModel && c.codex) c.effort.clear();
+        if (what == app_drive::Change::kMode) c.menu.clear();
+        return;
+    }
+    if (!c.cannot.empty()) return SetStatus(c.cannot, 2);
+    if (c.busy) return SetStatus(L"앞의 작업이 끝나면 다시 눌러 주세요", 2);
+    int index = -1;
+    app_drive::Labels labels = LabelsOf(c, what, value, index);
+    bool on = value == L"on";
+    std::wstring words = ChangeWords(what);
+    if (what == app_drive::Change::kMode) c.menu.clear();
+    SetStatus(words + L" 앱에서 바꾸는 중…", 0);
+    RunDrive(
+        [codex = c.codex, title = c.title, appTitle = c.appTitle, record = c.record, what, labels, index, on] {
+            return codex ? app_drive::ChangeCodex(title, what, labels, index)
+                         : app_drive::ChangeClaude(appTitle, record, what, labels, index, on);
+        },
+        [what, value, words](Chat& c, std::wstring const& error) {
+            if (!error.empty()) return SetStatus(error, 2);
+            ApplyChange(c, what, value);
+            SetStatus(words + L" 바꿨어요 · 다음 메시지부터", 1);
+        });
+}
+
+void Send() {
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    std::wstring text = ai_sessions::Tidy(std::wstring(o.chatBox.Text()));
+    if (text.empty()) return;
+    if (c.busy) {
+        SetStatus(L"앞의 작업이 끝나면 다시 보내 주세요", 2);
+    } else if (!c.cannot.empty()) {
+        SetStatus(c.cannot, 2);
+    } else if (c.fresh && c.folder.empty()) {
+        SetStatus(L"먼저 폴더를 골라 주세요", 2);
+        c.menu = L"folder";
+    } else if (c.fresh) {
+        app_drive::NewSession s;
+        s.folder = c.folder;
+        s.text = text;
+        int index = -1;
+        if (!c.model.empty()) s.model = LabelsOf(c, app_drive::Change::kModel, c.model, index);
+        if (!c.effort.empty()) s.effort = LabelsOf(c, app_drive::Change::kEffort, c.effort, s.effortIndex);
+        if (!c.mode.empty()) s.mode = LabelsOf(c, app_drive::Change::kMode, c.mode, index);
+        s.ultracode = c.codex ? -1 : c.ultracode;
+        SetStatus(L"새 세션을 여는 중…", 0);
+        RunDrive(
+            [s, codex = c.codex, step = StepTeller(c.generation)] {
+                return codex ? app_drive::StartCodex(s, step) : app_drive::StartClaude(s, step);
+            },
+            [text](Chat&, std::wstring const& error) {
+                if (!error.empty()) return SetStatus(error, 2);
+                if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == text) g_open->chatBox.Text(L"");
+                SetStatus(L"새 세션을 시작했어요 · 앱에서 이어 가요", 1);
+            });
+    } else {
+        SetStatus(L"보내는 중…", 0);
+        RunDrive(
+            [codex = c.codex, title = c.title, appTitle = c.appTitle, record = c.record, text] {
+                return codex ? app_drive::SendCodex(title, text) : app_drive::SendClaude(appTitle, record, text);
+            },
+            [text](Chat&, std::wstring const& error) {
+                if (!error.empty()) return SetStatus(error, 2);
+                if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == text) g_open->chatBox.Text(L"");
+                SetStatus(L"보냈어요", 1);
+            });
+    }
+    RenderChat(false);
+}
+
+// ---- opening, widening, moving ----------------------------------------------------------------
+
+// The flyout's popup, which holds the bubble in a window of its own.
+Controls::Primitives::Popup FlyoutPopup() {
+    if (!Ours() || !folders::g_popup->content) return nullptr;
+    auto& p = *folders::g_popup;
+    auto anchor = p.anchor.get();
+    for (auto const& root : {anchor ? anchor.XamlRoot() : nullptr, p.content.XamlRoot()}) {
+        if (!root) continue;
+        for (auto const& popup : Media::VisualTreeHelper::GetOpenPopupsForXamlRoot(root)) {
+            auto child = popup.Child();
+            for (DependencyObject at = p.content; at && child; at = Media::VisualTreeHelper::GetParent(at)) {
+                if (at.try_as<UIElement>() == child) return popup;
+            }
+        }
+    }
+    return nullptr;
+}
+
+
+// How far the taskbar's middle is from `anchor`'s.
+double MiddleShift(FrameworkElement const& anchor) {
+    if (!anchor || !anchor.XamlRoot()) return 0;
+    auto box = anchor.TransformToVisual(nullptr).TransformBounds(
+        {0, 0, float(anchor.ActualWidth()), float(anchor.ActualHeight())});
+    return anchor.XamlRoot().Size().Width / 2 - (box.X + box.Width / 2);
+}
+
+// With the chat panel on, the popup's window holds the bubble both narrow (over the meter)
+// and wide (over the taskbar's middle), so it never moves or changes size as the panel
+// opens: a window moved under a bubble drawn to stay put shows it in the wrong place for
+// a frame. `slide` is how far the wide bubble starts left of the narrow one; the room
+// pads the bubble by what the other one needs beside it.
+void Span(FrameworkElement const& anchor) {
+    auto& o = *g_open;
+    double full = kChatGap + kChatWidth;
+    o.slide = std::round(full / 2 - MiddleShift(anchor));  // whole pixels: text drawn where it rests
+    o.spareLeft = std::max(0.0, o.slide);
+    o.spareRight = std::max(0.0, full - o.slide);
+}
+
+Thickness RoomPadding(bool wide) {
+    auto const& o = *g_open;
+    double room = folders::kShadowRoom, full = kChatGap + kChatWidth;
+    if (!wide) return {room + o.spareLeft, room, room + o.spareRight, room};
+    return {room + o.spareLeft - o.slide, room, room + o.spareRight - full + o.slide, room};
+}
+
+// The widening `run` has ended: the bubble is laid out as it is drawn now.
+void Widened(uint32_t run) {
+    if (!Ours() || g_open->widenRun != run || !g_open->widening) return;
+    auto& o = *g_open;
+    int was = std::exchange(o.widening, 0);
+    if (o.widenBatch) o.widenBatch.Completed(o.widenDone);
+    o.widenBatch = nullptr;
+    double full = kChatGap + kChatWidth, narrow = o.shell.ActualWidth() - full;
+    auto shell = Hosting::ElementCompositionPreview::GetElementVisual(o.shell);
+    shell.StopAnimation(L"Translation");
+    shell.Properties().InsertVector3(L"Translation", {0, 0, 0});
+    shell.Clip(nullptr);
+    auto column = Hosting::ElementCompositionPreview::GetElementVisual(o.chatColumn);
+    column.StopAnimation(L"Opacity");
+    column.Opacity(1);
+    o.lift.StopAnimation(L"Offset");
+    o.lift.StopAnimation(L"Size");
+    o.lift.Offset({float(kLiftInset), float(kLiftInset), 0});
+    o.lift.Size(LiftSize(was > 0 ? narrow + full : narrow, o.shell.ActualHeight()));
+    if (was < 0) {
+        o.chatColumn.Width(0);
+        o.room.Padding(RoomPadding(false));
+        o.chat.reset();
+        ForgetChat();
+    }
+    if (o.placeLogs++ < 4) {
+        auto popup = FlyoutPopup();
+        core::DiagLine(L"Usage chat %s: popup %s at %.0f", was > 0 ? L"wide" : L"narrow",
+                       popup ? L"found" : L"missing", popup ? popup.HorizontalOffset() : 0.0);
+    }
+}
+
+// The panel opens or closes on the compositor, so it moves at the screen's rate with
+// no layout on the way: the bubble is laid out wide at once, in the window that already
+// holds it, and drawn from one end to the other, sliding from where it was, clipped on
+// its right side, its shadow following. A turn midway carries on from where it is.
+void Widen(bool open) {
+    if (!Ours() || !g_open->chatColumn || !g_open->room || !g_open->shell || !g_open->lift) return;
+    auto& o = *g_open;
+    int to = open ? 1 : -1;
+    double full = kChatGap + kChatWidth, now = o.chatColumn.Width();
+    if (std::isnan(now)) now = 0;
+    if (o.widening == to || (!o.widening && now == (open ? full : 0))) return;
+    o.widenTo = open ? full : 0;
+    double height = o.shell.ActualHeight(), narrow = o.shell.ActualWidth() - now, wide = narrow + full;
+    if (height <= 0 || narrow <= 0) {  // not laid out yet: at once
+        o.chatColumn.Width(o.widenTo);
+        o.room.Padding(RoomPadding(open));
+        if (!open) {
+            o.chat.reset();
+            ForgetChat();
+        }
+        return;
+    }
+    bool fromRest = !o.widening;
+    o.widening = to;
+    uint32_t run = ++o.widenRun;
+    o.chatColumn.Width(full);
+    o.room.Padding(RoomPadding(true));
+
+    auto shell = Hosting::ElementCompositionPreview::GetElementVisual(o.shell);
+    auto column = Hosting::ElementCompositionPreview::GetElementVisual(o.chatColumn);
+    auto c = shell.Compositor();
+    float r = float(kPopupRadius), h = float(height), slack = 40;  // the clip's left side, out of sight
+    float slide = float(o.slide);
+    if (fromRest) {
+        Hosting::ElementCompositionPreview::SetIsTranslationEnabled(o.shell, true);
+        shell.Properties().InsertVector3(L"Translation", {open ? slide : 0, 0, 0});
+        o.clipShape = c.CreateRoundedRectangleGeometry();
+        o.clipShape.CornerRadius({r, r});
+        o.clipShape.Offset({-slack, 0});
+        o.clipShape.Size({float(open ? narrow : wide) + slack, h});
+        shell.Clip(c.CreateGeometricClip(o.clipShape));
+        o.lift.Offset({(open ? slide : 0) + float(kLiftInset), float(kLiftInset), 0});
+        o.lift.Size(LiftSize(open ? narrow : wide, h));
+        if (open) column.Opacity(0);
+    }
+
+    auto ease = c.CreateCubicBezierEasingFunction({0.2f, 0}, {0, 1});
+    wf::TimeSpan length = std::chrono::milliseconds(open ? kWidenMs : kNarrowMs);
+    auto batch = c.CreateScopedBatch(comp::CompositionBatchTypes::Animation);
+    auto vector3 = [&](wf::Numerics::float3 v) {
+        auto a = c.CreateVector3KeyFrameAnimation();
+        a.InsertExpressionKeyFrame(0, L"this.StartingValue");
+        a.InsertKeyFrame(1, v, ease);
+        a.Duration(length);
+        return a;
+    };
+    auto vector2 = [&](wf::Numerics::float2 v) {
+        auto a = c.CreateVector2KeyFrameAnimation();
+        a.InsertExpressionKeyFrame(0, L"this.StartingValue");
+        a.InsertKeyFrame(1, v, ease);
+        a.Duration(length);
+        return a;
+    };
+    float ends = open ? 0 : slide;
+    shell.StartAnimation(L"Translation", vector3({ends, 0, 0}));
+    o.lift.StartAnimation(L"Offset", vector3({ends + float(kLiftInset), float(kLiftInset), 0}));
+    o.lift.StartAnimation(L"Size", vector2(LiftSize(open ? wide : narrow, h)));
+    // Past the right side when wide, so the bubble's own corners show as it ends.
+    o.clipShape.StartAnimation(L"Size", vector2({float(open ? wide + r : narrow) + slack, h}));
+    auto fade = c.CreateScalarKeyFrameAnimation();
+    fade.InsertExpressionKeyFrame(0, L"this.StartingValue");
+    if (open) {
+        fade.InsertExpressionKeyFrame(0.15f, L"this.StartingValue");
+        fade.InsertKeyFrame(1, 1);
+    } else {
+        fade.InsertKeyFrame(0.6f, 0);
+        fade.InsertKeyFrame(1, 0);
+    }
+    fade.Duration(length);
+    column.StartAnimation(L"Opacity", fade);
+    if (o.widenBatch) o.widenBatch.Completed(o.widenDone);
+    o.widenDone = batch.Completed([run](auto&&, auto&&) {
+        core::Guard(L"Usage chat widened", [&] { Widened(run); });
+    });
+    batch.End();
+    o.widenBatch = batch;
+}
+
+// The panel for the session `r`, or for a new one with none.
+void OpenChat(ai_sessions::Row const* r) {
+    auto& o = *g_open;
+    if (!o.chatColumn) return;
+    Chat c;
+    c.generation = ++o.chatGeneration;
+    if (r) {
+        c.key = KeyOf(*r);
+        c.codex = r->source == ai_sessions::Source::kCodex;
+        c.title = r->title;
+        c.appTitle = !r->appTitle.empty() ? r->appTitle : r->title;
+        c.record = r->record;
+        c.logPath = r->logPath;
+        c.folder = r->projectPath;
+        c.model = r->model;
+        c.effort = r->effort;
+        c.mode = c.codex ? r->sandbox : r->mode;
+        c.ultracode = r->ultracode;
+        if (!c.codex && c.record.empty()) {
+            c.cannot = L"Claude 앱의 세션이 아니라(터미널 등) 여기서는 보낼 수 없어요";
+        } else if (c.appTitle.empty()) {
+            c.cannot = c.codex ? L"스레드 제목이 없어 Codex 앱에서 찾을 수 없어요"
+                               : L"제목이 아직 없어 Claude 앱에서 칸을 찾을 수 없어요";
+        }
+    } else {
+        c.fresh = true;
+        auto folders = RecentFolders();
+        if (!folders.empty()) c.folder = folders.front();
+    }
+    bool wide = o.chat && o.widenTo > 0;
+    o.chat = std::move(c);
+    if (o.chat->codex) LoadCodexModels();
+    core::DiagLine(L"Usage chat opens: %s", o.chat->fresh ? L"new" : o.chat->codex ? L"codex" : L"claude");
+    RenderChat(true);
+    LookChat();
+    if (!wide) Widen(true);
+    o.chatBox.Focus(FocusState::Programmatic);
+}
+
+void CloseChat() {
+    auto& o = *g_open;
+    if (!o.chat) return;
+    o.chat->menu.clear();
+    Widen(false);
+    RenderSessions();
+}
+
+// A click in the panel, by the tag it landed on.
+void ChatAct(std::wstring const& tag) {
+    size_t bar = tag.find(L'|');
+    if (bar == std::wstring::npos || !Ours() || !g_open->chat) return;
+    auto& c = *g_open->chat;
+    std::wstring what = tag.substr(0, bar), value = tag.substr(bar + 1);
+    if (what == L"none") return;
+    if (what == L"chat") {
+        if (value == L"close") return CloseChat();
+        if (value == L"send") return Send();
+    } else if (what == L"menu") {
+        c.menu = value == L"close" || c.menu == value ? L"" : value;
+    } else if (what == L"platform" && c.fresh) {
+        c.codex = value == L"codex";
+        c.model.clear();
+        c.effort.clear();
+        c.mode.clear();
+        c.ultracode = -1;
+        if (c.codex) LoadCodexModels();
+    } else if (what == L"model") {
+        PickIn(app_drive::Change::kModel, value);
+    } else if (what == L"effort") {
+        PickIn(app_drive::Change::kEffort, value);
+    } else if (what == L"ultra" && !c.codex) {
+        PickIn(app_drive::Change::kUltracode, c.ultracode == 1 ? L"off" : L"on");
+    } else if (what == L"mode") {
+        PickIn(app_drive::Change::kMode, value);
+    } else if (what == L"folder") {
+        size_t i = wcstoul(value.c_str(), nullptr, 10);
+        if (i < g_open->chatFolders.size()) {
+            c.folder = g_open->chatFolders[i];
+            c.menu.clear();
+        }
+    }
+    RenderChat(false);
+}
+
+// One set of pointer handlers on the panel, as on the list.
+void WatchChat(Controls::Grid const& panel) {
+    if (!folders::g_popup) return;
+    auto& p = *folders::g_popup;
+    folders::Keep(p, panel.PointerPressed(winrt::auto_revoke, [](auto&&, Input::PointerRoutedEventArgs const& e) {
+        core::Guard(L"Usage chat press", [&] {
+            if (Ours() && e.GetCurrentPoint(nullptr).Properties().IsLeftButtonPressed()) {
+                g_open->chatPressed = TagAt(e.OriginalSource());
+            }
+        });
+    }));
+    folders::Keep(p, panel.PointerReleased(winrt::auto_revoke, [](auto&&, Input::PointerRoutedEventArgs const& e) {
+        core::Guard(L"Usage chat release", [&] {
+            if (!Ours()) return;
+            std::wstring tag = TagAt(e.OriginalSource());
+            bool same = !tag.empty() && tag == g_open->chatPressed;
+            g_open->chatPressed.clear();
+            if (same) core::Post([tag] { core::Guard(L"Usage chat click", [&] { ChatAct(tag); }); });
+        });
+    }));
+    auto hover = [](std::wstring tag) {
+        if (!Ours() || tag == g_open->chatHover) return;
+        g_open->chatHover = std::move(tag);
+        core::Post([] { core::Guard(L"Usage chat hover", [] { HoverChat(); }); });
+    };
+    folders::Keep(p, panel.PointerMoved(winrt::auto_revoke, [hover](auto&&, Input::PointerRoutedEventArgs const& e) {
+        core::Guard(L"Usage chat move", [&] { hover(TagAt(e.OriginalSource())); });
+    }));
+    folders::Keep(p, panel.PointerExited(winrt::auto_revoke, [hover](auto&&, auto&&) {
+        core::Guard(L"Usage chat leave", [&] { hover(L""); });
+    }));
+}
+
+Controls::TextBox ChatTextBox(PCWSTR placeholder, PCWSTR name) {
+    Controls::TextBox box;
+    box.FontSize(12.5);
+    box.FontFamily(Media::FontFamily{kFont});
+    box.PlaceholderText(placeholder);
+    box.CornerRadius(CornerRadiusHelper::FromUniformRadius(10));
+    box.BorderThickness({1, 1, 1, 1});
+    box.Padding({10, 7, 10, 7});
+    box.MinHeight(34);
+    box.SelectionHighlightColor(Brush(C().accent));
+    folders::SetBrushes(box, {{L"TextControlBackground", C().tile},
+                              {L"TextControlBackgroundPointerOver", C().hover},
+                              {L"TextControlBackgroundFocused", C().tile},
+                              {L"TextControlBorderBrush", 0},
+                              {L"TextControlBorderBrushPointerOver", 0},
+                              {L"TextControlBorderBrushFocused", C().accent},
+                              {L"TextControlForeground", C().text},
+                              {L"TextControlForegroundPointerOver", C().text},
+                              {L"TextControlForegroundFocused", C().text},
+                              {L"TextControlPlaceholderForeground", C().faint},
+                              {L"TextControlPlaceholderForegroundPointerOver", C().faint},
+                              {L"TextControlPlaceholderForegroundFocused", C().faint}});
+    Automation::AutomationProperties::SetName(box, name);
+    return box;
+}
+
+// The panel, made with the popup at no width.
+Controls::Grid BuildChat(folders::Popup& p) {
+    auto& o = *g_open;
+    Controls::Grid column;
+    column.Width(0);
+    column.HorizontalAlignment(HorizontalAlignment::Left);
+    Controls::Grid panel;
+    panel.Width(kChatWidth);
+    panel.Margin({kChatGap, 0, 0, 0});
+    panel.HorizontalAlignment(HorizontalAlignment::Left);
+    panel.VerticalAlignment(VerticalAlignment::Top);
+    panel.Background(Brush(0));
+    for (int i = 0; i < 6; i++) {
+        Controls::RowDefinition row;
+        row.Height(i == 1 ? GridLength{1, GridUnitType::Star} : GridLengthHelper::Auto());
+        panel.RowDefinitions().Append(row);
+    }
+    auto put = [&](FrameworkElement const& e, int row) {
+        Controls::Grid::SetRow(e, row);
+        panel.Children().Append(e);
+    };
+
+    Controls::StackPanel head;
+    head.Margin({2, 0, 0, 0});
+    put(head, 0);
+
+    Controls::StackPanel said;
+    said.Margin({8, 6, 8, 6});
+    said.VerticalAlignment(VerticalAlignment::Bottom);
+    Controls::ScrollViewer scroll;
+    scroll.VerticalScrollBarVisibility(Controls::ScrollBarVisibility::Auto);
+    scroll.HorizontalScrollBarVisibility(Controls::ScrollBarVisibility::Disabled);
+    scroll.Content(said);
+    auto card = Surface(scroll, C().card, kCardRadius, {0, 0, 0, 0});
+    card.Margin({0, 10, 0, 0});
+    put(card, 1);
+
+    Controls::Grid input;
+    Controls::ColumnDefinition grow, end;
+    end.Width(GridLengthHelper::Auto());
+    input.ColumnDefinitions().Append(grow);
+    input.ColumnDefinitions().Append(end);
+    input.Margin({0, 8, 0, 0});
+    auto box = ChatTextBox(L"메시지 (Enter 보내기 · Shift+Enter 줄바꿈)", L"보낼 메시지");
+    box.AcceptsReturn(true);
+    box.TextWrapping(TextWrapping::Wrap);
+    box.MaxHeight(110);
+    input.Children().Append(box);
+    Controls::Border send;
+    send.Width(34);
+    send.Height(34);
+    send.Margin({6, 0, 0, 0});
+    send.VerticalAlignment(VerticalAlignment::Bottom);
+    send.CornerRadius(CornerRadiusHelper::FromUniformRadius(10));
+    auto arrow = Glyph(L"\xE724", 13, C().faint);
+    arrow.HorizontalAlignment(HorizontalAlignment::Center);
+    send.Child(arrow);
+    SetTag(send, L"chat|send");
+    Automation::AutomationProperties::SetName(send, L"보내기");
+    Controls::Grid::SetColumn(send, 1);
+    input.Children().Append(send);
+    put(input, 2);
+
+    Controls::Grid under;
+    under.Margin({0, 8, 0, 0});
+    Controls::ColumnDefinition chipsColumn, meterColumn;
+    meterColumn.Width(GridLengthHelper::Auto());
+    under.ColumnDefinitions().Append(chipsColumn);
+    under.ColumnDefinitions().Append(meterColumn);
+    Controls::StackPanel chips;
+    chips.Orientation(Controls::Orientation::Horizontal);
+    under.Children().Append(chips);
+    Controls::Border meter;
+    meter.VerticalAlignment(VerticalAlignment::Center);
+    meter.Margin({8, 0, 2, 0});
+    Controls::Grid::SetColumn(meter, 1);
+    under.Children().Append(meter);
+    put(under, 3);
+
+    auto status = Text(L"", kSmallSize, C().dim);
+    status.TextWrapping(TextWrapping::Wrap);
+    status.MaxLines(3);
+    status.Margin({2, 7, 2, 0});
+    put(status, 4);
+
+    auto fine = Text(L"앱 화면의 입력창에 대신 넣어 보냅니다 · 실험 기능", 10.5, C().faint);
+    fine.Margin({2, 4, 2, 0});
+    put(fine, 5);
+
+    Controls::Grid overlay;
+    overlay.Visibility(Visibility::Collapsed);
+    Controls::Grid::SetRowSpan(overlay, 6);
+    Controls::Canvas::SetZIndex(overlay, 10);
+    panel.Children().Append(overlay);
+
+    auto folderBox = ChatTextBox(L"다른 폴더 경로 (Enter)", L"폴더 경로");
+
+    o.chatColumn = column;
+    o.chatPanel = panel;
+    o.chatHead = head;
+    o.chatSaid = said;
+    o.chatScroll = scroll;
+    o.chatBox = box;
+    o.chatSend = send;
+    o.chatChips = chips;
+    o.chatMeter = meter;
+    o.chatStatus = status;
+    o.chatOverlay = overlay;
+    o.folderBox = folderBox;
+
+    // Enter sends once the input method has put its last letters in; Shift+Enter is a new line.
+    folders::Keep(p, box.PreviewKeyDown(winrt::auto_revoke, [](auto&&, Input::KeyRoutedEventArgs const& e) {
+        core::Guard(L"Usage chat key", [&] {
+            if (e.Key() != winrt::Windows::System::VirtualKey::Enter || (GetKeyState(VK_SHIFT) & 0x8000)) return;
+            e.Handled(true);
+            core::Post([] { core::Guard(L"Usage chat send", [] { if (Ours() && g_open->chat) Send(); }); });
+        });
+    }));
+    folders::Keep(p, box.TextChanged(winrt::auto_revoke, [](auto&&, auto&&) {
+        core::Guard(L"Usage chat text", [] {
+            if (Ours() && g_open->chat) DrawSendButton();
+        });
+    }));
+    folders::Keep(p, folderBox.KeyDown(winrt::auto_revoke, [](auto&&, Input::KeyRoutedEventArgs const& e) {
+        core::Guard(L"Usage chat folder", [&] {
+            if (e.Key() != winrt::Windows::System::VirtualKey::Enter || !Ours() || !g_open->chat) return;
+            e.Handled(true);
+            std::wstring path = ai_sessions::Tidy(std::wstring(g_open->folderBox.Text()));
+            DWORD attributes = path.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                SetStatus(L"그 폴더가 없어요", 2);
+            } else {
+                g_open->chat->folder = path;
+                g_open->chat->menu.clear();
+                SetStatus(L"", 0);
+            }
+            core::Post([] { core::Guard(L"Usage chat folder set", [] { RenderChat(false); }); });
+        });
+    }));
+    WatchChat(panel);
+    column.Children().Append(panel);
+    return column;
+}
+
 // While the details are open: the times every second, a look every other.
 void StartSessions() {
     if (!SessionsOn()) {
@@ -20147,6 +22748,10 @@ void StartSessions() {
             }
             if (++g_open->ticks % kLookEveryTicks == 0) {
                 ai_sessions::Request();
+                LookChat();
+            }
+            if (g_open->chat && g_open->widenTo > 0) {
+                DrawChatHead();  // the session's state
             }
         });
     });
@@ -20187,7 +22792,8 @@ void Fill(Controls::StackPanel const& body) {
 
 // Bloom's popup surface (PopupMenu): its popup fill with a hairline edge in the
 // smooth-cornered shape, lifted by a soft shadow, holding `content`. In the
-// room the folder popup keeps around its bubble, so it sits where theirs do.
+// room the folder popup keeps around its bubble, so it sits where theirs do. The
+// shadow is the room's, beside the bubble, so a clip on the bubble leaves it be.
 FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
     Controls::Grid shell;
     Controls::Border shadowHost;
@@ -20197,27 +22803,50 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
     body.StrokeThickness(1);
     p.body = body;
     content.Margin({kPadding, kPadding, kPadding, kPadding});
-    shell.Children().Append(shadowHost);
     shell.Children().Append(Outline(shell, body, kPopupRadius, 0.5));
     shell.Children().Append(content);
+    // A box's shadow, in from the bubble's edge so its square corners stay under the
+    // round ones. (A mask of the body's shape comes out empty: the body lies on a canvas.)
     auto compositor = Hosting::ElementCompositionPreview::GetElementVisual(shadowHost).Compositor();
     auto sprite = compositor.CreateSpriteVisual();
     auto shadow = compositor.CreateDropShadow();
-    shadow.Mask(body.GetAlphaMask());
     shadow.BlurRadius(kShadowBlur);
     shadow.Offset({0, (float)kShadowDepth, 0});
     shadow.Opacity((float)kShadowOpacity);
     sprite.Shadow(shadow);
+    sprite.Offset({(float)kLiftInset, (float)kLiftInset, 0});
     Hosting::ElementCompositionPreview::SetElementChildVisual(shadowHost, sprite);
     folders::Keep(p, shell.SizeChanged(winrt::auto_revoke, [sprite](
                                                                auto&&, SizeChangedEventArgs const& e) {
-        core::Guard(L"Usage shadow", [&] { sprite.Size({e.NewSize().Width, e.NewSize().Height}); });
+        core::Guard(L"Usage shadow", [&] {
+            if (!(g_open && g_open->widening)) sprite.Size(LiftSize(e.NewSize().Width, e.NewSize().Height));
+        });
     }));
     Controls::Grid room;
     room.Padding({folders::kShadowRoom, folders::kShadowRoom, folders::kShadowRoom,
                   folders::kShadowRoom});
+    room.Children().Append(shadowHost);
     room.Children().Append(shell);
+    // The room is the popup's window too, where a press reaches no other: one there closes
+    // it, as a press outside does.
+    room.Background(Brush(0));
+    folders::Keep(p, room.PointerPressed(winrt::auto_revoke, [shell](auto&&, Input::PointerRoutedEventArgs const& e) {
+        core::Guard(L"Usage room press", [&] {
+            if (!Ours() || (g_open && g_open->widening)) return;
+            auto at = e.GetCurrentPoint(shell).Position();
+            if (at.X >= 0 && at.Y >= 0 && at.X <= shell.ActualWidth() && at.Y <= shell.ActualHeight()) return;
+            core::DiagLine(L"Popup closes: press beside the bubble");
+            core::Post([] {
+                if (Ours()) folders::HideSelf(*folders::g_popup);
+            });
+        });
+    }));
     p.content = shell;
+    if (g_open) {
+        g_open->room = room;
+        g_open->shell = shell;
+        g_open->lift = sprite;
+    }
     return room;
 }
 
@@ -20225,6 +22854,10 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
 // was read for them.
 void LetGo() {
     StopSessions();
+    if (g_open) {
+        if (g_open->widenBatch) g_open->widenBatch.Completed(g_open->widenDone);
+        if (g_open->chat) ForgetChat();
+    }
     if (Ours()) {
         folders::ClosePopup();
     }
@@ -20315,17 +22948,59 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
     core::DiagLine(L"Usage details open");
     try {
         Fill(body);
+        FrameworkElement content = body;
+        if (ChatOn()) {
+            // The details, then the chat panel at no width until a session is picked;
+            // as tall as the details.
+            Controls::Grid frame;
+            for (int i = 0; i < 2; i++) {
+                Controls::ColumnDefinition column;
+                column.Width(GridLengthHelper::Auto());
+                frame.ColumnDefinitions().Append(column);
+            }
+            body.VerticalAlignment(VerticalAlignment::Top);
+            frame.Children().Append(body);
+            auto chat = BuildChat(p);
+            Controls::Grid::SetColumn(chat, 1);
+            frame.Children().Append(chat);
+            folders::Keep(p, body.SizeChanged(winrt::auto_revoke, [](auto&&, SizeChangedEventArgs const& e) {
+                core::Guard(L"Usage chat height", [&] {
+                    if (Ours() && g_open->chatPanel) g_open->chatPanel.Height(e.NewSize().Height);
+                });
+            }));
+            content = frame;
+        }
         Controls::Flyout flyout;
         flyout.FlyoutPresenterStyle(folders::BarePresenter());
-        flyout.Content(folders::Scaled(p, Bubble(p, body)));
+        flyout.Content(folders::Scaled(p, Bubble(p, content)));
         p.flyout = flyout;
-        folders::Present(p, anchor, folders::TaskbarOnTop(pt));
+        double shift = 0;
+        if (ChatOn()) {
+            // The narrow bubble over the meter, in a window that holds the wide one too.
+            Span(anchor);
+            open.room.Padding(RoomPadding(false));
+            shift = (open.spareRight - open.spareLeft) / 2;
+        }
+        folders::Present(p, anchor, folders::TaskbarOnTop(pt), shift);
         folders::Keep(p, flyout.Opened(winrt::auto_revoke, [](auto&&, auto&&) {
             core::Guard(L"Usage details opened", [] {
-                if (Ours() && folders::g_popup->content && Settle(L"opened")) {
+                if (Ours() && !std::exchange(g_open->shownOnce, true) && folders::g_popup->content &&
+                    Settle(L"opened")) {
                     core::DiagLine(L"Usage details shown %.0fx%.0f",
                                    folders::g_popup->content.ActualWidth(),
                                    folders::g_popup->content.ActualHeight());
+                }
+            });
+        }));
+        // While a job of the chat may bring an app forward, the deactivation that
+        // follows leaves the popup open; a press outside (WatchTick) or Esc still closes it.
+        folders::Keep(p, flyout.Closing(winrt::auto_revoke, [](auto&&, Controls::Primitives::FlyoutBaseClosingEventArgs const& e) {
+            core::Guard(L"Usage details closing", [&] {
+                if (!Ours()) return;
+                auto& p = *folders::g_popup;
+                if (!p.selfClose && GetTickCount64() < p.keepUntil && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
+                    e.Cancel(true);
+                    core::DiagLine(L"Usage details kept open");
                 }
             });
         }));
