@@ -5382,11 +5382,20 @@ bool Gone(HWND window) {
 }
 
 // The highest window on `monitor` that a click could have put in front: shown, not a
-// tool window, not the taskbar's, not cloaked.
+// tool window, not the taskbar's, not cloaked. Always-on-top windows and the shell's own
+// top-level CoreWindows (the notification toasts' host among them, uncloaked while a
+// toast shows) are skipped: given the focus, they keep it from the launcher and the
+// taskbar stays in.
 HWND NextWindowOn(HMONITOR monitor) {
     for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        WCHAR cls[32];
+        RECT r;
         if (Gone(w) || core::IsTaskbarWindow(w) || w == GetShellWindow() ||
-            (GetWindowLongPtr(w, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) ||
+            (GetWindowLongPtr(w, GWL_EXSTYLE) &
+             (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)) ||
+            !GetWindowRect(w, &r) || IsRectEmpty(&r) ||
+            (GetClassName(w, cls, ARRAYSIZE(cls)) &&
+             _wcsicmp(cls, L"Windows.UI.Core.CoreWindow") == 0) ||
             MonitorFromWindow(w, MONITOR_DEFAULTTONULL) != monitor) {
             continue;
         }
