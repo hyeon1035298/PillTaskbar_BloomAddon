@@ -111,6 +111,7 @@ build_bundle() {
         files=()
         [[ "${ADDON_FILE_SETTINGS:-0}" == 1 ]] && files=(--with-files)
         [[ -n "${ADDON_NAMES_EN:-}" ]] && files+=(--names "$conf_dir/$ADDON_NAMES_EN")
+        [[ -n "${ADDON_EASY:-}" ]] && files+=(--easy "$conf_dir/$ADDON_EASY")
         python -I "$root/tools/make-schema.py" --schema "$out/settings.schema.json" "${files[@]}" "$mod_src"
     fi
     python -I "$root/tools/make-manifest.py" "$out" "$gen/identity.json"

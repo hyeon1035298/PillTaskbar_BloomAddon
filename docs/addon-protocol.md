@@ -15,6 +15,7 @@
 | `ADDON_WINDHAWK_MODS` | 거절 검사에 쓰는 Windhawk 모드 id(3절 코드 12) |
 | `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32 |
 | `ADDON_SCHEMA`, `ADDON_VALUES_DEFAULTS` | `settings.schema.json`을 싣는지, 모드 YAML 기본값을 덮는 JSON |
+| `ADDON_EASY` | 스키마에 합칠 `settings.easy.json`(6절, conf 기준 경로, 비우면 없음) |
 | `ADDON_THIRD_PARTY`, `ADDON_NAME_KO/EN`, `ADDON_ABOUT_KO/EN`, `ADDON_LICENSE`, `ADDON_SOURCE`, `ADDON_MIN_BLOOM`, `ADDON_NEEDS` | 묶음의 고지 파일과 addon.json |
 
 이름이 다르므로 두 애드온의 런타임이 한 explorer에 같이 들어가도 뮤텍스, 이벤트, 공유 메모리, `restart` 거절(같은 파일 이름의 런타임)이 서로 닿지 않는다. 런타임 export 이름 `PillTaskbarHookProc`, `WM_COPYDATA` 값, 데이터 폴더 안 파일 이름은 애드온마다 같다(각자 자기 모듈, 자기 창, 자기 폴더에 묻는다). 모드가 `Wh_ModInit` 말고 다른 콜백을 빼거나 인자 없는 `Wh_ModSettingsChanged()`를 쓰면 `addon/addon_entry.cpp`의 약한 기본 함수가 채운다(Windhawk와 같이: 빠진 것은 아무것도 안 함, 옛 형식은 다시 올리지 않음).
@@ -272,6 +273,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 | `order` | `folder`, `names[]`(파일 이름) | `.order` 쓰기 |
 | `dissolve` | `folder` | `DissolveFolder`(폴더는 휴지통) |
 | `delete` | `folder` | `DeleteFolder`(앱을 다시 고정하지 않고 폴더째 빼고, 폴더는 휴지통) |
+| `chat` | `source`(`claude` 또는 `codex`), `session`(그 세션 기록의 id: 영숫자, `-`, `_`, 100자까지) | 사용량 막대의 상세를 주 작업표시줄에 열고(열려 있으면 그대로) 그 세션의 채팅 패널을 연다. 그 세션이 최근 6개 밖이어도 하루 안에 쓴 기록이면 목록에 넣는다. 폴더 기능이 꺼져 있어도 받는다. `ok`는 여는 일을 작업표시줄에 맡겼다는 뜻이다. Bloom은 보내기 전에 탐색기가 앞으로 나올 수 있게 한다(`AllowSetForegroundWindow`). |
 
 구현 규칙:
 
@@ -283,7 +285,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 - `create`는 앱이 하나 이상이어야 하고, 없는 앱이 섞이면 아무것도 만들지 않고 `notFound`. `order`의 모르는 이름은 `notFound`, 중복은 `badArgs`, 빠진 항목은 원래 순서대로 뒤에 붙는다.
 - `%LOCALAPPDATA%\Bloom`은 모드가 올라올 때 한 번만 본다.
 
-`error` 값: `foldersOff`(폴더 기능 꺼짐), `noFolder`, `exists`, `badName`, `notFound`(앱이나 항목 없음), `badArgs`, `failed`. 명령이 끝나면 모드는 `state.json`을 다시 쓴다. `.png` 아이콘은 Bloom이 `.ico`로 바꿔 넘긴다.
+`error` 값: `foldersOff`(폴더 기능 꺼짐), `noFolder`, `exists`, `badName`, `notFound`(앱이나 항목 없음), `badArgs`, `failed`, `chatOff`(`chat`: 사용량 막대, 그 세션 목록, 채팅 패널 중 꺼진 것이 있음). 명령이 끝나면 모드는 `state.json`을 다시 쓴다. `.png` 아이콘은 Bloom이 `.ico`로 바꿔 넘긴다.
 
 ### `prefs.json`
 
@@ -314,6 +316,21 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 - `key`는 `values.json`과 같은 `그룹.키` 전체 이름. `type`은 `bool`, `int`, `choice`, `text`. `about`은 YAML에 `$description`이 있을 때만.
 - 글은 `{"ko","en"}`(일본어·중국어는 없으면 Bloom이 영어로 보인다). `en`이 빠지면 스크립트가 실패한다.
 - 모드 소스의 `==BloomFileSettings==` 블록에 적은 항목(`"file"`, `"field"`가 있는 것, 지금 `island.positions` records)은 `ADDON_FILE_SETTINGS=1`로 빌드할 때(`make-schema.py --with-files`)만 그 그룹 끝에 붙는다. Bloom이 `values.json`이 아니라 그 파일의 필드를 읽고 쓴다. 그 종류를 모르는 Bloom은 스키마 전체를 버리므로, 읽는 Bloom이 나온 뒤에 켠다.
+
+### Bloom 화면의 쉬운 말과 그림 `easy`
+
+스키마의 모든 곳에 `easy`를 붙일 수 있다(모두 선택). Bloom 1.4.0부터 설정 › 애드온 페이지가 이것으로 이름과 설명을 바꾸고, 줄을 숨기거나 자세히 아래로 넣고, 선택지를 그림으로 그린다. 애드온만 업데이트해도 화면이 바뀐다. 모르는 칸은 옛 Bloom이 무시하고, 잘못된 `easy`는 그 칸만 버린다(설정 페이지는 그대로). PillTaskbar와 Alt+Tab은 `ADDON_EASY`의 `settings.easy.json`을 `make-schema.py --easy`가 합치고(키·그룹·선택지 id가 스키마에 없으면 실패), 손으로 쓴 스키마(Brightness, KeepAwake, MemoryClean)는 파일 안에 바로 적는다.
+
+| 자리 | `easy`의 칸 |
+|---|---|
+| 맨 위 | `order`(그룹 순서, 빠진 그룹은 뒤에), `pictures`(페이지 자체 선택지의 그림, `{"size": {"s": 그림}}`. 지금 PillTaskbar `size`, MemoryClean `clean.strength`) |
+| 그룹 | `name`, `about`(`""`이면 설명 줄 없음), `folded`(그룹 전체를 자세히 한 줄 아래로) |
+| 항목 | `name`, `about`(`""`이면 없음), `when`, `more`(그룹의 자세히 아래로), `minutes`(분을 분·시간으로 입력), `thumb`(스위치 줄 왼쪽 그림, 60 × 36) |
+| 선택지 | `name`, `picture`(선택지 그림, 72 × 44. 선택지 4개 이하에 모두 그림이 있으면 그림으로 고름) |
+
+- 글은 스키마의 다른 글과 같이 `{"ko","en","ja","zh"}`.
+- `when`: `{"key": k}`(스위치 k가 켜졌을 때), `{"key": k, "is": v}`, `{"key": k, "not": v}`. 줄은 그 위 줄 아래로 들여 보이고, 검색에는 늘 걸린다.
+- 그림: `{"size": [w, h], "shapes": [...]}`(size는 생략 가능, 도형 64개까지). 도형은 `{"box": [x, y, w, h], "r": 반지름}`(`"corners": "left"`면 왼쪽 모서리만, `"dash": true`면 점선), `{"dot": [cx, cy, r]}`, `{"path": "M …"}`(WPF path 문법), `{"text": "글" 또는 {"ko", …}, "at": [cx, cy], "size": 11, "width": 64, "bold": false}`. 공통 `fill`, `stroke`, `width`(선 굵기), `alpha`(0–1). 색 이름은 `ink`(글자색), `accent`(강조색), `accentInk`(강조색 위 글자), `popup`(창 바탕), `btn`, 아니면 `#RRGGBB`. `fill`과 `stroke`가 둘 다 없으면 `ink`로 채운다. 고르지 않은 선택지는 `ink`가 흐린 글자색, `accent`가 흐린 글자색의 반 진하기, `#RRGGBB`가 조금 흐려진다.
 
 ## 7. 사용량 파일에 더하는 필드 (작업표시줄 사용량 막대)
 

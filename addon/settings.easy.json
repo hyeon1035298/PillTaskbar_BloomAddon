@@ -1,0 +1,634 @@
+{
+  "easy": {
+    "pictures": {
+      "size": {
+        "s": {
+          "shapes": [
+            { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+            { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+            { "box": [18, 32, 36, 8], "r": 4, "alpha": 0.18 },
+            { "box": [23.5, 34, 4, 4], "r": 1, "fill": "accent" },
+            { "box": [30.5, 34, 4, 4], "r": 1, "fill": "accent" },
+            { "box": [37.5, 34, 4, 4], "r": 1, "fill": "accent" },
+            { "box": [44.5, 34, 4, 4], "r": 1, "fill": "accent" }
+          ]
+        },
+        "m": {
+          "shapes": [
+            { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+            { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+            { "box": [13, 29, 46, 11], "r": 5.5, "alpha": 0.18 },
+            { "box": [19.5, 31.5, 6, 6], "r": 1.5, "fill": "accent" },
+            { "box": [28.5, 31.5, 6, 6], "r": 1.5, "fill": "accent" },
+            { "box": [37.5, 31.5, 6, 6], "r": 1.5, "fill": "accent" },
+            { "box": [46.5, 31.5, 6, 6], "r": 1.5, "fill": "accent" }
+          ]
+        },
+        "l": {
+          "shapes": [
+            { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+            { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+            { "box": [7, 25, 58, 15], "r": 7.5, "alpha": 0.18 },
+            { "box": [14, 28.5, 8, 8], "r": 2, "fill": "accent" },
+            { "box": [26, 28.5, 8, 8], "r": 2, "fill": "accent" },
+            { "box": [38, 28.5, 8, 8], "r": 2, "fill": "accent" },
+            { "box": [50, 28.5, 8, 8], "r": 2, "fill": "accent" }
+          ]
+        },
+        "custom": {
+          "shapes": [
+            { "path": "M 14,13 H 58 M 14,22 H 58 M 14,31 H 58", "stroke": "ink", "width": 1.3, "alpha": 0.6 },
+            { "dot": [26, 13, 3.2], "fill": "accent" },
+            { "dot": [46, 22, 3.2], "fill": "accent" },
+            { "dot": [33, 31, 3.2], "fill": "accent" }
+          ]
+        }
+      }
+    }
+  },
+  "items": {
+    "pill.enabled": {
+      "name": { "ko": "알약 모양", "en": "Pill shape", "ja": "ピルの形", "zh": "胶囊形状" },
+      "about": {
+        "ko": "끄면 Windows 기본 모양으로 돌아갑니다",
+        "en": "Off, the taskbar looks as Windows draws it",
+        "ja": "オフにすると Windows 標準の見た目に戻ります",
+        "zh": "关闭后恢复 Windows 默认外观"
+      }
+    },
+    "pill.edge": {
+      "options": {
+        "windows": {
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [30, 12, 5.5, 5.5], "r": 0.935, "fill": "accent" },
+              { "box": [36.5, 12, 5.5, 5.5], "r": 0.935, "fill": "accent" },
+              { "box": [30, 18.5, 5.5, 5.5], "r": 0.935, "fill": "accent" },
+              { "box": [36.5, 18.5, 5.5, 5.5], "r": 0.935, "fill": "accent" },
+              { "box": [20, 33, 32, 7], "r": 3.5, "alpha": 0.18 }
+            ]
+          }
+        },
+        "top": {
+          "name": { "ko": "위", "en": "Top", "ja": "上", "zh": "顶部" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [20, 4, 32, 7], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        },
+        "bottom": {
+          "name": { "ko": "아래", "en": "Bottom", "ja": "下", "zh": "底部" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [20, 33, 32, 7], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        }
+      }
+    },
+    "pill.align": {
+      "options": {
+        "left": {
+          "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [5, 33, 30, 7], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        },
+        "center": {
+          "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [21, 33, 30, 7], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        },
+        "right": {
+          "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [37, 33, 30, 7], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        }
+      }
+    },
+    "pill.style": {
+      "options": {
+        "bloom": {
+          "picture": {
+            "shapes": [
+              { "dot": [22, 15, 12], "alpha": 0.18 },
+              { "box": [42, 5, 22, 18], "r": 4, "alpha": 0.18 },
+              { "box": [6, 19, 60, 16], "r": 8, "fill": "popup", "stroke": "ink", "width": 0.6, "alpha": 0.85 },
+              { "box": [18, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [28, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [38, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [48, 24, 6, 6], "r": 1.5, "fill": "accent" }
+            ]
+          }
+        },
+        "glass": {
+          "picture": {
+            "shapes": [
+              { "dot": [22, 15, 12], "alpha": 0.18 },
+              { "box": [42, 5, 22, 18], "r": 4, "alpha": 0.18 },
+              { "box": [6, 19, 60, 16], "r": 8, "fill": "popup", "alpha": 0.85 },
+              { "path": "M 15,19.8 H 57", "stroke": "ink", "width": 1.4 },
+              { "path": "M 7.2,24 Q 6.8,27 8.6,30.5", "stroke": "ink", "alpha": 0.5 },
+              { "box": [18, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [28, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [38, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [48, 24, 6, 6], "r": 1.5, "fill": "accent" }
+            ]
+          }
+        },
+        "windowGlass": {
+          "picture": {
+            "shapes": [
+              { "dot": [22, 15, 12], "alpha": 0.18 },
+              { "box": [42, 5, 22, 18], "r": 4, "alpha": 0.18 },
+              { "box": [6, 19, 60, 16], "r": 8, "fill": "popup", "alpha": 0.85 },
+              { "box": [18, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [28, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [38, 24, 6, 6], "r": 1.5, "fill": "accent" },
+              { "box": [48, 24, 6, 6], "r": 1.5, "fill": "accent" }
+            ]
+          }
+        }
+      }
+    },
+    "pill.cornerRadius": { "name": { "ko": "모서리 둥글기", "en": "Corner radius", "ja": "角の丸み", "zh": "圆角" }, "about": "" },
+    "pill.blur": { "name": { "ko": "배경 흐림", "en": "Background blur", "ja": "背景のぼかし", "zh": "背景模糊" }, "about": "" },
+    "pill.tintOpacity": {
+      "name": { "ko": "배경 색 진하기", "en": "Background tint", "ja": "背景色の濃さ", "zh": "背景色浓度" },
+      "about": ""
+    },
+    "tray.hideVolume": { "name": { "ko": "볼륨", "en": "Volume", "ja": "音量", "zh": "音量" } },
+    "tray.hideNetwork": { "name": { "ko": "네트워크", "en": "Network", "ja": "ネットワーク", "zh": "网络" } },
+    "tray.hideBattery": { "name": { "ko": "배터리", "en": "Battery", "ja": "バッテリー", "zh": "电池" } },
+    "tray.hideMicrophone": { "name": { "ko": "마이크", "en": "Microphone", "ja": "マイク", "zh": "麦克风" } },
+    "tray.hideLocation": { "name": { "ko": "위치", "en": "Location", "ja": "場所", "zh": "位置" } },
+    "tray.hideStudioEffects": { "name": { "ko": "Studio Effects", "en": "Studio Effects" } },
+    "tray.hideRecall": { "name": { "ko": "Recall", "en": "Recall" } },
+    "tray.hideLanguageBar": { "name": { "ko": "언어 표시줄", "en": "Language bar", "ja": "言語バー", "zh": "语言栏" } },
+    "tray.hideLanguageExtras": {
+      "name": { "ko": "언어 보조 아이콘", "en": "Extra language icons", "ja": "言語の補助アイコン", "zh": "语言辅助图标" }
+    },
+    "tray.hideCopilot": { "name": { "ko": "Copilot", "en": "Copilot" } },
+    "tray.bell": {
+      "name": { "ko": "알림 벨", "en": "Notification bell", "ja": "通知ベル", "zh": "通知铃铛" },
+      "options": { "hidden": { "name": { "ko": "숨김", "en": "Hidden", "ja": "非表示", "zh": "隐藏" } } }
+    },
+    "tray.clock": {
+      "name": { "ko": "시계", "en": "Clock", "ja": "時計", "zh": "时钟" },
+      "options": {
+        "timeDate": {
+          "name": { "ko": "시간과 날짜", "en": "Time and date", "ja": "時刻と日付", "zh": "时间和日期" },
+          "picture": {
+            "shapes": [
+              { "text": "21:41", "at": [36, 17], "size": 11 },
+              { "text": "2026-11-09", "at": [36, 29], "size": 8, "bold": false, "alpha": 0.75 }
+            ]
+          }
+        },
+        "time": {
+          "name": { "ko": "시간만", "en": "Time only", "ja": "時刻のみ", "zh": "仅时间" },
+          "picture": { "shapes": [{ "text": "21:41", "at": [36, 22], "size": 12, "fill": "accent" }] }
+        },
+        "hidden": {
+          "name": { "ko": "숨김", "en": "Hidden", "ja": "非表示", "zh": "隐藏" },
+          "picture": { "shapes": [{ "box": [20, 13, 32, 18], "r": 4, "dash": true, "stroke": "ink", "alpha": 0.55 }] }
+        }
+      }
+    },
+    "tray.clockFormat": { "name": { "ko": "시간 표기", "en": "Time format", "ja": "時刻の表記", "zh": "时间格式" } },
+    "tray.panelsNearTray": {
+      "name": {
+        "ko": "Windows 패널을 트레이 옆에",
+        "en": "Windows panels by the tray",
+        "ja": "Windows パネルをトレイの横に",
+        "zh": "Windows 面板靠近托盘"
+      },
+      "about": {
+        "ko": "빠른 설정과 알림 센터를 화면 끝이 아니라 알약 트레이 옆에 엽니다",
+        "en": "Quick Settings and the notification center open by the pill's tray, not at the screen's end",
+        "ja": "クイック設定と通知センターを、画面の端ではなくピルのトレイの横に開きます",
+        "zh": "快速设置和通知中心在胶囊托盘旁打开，而不是屏幕边缘"
+      }
+    },
+    "tray.centerStill": {
+      "name": {
+        "ko": "알림 센터 밀려 들어오기 끄기",
+        "en": "Notification center without the slide",
+        "ja": "通知センターのスライドをオフ",
+        "zh": "关闭通知中心滑入动画"
+      },
+      "about": {
+        "ko": "알림 센터와 달력이 옆에서 밀려 들어오지 않고 바로 나타납니다",
+        "en": "The notification center and calendar appear in place instead of sliding in",
+        "ja": "通知センターとカレンダーが横からスライドせず、その場に表示されます",
+        "zh": "通知中心和日历不从侧边滑入，直接在原位显示"
+      }
+    },
+    "size.taskbarHeight": {
+      "name": { "ko": "작업표시줄 높이", "en": "Taskbar height", "ja": "タスクバーの高さ", "zh": "任务栏高度" },
+      "about": {
+        "ko": "Windows 기본은 48입니다",
+        "en": "Windows' own is 48",
+        "ja": "Windows の標準は 48 です",
+        "zh": "Windows 默认为 48"
+      }
+    },
+    "size.iconSize": {
+      "name": { "ko": "아이콘 크기", "en": "Icon size", "ja": "アイコンのサイズ", "zh": "图标大小" },
+      "about": {
+        "ko": "Windows 기본은 24입니다",
+        "en": "Windows' own is 24",
+        "ja": "Windows の標準は 24 です",
+        "zh": "Windows 默认为 24"
+      }
+    },
+    "size.iconSpacing": {
+      "name": { "ko": "아이콘 간격", "en": "Icon spacing", "ja": "アイコンの間隔", "zh": "图标间距" },
+      "about": {
+        "ko": "앱 단추 폭은 아이콘 크기에 간격을 더한 값입니다. Windows 기본은 20입니다",
+        "en": "An app button is the icon size plus this wide; Windows' own is 20",
+        "ja": "アプリボタンの幅はアイコンのサイズに間隔を足した値です。Windows の標準は 20 です",
+        "zh": "应用按钮宽度为图标大小加上间距。Windows 默认为 20"
+      }
+    },
+    "start.mode": {
+      "name": { "ko": "시작 버튼", "en": "Start button", "ja": "スタートボタン", "zh": "开始按钮" },
+      "options": {
+        "windows": {
+          "name": { "ko": "그대로", "en": "Unchanged", "ja": "そのまま", "zh": "保持不变" },
+          "picture": {
+            "shapes": [
+              { "box": [6, 14, 60, 16], "r": 8, "alpha": 0.18 },
+              { "box": [12, 18, 3.6, 3.6], "r": 0.612, "fill": "accent" },
+              { "box": [16.4, 18, 3.6, 3.6], "r": 0.612, "fill": "accent" },
+              { "box": [12, 22.4, 3.6, 3.6], "r": 0.612, "fill": "accent" },
+              { "box": [16.4, 22.4, 3.6, 3.6], "r": 0.612, "fill": "accent" },
+              { "box": [26, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [37, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [48, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 }
+            ]
+          }
+        },
+        "hidden": {
+          "name": { "ko": "숨기기", "en": "Hidden", "ja": "非表示", "zh": "隐藏" },
+          "picture": {
+            "shapes": [
+              { "box": [12, 14, 48, 16], "r": 8, "alpha": 0.18 },
+              { "box": [17.5, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [27.5, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [37.5, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [47.5, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 }
+            ]
+          }
+        },
+        "bloom": {
+          "name": { "ko": "Bloom 버튼", "en": "Bloom button", "ja": "Bloom ボタン", "zh": "Bloom 按钮" },
+          "picture": {
+            "shapes": [
+              { "box": [6, 14, 60, 16], "r": 8, "alpha": 0.18 },
+              { "dot": [16, 19.21, 1.8], "fill": "accent" },
+              { "dot": [18.653, 21.138, 1.8], "fill": "accent" },
+              { "dot": [17.64, 24.257, 1.8], "fill": "accent" },
+              { "dot": [14.36, 24.257, 1.8], "fill": "accent" },
+              { "dot": [13.347, 21.138, 1.8], "fill": "accent" },
+              { "box": [26, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [37, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+              { "box": [48, 18.5, 7, 7], "r": 1.5, "alpha": 0.45 }
+            ]
+          }
+        }
+      }
+    },
+    "autohide.revealZone": {
+      "name": { "ko": "나오는 구간", "en": "Reveal zone", "ja": "表示される範囲", "zh": "唤出区域" },
+      "about": {
+        "ko": "가장자리의 이만큼에서만 포인터로 작업표시줄이 나옵니다. 100이면 가장자리 전체입니다",
+        "en": "The pointer brings the taskbar out only on this much of the edge; 100 is all of it",
+        "ja": "端のこの範囲でだけ、ポインターでタスクバーが出てきます。100 なら端全体です",
+        "zh": "只有在边缘的这一部分，指针才能唤出任务栏。100 为整个边缘"
+      }
+    },
+    "autohide.showDelay": {
+      "name": { "ko": "나오기까지", "en": "Wait before showing", "ja": "表示までの時間", "zh": "显示前等待" },
+      "about": ""
+    },
+    "autohide.hideDelay": {
+      "name": { "ko": "숨기까지", "en": "Wait before hiding", "ja": "隠れるまでの時間", "zh": "隐藏前等待" },
+      "about": {
+        "ko": "포인터가 떠난 뒤부터 잽니다",
+        "en": "Counted from when the pointer leaves",
+        "ja": "ポインターが離れてから数えます",
+        "zh": "从指针离开时开始计算"
+      }
+    },
+    "autohide.animation": {
+      "name": { "ko": "움직임 길이", "en": "Animation length", "ja": "アニメーションの長さ", "zh": "动画时长" },
+      "about": ""
+    },
+    "autohide.keepHiddenForBloom": {
+      "name": {
+        "ko": "Bloom 런처가 열려도 숨긴 채로",
+        "en": "Stay hidden for the Bloom launcher",
+        "ja": "Bloom ランチャーを開いても隠したまま",
+        "zh": "打开 Bloom 启动器时保持隐藏"
+      },
+      "about": {
+        "ko": "끄면 런처를 열 때 그 모니터의 작업표시줄도 함께 나옵니다",
+        "en": "Off, opening the launcher brings that monitor's taskbar out too",
+        "ja": "オフにすると、ランチャーを開いたときにそのモニターのタスクバーも出てきます",
+        "zh": "关闭后，打开启动器时该显示器的任务栏也会一起出现"
+      }
+    },
+    "autohide.keepHiddenOnFlash": {
+      "name": {
+        "ko": "앱이 깜박여도 숨긴 채로",
+        "en": "Stay hidden when an app flashes",
+        "ja": "アプリが点滅しても隠したまま",
+        "zh": "应用闪烁时保持隐藏"
+      },
+      "about": {
+        "ko": "끄면 Windows처럼 나와서 그 앱을 열 때까지 있습니다",
+        "en": "Off, it comes out as in Windows and stays until that app is opened",
+        "ja": "オフにすると Windows と同じように出てきて、そのアプリを開くまで残ります",
+        "zh": "关闭后会像 Windows 一样出现，直到打开该应用"
+      }
+    },
+    "media.enabled": {
+      "thumb": {
+        "shapes": [
+          { "box": [4, 10, 52, 16], "r": 5, "alpha": 0.18 },
+          { "box": [7, 12.5, 11, 11], "r": 2, "fill": "accent" },
+          { "box": [21, 14, 18, 2.6], "r": 1.3, "alpha": 0.45 },
+          { "box": [21, 19.2, 12, 2.2], "r": 1.1, "alpha": 0.18 },
+          { "path": "M 45,14.2 l 6,3.8 -6,3.8 z" }
+        ]
+      }
+    },
+    "media.maxWidth": {
+      "name": { "ko": "곡 제목 최대 폭", "en": "Longest track title", "ja": "曲名の最大幅", "zh": "曲名最大宽度" },
+      "about": {
+        "ko": "넘치는 제목은 …로 줄입니다",
+        "en": "A longer title ends in …",
+        "ja": "はみ出した曲名は … で縮めます",
+        "zh": "过长的曲名用 … 缩短"
+      }
+    },
+    "usage.enabled": {
+      "thumb": {
+        "shapes": [
+          { "dot": [12, 18, 5], "fill": "#D97757" },
+          { "box": [21, 12.5, 32, 3.5], "r": 1.75, "alpha": 0.18 },
+          { "box": [21, 12.5, 20, 3.5], "r": 1.75, "fill": "accent" },
+          { "box": [21, 20, 32, 3.5], "r": 1.75, "alpha": 0.18 },
+          { "box": [21, 20, 10, 3.5], "r": 1.75, "fill": "accent" }
+        ]
+      }
+    },
+    "usage.gapBefore": {
+      "name": { "ko": "앱과 사용량 사이", "en": "Gap after the apps", "ja": "アプリと使用量の間", "zh": "应用与用量之间" },
+      "about": ""
+    },
+    "usage.gapAfter": {
+      "name": { "ko": "사용량과 트레이 사이", "en": "Gap before the tray", "ja": "使用量とトレイの間", "zh": "用量与托盘之间" },
+      "about": ""
+    },
+    "usage.sessions": {
+      "name": { "ko": "자세한 창에 세션 보기", "en": "Sessions in the details", "ja": "詳細ウィンドウにセッションを表示", "zh": "在详情窗口显示会话" },
+      "about": {
+        "ko": "사용량을 눌러 여는 창에 이 PC의 Claude Code·Codex 세션을 보여 줍니다",
+        "en": "The window a click on the usage opens lists this PC's Claude Code and Codex sessions",
+        "ja": "使用量をクリックして開くウィンドウに、この PC の Claude Code・Codex のセッションを表示します",
+        "zh": "单击用量打开的窗口中显示这台电脑上的 Claude Code·Codex 会话"
+      }
+    },
+    "island.enabled": {
+      "thumb": {
+        "shapes": [
+          { "box": [1, 1, 58, 34], "r": 4, "alpha": 0.05 },
+          { "box": [1, 1, 58, 34], "r": 4, "stroke": "ink", "alpha": 0.45 },
+          { "box": [20, 28.5, 20, 4.5], "r": 2.25 }
+        ]
+      }
+    },
+    "island.showClock": { "name": { "ko": "시계", "en": "Clock", "ja": "時計", "zh": "时钟" } },
+    "island.showMedia": { "name": { "ko": "재생 중인 곡", "en": "Now playing", "ja": "再生中の曲", "zh": "正在播放" } },
+    "island.showUsage": { "name": { "ko": "AI 사용량", "en": "AI usage", "ja": "AI の使用量", "zh": "AI 用量" } },
+    "island.showMemory": { "name": { "ko": "메모리 사용률", "en": "Memory use", "ja": "メモリ使用率", "zh": "内存使用率" } },
+    "island.showCpu": { "name": { "ko": "CPU 사용률", "en": "CPU use", "ja": "CPU 使用率", "zh": "CPU 使用率" } },
+    "island.clockAt": {
+      "name": { "ko": "시계 자리", "en": "Where the clock sits", "ja": "時計の位置", "zh": "时钟位置" },
+      "about": {
+        "ko": "가운데 아일랜드, 또는 화면 왼쪽·오른쪽 모서리의 아일랜드에 둡니다",
+        "en": "On the middle island, or on one in the screen's left or right corner",
+        "ja": "中央のアイランド、または画面の左右の隅のアイランドに置きます",
+        "zh": "放在中间的浮岛，或屏幕左右角的浮岛上"
+      },
+      "options": {
+        "center": { "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" } },
+        "left": { "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" } },
+        "right": { "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" } }
+      }
+    },
+    "island.mediaAt": {
+      "name": { "ko": "재생 중인 곡 자리", "en": "Where now playing sits", "ja": "再生中の曲の位置", "zh": "正在播放的位置" },
+      "about": "",
+      "options": {
+        "center": { "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" } },
+        "left": { "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" } },
+        "right": { "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" } }
+      }
+    },
+    "island.usageAt": {
+      "name": { "ko": "AI 사용량 자리", "en": "Where AI usage sits", "ja": "AI 使用量の位置", "zh": "AI 用量位置" },
+      "about": "",
+      "options": {
+        "center": { "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" } },
+        "left": { "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" } },
+        "right": { "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" } }
+      }
+    },
+    "island.memoryAt": {
+      "name": { "ko": "메모리 사용률 자리", "en": "Where memory use sits", "ja": "メモリ使用率の位置", "zh": "内存使用率位置" },
+      "about": "",
+      "options": {
+        "center": { "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" } },
+        "left": { "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" } },
+        "right": { "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" } }
+      }
+    },
+    "island.cpuAt": {
+      "name": { "ko": "CPU 사용률 자리", "en": "Where CPU use sits", "ja": "CPU 使用率の位置", "zh": "CPU 使用率位置" },
+      "about": "",
+      "options": {
+        "center": { "name": { "ko": "가운데", "en": "Middle", "ja": "中央", "zh": "居中" } },
+        "left": { "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左" } },
+        "right": { "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右" } }
+      }
+    },
+    "island.height": {
+      "name": { "ko": "높이", "en": "Height", "ja": "高さ", "zh": "高度" },
+      "about": { "ko": "100% 배율 기준입니다", "en": "At 100% scale", "ja": "100% の拡大率が基準です", "zh": "以 100% 缩放为准" }
+    },
+    "island.width": {
+      "name": { "ko": "폭", "en": "Width", "ja": "幅", "zh": "宽度" },
+      "about": {
+        "ko": "100% 배율 기준입니다. 넘치면 곡 제목을 줄입니다",
+        "en": "At 100% scale; a track title that doesn't fit is shortened",
+        "ja": "100% の拡大率が基準です。収まらないときは曲名を縮めます",
+        "zh": "以 100% 缩放为准。放不下时缩短曲名"
+      }
+    },
+    "island.reveal": {
+      "options": {
+        "hover": {
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [18, 27, 36, 7], "r": 3.5, "dash": true, "stroke": "ink", "alpha": 0.55 },
+              { "box": [28, 38, 16, 3.5], "r": 1.75 },
+              {
+                "path": "M 47,30 v 9 l 2.4,-2.2 1.8,3.6 1.4,-0.7 -1.8,-3.5 h 3.2 z",
+                "fill": "accent",
+                "stroke": "popup",
+                "width": 0.8
+              }
+            ]
+          }
+        },
+        "click": {
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [18, 27, 36, 7], "r": 3.5, "dash": true, "stroke": "ink", "alpha": 0.55 },
+              { "box": [28, 38, 16, 3.5], "r": 1.75 },
+              {
+                "path": "M 37,33 v 9 l 2.4,-2.2 1.8,3.6 1.4,-0.7 -1.8,-3.5 h 3.2 z",
+                "fill": "accent",
+                "stroke": "popup",
+                "width": 0.8
+              },
+              { "path": "M 33,31 L 31,29 M 37,29.5 V 27 M 41,31 L 43,29", "stroke": "accent", "width": 1.2 }
+            ]
+          }
+        }
+      }
+    },
+    "folders.enabled": {
+      "thumb": {
+        "shapes": [
+          { "box": [4, 11, 52, 14], "r": 7, "alpha": 0.18 },
+          { "box": [10, 13, 10, 10], "r": 2.5, "stroke": "accent", "width": 1.2 },
+          { "box": [11.8, 14.8, 2.8, 2.8], "r": 0.6, "fill": "accent" },
+          { "box": [15.4, 14.8, 2.8, 2.8], "r": 0.6, "fill": "accent" },
+          { "box": [11.8, 18.4, 2.8, 2.8], "r": 0.6, "fill": "accent" },
+          { "box": [15.4, 18.4, 2.8, 2.8], "r": 0.6, "fill": "accent" },
+          { "box": [25, 14.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+          { "box": [35, 14.5, 7, 7], "r": 1.5, "alpha": 0.45 },
+          { "box": [45, 14.5, 7, 7], "r": 1.5, "alpha": 0.45 }
+        ]
+      }
+    },
+    "folders.foldersPath": {
+      "name": { "ko": "폴더 위치", "en": "Folder location", "ja": "フォルダーの場所", "zh": "文件夹位置" },
+      "about": {
+        "ko": "이 폴더 안의 폴더 하나가 작업표시줄 폴더 하나가 됩니다",
+        "en": "Each folder inside it becomes one taskbar folder",
+        "ja": "この中のフォルダー 1 つがタスクバーのフォルダー 1 つになります",
+        "zh": "其中的每个文件夹会成为一个任务栏文件夹"
+      }
+    },
+    "folders.mergeDelay": {
+      "name": { "ko": "합쳐지기까지", "en": "Wait before merging", "ja": "まとまるまでの時間", "zh": "合并前等待" },
+      "about": {
+        "ko": "앱을 다른 앱 위에 이만큼 두어야 합쳐집니다",
+        "en": "How long an app stays over another before they merge",
+        "ja": "アプリをほかのアプリの上にこの時間置くとまとまります",
+        "zh": "应用在另一个应用上停留这么久才会合并"
+      }
+    },
+    "folders.popupScale": {
+      "name": { "ko": "열린 폴더 크기", "en": "Open folder size", "ja": "開いたフォルダーのサイズ", "zh": "打开的文件夹大小" },
+      "about": ""
+    },
+    "folders.showLabels": {
+      "name": { "ko": "앱 이름 보이기", "en": "App names", "ja": "アプリ名を表示", "zh": "显示应用名称" },
+      "about": {
+        "ko": "끄면 칸이 아이콘 크기로 줄어듭니다",
+        "en": "Off, the cells shrink to the icons",
+        "ja": "オフにすると、マスがアイコンのサイズまで縮みます",
+        "zh": "关闭后，格子缩小到图标大小"
+      }
+    },
+    "folders.iconSize": {
+      "name": { "ko": "폴더 안 아이콘 크기", "en": "Icon size in folders", "ja": "フォルダー内のアイコンのサイズ", "zh": "文件夹内图标大小" },
+      "about": ""
+    },
+    "folders.appSpacing": {
+      "name": { "ko": "앱 사이 간격", "en": "Space between apps", "ja": "アプリの間隔", "zh": "应用间距" },
+      "about": ""
+    },
+    "folders.popupSide": {
+      "name": { "ko": "폴더가 열리는 쪽", "en": "Folder opens", "ja": "フォルダーが開く向き", "zh": "文件夹打开方向" },
+      "about": "",
+      "options": {
+        "auto": { "name": { "ko": "작업표시줄 반대쪽", "en": "Away from the taskbar", "ja": "タスクバーの反対側", "zh": "任务栏的另一侧" } },
+        "above": { "name": { "ko": "작업표시줄 위", "en": "Above the taskbar", "ja": "タスクバーの上", "zh": "任务栏上方" } },
+        "below": { "name": { "ko": "작업표시줄 아래", "en": "Below the taskbar", "ja": "タスクバーの下", "zh": "任务栏下方" } }
+      }
+    },
+    "folders.popupGap": {
+      "name": { "ko": "작업표시줄과의 거리", "en": "Distance from the taskbar", "ja": "タスクバーとの距離", "zh": "与任务栏的距离" },
+      "about": ""
+    },
+    "folders.cornerRadius": {
+      "name": { "ko": "모서리 둥글기", "en": "Corner radius", "ja": "角の丸み", "zh": "圆角" },
+      "about": ""
+    },
+    "folders.cornerSmoothing": {
+      "name": { "ko": "모서리 부드러움", "en": "Corner smoothing", "ja": "角のなめらかさ", "zh": "圆角平滑度" },
+      "about": {
+        "ko": "0이면 보통 둥근 모서리, 60이면 끊김 없이 이어진 곡선입니다",
+        "en": "0 is an ordinary round corner, 60 a continuous curve",
+        "ja": "0 は普通の丸い角、60 は途切れずにつながった曲線です",
+        "zh": "0 为普通圆角，60 为连续不断的曲线"
+      }
+    },
+    "folders.autoRunning": {
+      "name": { "ko": "실행 중 폴더", "en": "Running folder", "ja": "実行中フォルダー", "zh": "运行中文件夹" },
+      "about": {
+        "ko": "고정하지 않고 켠 앱을 시계 모양 폴더 하나에 모읍니다",
+        "en": "Apps started without pinning gather in one clock-shaped folder",
+        "ja": "ピン留めせずに起動したアプリを、時計の形のフォルダー 1 つにまとめます",
+        "zh": "未固定就启动的应用会集中到一个时钟形状的文件夹"
+      }
+    },
+    "folders.runningName": {
+      "name": { "ko": "실행 중 폴더 이름", "en": "Running folder's name", "ja": "実行中フォルダーの名前", "zh": "运行中文件夹名称" },
+      "about": ""
+    }
+  },
+  "groups": { "start": { "name": { "ko": "시작 버튼", "en": "Start button", "ja": "スタートボタン", "zh": "开始按钮" } } }
+}

@@ -18293,17 +18293,56 @@ std::wstring Lower(std::wstring text) {
     return text;
 }
 
+std::wstring SpawnedBy(std::wstring const& log);
+
+// A log's id: its file name less ".jsonl".
+std::wstring LogId(Found const& f) {
+    size_t name = f.path.find_last_of(L'\\') + 1;
+    return f.path.substr(name, f.path.size() - 6 - name);
+}
+
+// A session asked for from outside (Bloom's card) is read even when it isn't among
+// the newest: its tool and log id, until the details close.
+std::mutex g_wantLock;
+[[clang::no_destroy]] std::wstring g_wantId;
+bool g_wantCodex = false;
+
+std::wstring Wanted(bool codex) {
+    std::lock_guard guard(g_wantLock);
+    return g_wantCodex == codex ? g_wantId : std::wstring();
+}
+
+// The log `id` (by `idOf`) of `all` added to `found` unless it is there, when it wrote in the last day.
+template <class IdOf>
+void AddLog(std::vector<Found>& found, std::vector<Found> const& all, std::wstring const& id, int64_t now, IdOf idOf) {
+    auto same = [&](Found const& f) { return _wcsicmp(idOf(f).c_str(), id.c_str()) == 0; };
+    if (id.empty() || std::ranges::any_of(found, same)) {
+        return;
+    }
+    auto it = std::ranges::find_if(all, [&](Found const& f) { return same(f) && now - f.written <= kRecentSeconds; });
+    if (it != all.end()) {
+        found.push_back(*it);
+    }
+}
+
+// The newest logs, the one asked for, and the sessions that started them up the
+// chain when those wrote in the last day but not lately, so a side session sits
+// under its starter instead of in a row of its own. The app's records are read first.
 std::vector<Found> FindClaude(int64_t now) {
-    std::vector<Found> found;
+    std::vector<Found> all;
     g_agentTotals.clear();
     for (auto const& root : ClaudeRoots()) {
         for (auto const& project : Dirs(root)) {
-            FilesIn(Source::kClaude, project, L"*.jsonl", found, [](std::wstring_view name) {
+            FilesIn(Source::kClaude, project, L"*.jsonl", all, [](std::wstring_view name) {
                 return name.find(L".orphaned-") != std::wstring_view::npos;
             });
         }
     }
-    found = Newest(std::move(found), now);
+    std::vector<Found> found = Newest(all, now);
+    AddLog(found, all, Wanted(false), now, LogId);
+    for (size_t i = 0; i < found.size(); i++) {
+        AddLog(found, all, SpawnedBy(LogId(found[i])), now, LogId);
+    }
     // The subagents of these sessions only, the newest of each, then of all.
     std::vector<Found> agents;
     for (auto const& f : found) {
@@ -18311,8 +18350,7 @@ std::vector<Found> FindClaude(int64_t now) {
         AgentsIn(f.path.substr(0, f.path.size() - 6) + L"\\subagents", 2, own);
         std::erase_if(own, [&](Found const& a) { return now - a.written > kAgentSeconds; });
         if (!own.empty()) {
-            size_t name = f.path.find_last_of(L'\\') + 1;
-            g_agentTotals[Lower(f.path.substr(name, f.path.size() - 6 - name))] = own.size();
+            g_agentTotals[Lower(LogId(f))] = own.size();
         }
         std::ranges::sort(own, std::greater{}, &Found::written);
         if (own.size() > kAgentsPerSession) {
@@ -18331,13 +18369,16 @@ std::vector<Found> FindClaude(int64_t now) {
     return found;
 }
 
+std::wstring CodexId(std::wstring const& path);
+
 // sessions\YYYY\MM\DD\rollout-*.jsonl; a session started days ago may still run,
 // so every day's folder is listed, newest first, until a day has nothing recent.
+// The one asked for comes too.
 std::vector<Found> FindCodex(int64_t now) {
-    std::vector<Found> found;
+    std::vector<Found> all;
     std::wstring home = CodexHome();
     if (home.empty()) {
-        return found;
+        return all;
     }
     auto desc = [](std::vector<std::wstring> v) {
         std::ranges::sort(v, std::greater{});
@@ -18346,11 +18387,13 @@ std::vector<Found> FindCodex(int64_t now) {
     for (auto const& year : desc(Dirs(home + L"\\sessions"))) {
         for (auto const& month : desc(Dirs(year))) {
             for (auto const& day : desc(Dirs(month))) {
-                FilesIn(Source::kCodex, day, L"*.jsonl", found);
+                FilesIn(Source::kCodex, day, L"*.jsonl", all);
             }
         }
     }
-    return Newest(std::move(found), now);
+    std::vector<Found> found = Newest(all, now);
+    AddLog(found, all, Wanted(true), now, [](Found const& f) { return CodexId(f.path); });
+    return found;
 }
 
 // The trailing UUID of rollout-<time>-<uuid>.jsonl, which names the thread.
@@ -18712,8 +18755,8 @@ void Look() {
     std::lock_guard guard(g_lock);
     int64_t now = usage::Now();
     if (g_findNow.exchange(false) || ++g_looks % kFindEvery == 0) {
-        g_found = FindClaude(now);
         FindSpawns(now);
+        g_found = FindClaude(now);
         FindClaudeSettings();
         std::vector<Found> codex = FindCodex(now);
         g_found.insert(g_found.end(), codex.begin(), codex.end());
@@ -18789,7 +18832,8 @@ void Look() {
     }
     std::ranges::sort(snapshot->rows, order);
     // A session another one started goes under it, deepest first, so a chain
-    // ends under its first session; one whose starter isn't read stays a row.
+    // ends under its first session; one whose starter wrote nothing in the last
+    // day stays a row.
     for (bool moved = true; moved;) {
         moved = false;
         auto& rows = snapshot->rows;
@@ -18808,6 +18852,19 @@ void Look() {
             }
         }
     }
+    // A starter goes by its side sessions too: live when one is, by the newest sign of life.
+    std::function<std::pair<bool, int64_t>(Row const&)> life = [&](Row const& r) {
+        std::pair<bool, int64_t> l{r.Live(), r.liveAt};
+        for (auto const& c : r.children) {
+            auto k = life(c);
+            l = {l.first || k.first, std::max(l.second, k.second)};
+        }
+        return l;
+    };
+    std::ranges::stable_sort(snapshot->rows, [&](Row const& a, Row const& b) {
+        auto x = life(a), y = life(b);
+        return x.first != y.first ? x.first : x.second > y.second;
+    });
     snapshot->at = now;
     core::Post([snapshot] {
         if (!g_wanted) {
@@ -18820,10 +18877,24 @@ void Look() {
     });
 }
 
+// A session to read even when it isn't among the newest (Wanted); the next look searches again.
+void Want(bool codex, std::wstring const& id) {
+    {
+        std::lock_guard guard(g_wantLock);
+        g_wantCodex = codex;
+        g_wantId = id;
+    }
+    g_findNow = true;
+}
+
 // The details closed: nothing read for them stays. A look running now holds
 // the lock, so the job lets go after it, unless they opened again meanwhile.
 void Forget() {
     g_snapshot = nullptr;
+    {
+        std::lock_guard guard(g_wantLock);
+        g_wantId.clear();
+    }
     folders::StartJob([] {
         std::lock_guard guard(g_lock);
         if (g_wanted) {
@@ -18856,32 +18927,84 @@ void Request() {
     });
 }
 
-// ---- one session's recent conversation, for the chat panel (worker) --------------------
+// ---- one session's conversation, for the chat panel (worker) --------------------------
 // Read only with the chat panel on and a session picked in it: the end of that
-// one log, and of it what the person wrote, the answers' text and the tools'
-// names. Read again as the log grows; let go as the panel closes.
+// one log, and the parts before it as the panel is scrolled up. Of it what the
+// person wrote, the answers, each tool called with what it was asked, and
+// Claude's questions with their answers. A tool's output is only noted (where
+// its line is) and read when its call is opened. Read again as the log grows;
+// let go as the panel closes.
 
-struct Said {
-    enum class Who { kMe, kReply, kTool };
-    Who who = Who::kReply;
-    std::wstring text;  // a tool line: the tools' names
-    int64_t at = 0;
-    bool steered = false;  // sent while a turn ran
-    int tools = 1;         // tools in a row, one line
+struct ToolCall {
+    std::wstring name, about, id;  // about: what it was asked, on one line
 };
 
-constexpr uint64_t kChatTailBytes = 512 * 1024;
+struct Choice {
+    std::wstring label, about;
+};
+
+struct Question {
+    std::wstring header, text;
+    bool multi = false;
+    std::vector<Choice> choices;
+    std::wstring answer;  // as the answer has it: several picks joined by ", "
+};
+
+struct Said {
+    enum class Who { kMe, kReply, kTool, kAsk };
+    enum class Answer { kWaiting, kGiven, kNone };
+    Who who = Who::kReply;
+    std::wstring text;
+    int64_t at = 0;
+    uint64_t line = 0;                // where its record starts in the log
+    bool steered = false;             // sent while a turn ran
+    std::vector<ToolCall> calls;      // a tool line: the calls in a row
+    std::vector<Question> questions;  // a question card
+    std::wstring ask;                 // its call's id
+    Answer answer = Answer::kWaiting;
+};
+
+// What the panel is given: the entries, oldest first, shared as they are (one
+// that changes is copied first), and whether they reach the log's start.
+struct Talk {
+    std::vector<std::shared_ptr<const Said>> said;
+    bool start = false;
+};
+
+// Where a tool's output is: its line in the log.
+struct Place {
+    uint64_t at = 0, length = 0;
+};
+
+struct Result {
+    std::wstring text;
+    bool error = false;
+    bool missing = false;  // not in the log yet: the tool runs
+};
+
+// A part of the log at a time: the end first, then each one before it as asked.
+// Until the panel reads further back only the last kChatKeep entries stay.
+// Messages are kept whole; only a runaway one is cut.
+constexpr uint64_t kChatTailBytes = 2 * 1024 * 1024;
 constexpr size_t kChatKeep = 40;
-constexpr size_t kSaidChars = 1500;
+constexpr size_t kSaidChars = 20000;
+constexpr uint64_t kResultBytes = 32 * 1024 * 1024;  // a longer output line is not read
+constexpr size_t kAboutChars = 160;
 
 struct Conversation {
     Source source = Source::kClaude;
     std::wstring path;
-    uint64_t offset = 0;
+    uint64_t offset = 0;  // read up to here
+    uint64_t begin = 0;   // and from here, a line's start
     int64_t created = 0;
     bool started = false;
+    bool skip = false;  // in a cut line, up to its end
+    bool kept = false;  // read back: nothing is let go any more
     std::string partial;
-    std::vector<Said> said;
+    std::vector<std::shared_ptr<const Said>> said;
+    std::unordered_map<std::wstring, Place> results;  // by the call's id
+    // A question's answers by its call's id, question to answer.
+    std::unordered_map<std::wstring, std::vector<std::pair<std::wstring, std::wstring>>> answers;
 };
 
 // Line ends as \n, no blank runs of more than one line, no space at the ends.
@@ -18901,28 +19024,214 @@ std::wstring Tidy(std::wstring text) {
     return start == std::wstring::npos ? L"" : out.substr(start, end - start + 1);
 }
 
-void Say(Conversation& c, Said::Who who, std::wstring text, int64_t at, bool steered = false) {
+// The first line of `text`, at most kAboutChars long.
+std::wstring OneLine(std::wstring text) {
+    text = Tidy(std::move(text));
+    size_t end = text.find(L'\n');
+    bool more = end != std::wstring::npos;
+    if (more) text.resize(end);
+    if (text.size() > kAboutChars) {
+        text.resize(kAboutChars - 1);
+        more = true;
+    }
+    return more ? text + L"…" : text;
+}
+
+// An entry about to change: copied first while the panel holds it.
+Said& Own(std::shared_ptr<const Said>& entry) {
+    if (entry.use_count() > 1) entry = std::make_shared<const Said>(*entry);
+    return const_cast<Said&>(*entry);
+}
+
+// Until the log is read further back, the earliest entries go with their
+// records, which are read again from there if the panel asks for them.
+void Trim(Conversation& c) {
+    if (c.kept || c.said.size() <= kChatKeep) return;
+    while (c.said.size() > kChatKeep) {
+        uint64_t line = c.said.front()->line;
+        while (!c.said.empty() && c.said.front()->line == line) c.said.erase(c.said.begin());
+    }
+    if (c.said.empty()) return;
+    c.begin = c.said.front()->line;
+    std::erase_if(c.results, [&](auto const& r) { return r.second.at < c.begin; });
+}
+
+void Add(Conversation& c, Said s) {
+    c.said.push_back(std::make_shared<const Said>(std::move(s)));
+    Trim(c);
+}
+
+void Say(Conversation& c, Said::Who who, std::wstring text, int64_t at, uint64_t line, bool steered = false) {
     text = Tidy(std::move(text));
     if (text.empty()) return;
     if (text.size() > kSaidChars) text = text.substr(0, kSaidChars - 1) + L"…";
-    if (who == Said::Who::kTool && !c.said.empty() && c.said.back().who == Said::Who::kTool) {
-        Said& last = c.said.back();
-        last.tools++;
-        if (last.text.size() < 60 && last.text.find(text) == std::wstring::npos) last.text += L", " + text;
+    Said s;
+    s.who = who;
+    s.text = std::move(text);
+    s.at = at;
+    s.line = line;
+    s.steered = steered;
+    Add(c, std::move(s));
+}
+
+// A call joins the tool line before it, or starts one.
+void Call(Conversation& c, ToolCall call, int64_t at, uint64_t line) {
+    if (call.name.empty()) return;
+    if (!c.said.empty() && c.said.back()->who == Said::Who::kTool) {
+        Said& last = Own(c.said.back());
+        last.calls.push_back(std::move(call));
         last.at = at;
         return;
     }
-    c.said.push_back({who, std::move(text), at, steered});
-    if (c.said.size() > kChatKeep) c.said.erase(c.said.begin());
+    Said s;
+    s.who = Said::Who::kTool;
+    s.at = at;
+    s.line = line;
+    s.calls.push_back(std::move(call));
+    Add(c, std::move(s));
 }
 
-void TakeClaude(Conversation& c, wdj::JsonObject const& r, int64_t at) {
+// A command as an array: what a shell was given to run, else its words.
+std::wstring Command(wdj::JsonArray const& parts) {
+    std::vector<std::wstring> words;
+    for (auto const& part : parts) {
+        if (part.ValueType() == wdj::JsonValueType::String) words.emplace_back(part.GetString());
+    }
+    if (words.size() >= 3 && words[words.size() - 2].starts_with(L"-")) return OneLine(words.back());
+    std::wstring out;
+    for (auto const& word : words) out += (out.empty() ? L"" : L" ") + word;
+    return OneLine(out);
+}
+
+// What a call was asked, on a line: its description, command, file, pattern,
+// address or query, else its first text.
+std::wstring About(wdj::JsonObject const& input) {
+    if (!input) return {};
+    for (PCWSTR key : {L"description", L"command", L"cmd", L"file_path", L"notebook_path", L"pattern", L"path",
+                       L"url", L"query", L"prompt"}) {
+        auto value = input.TryLookup(key);
+        if (!value) continue;
+        std::wstring about = value.ValueType() == wdj::JsonValueType::String  ? OneLine(std::wstring(value.GetString()))
+                             : value.ValueType() == wdj::JsonValueType::Array ? Command(value.GetArray())
+                                                                              : L"";
+        if (!about.empty()) return about;
+    }
+    for (auto const& pair : input) {
+        if (pair.Value().ValueType() != wdj::JsonValueType::String) continue;
+        std::wstring about = OneLine(std::wstring(pair.Value().GetString()));
+        if (!about.empty()) return about;
+    }
+    return {};
+}
+
+// A patch's files, else its first line.
+std::wstring PatchFiles(std::wstring const& patch) {
+    std::wstring files;
+    for (size_t at = 0; at < patch.size();) {
+        size_t end = patch.find(L'\n', at);
+        if (end == std::wstring::npos) end = patch.size();
+        std::wstring_view line(patch.data() + at, end - at);
+        for (std::wstring_view mark : {L"*** Update File: ", L"*** Add File: ", L"*** Delete File: "}) {
+            if (line.starts_with(mark)) files += (files.empty() ? L"" : L", ") + std::wstring(line.substr(mark.size()));
+        }
+        at = end + 1;
+    }
+    return OneLine(files.empty() ? patch : files);
+}
+
+std::vector<Question> Questions(wdj::JsonObject const& input) {
+    std::vector<Question> out;
+    for (auto const& q : Objects(input, L"questions")) {
+        Question one;
+        one.header = Tidy(Str(q, L"header"));
+        one.text = Tidy(Str(q, L"question"));
+        one.multi = True(q, L"multiSelect");
+        for (auto const& o : Objects(q, L"options")) one.choices.push_back({Tidy(Str(o, L"label")), Tidy(Str(o, L"description"))});
+        if (!one.text.empty()) out.push_back(std::move(one));
+    }
+    return out;
+}
+
+void Answer(Said& s, std::vector<std::pair<std::wstring, std::wstring>> const& found) {
+    for (auto& q : s.questions) {
+        for (auto const& [question, answer] : found) {
+            if (Tidy(question) == q.text) q.answer = Tidy(answer);
+        }
+    }
+    s.answer = Said::Answer::kGiven;
+}
+
+bool IsOutput(Conversation const& c, std::string_view line) {
+    return c.source == Source::kClaude ? line.find("\"type\":\"tool_result\"") != std::string_view::npos
+                                       : line.find("\"type\":\"response_item\"") != std::string_view::npos &&
+                                             line.find("_output\"") != std::string_view::npos;
+}
+
+// The ids of the calls whose output is on a line (all of it, or its start).
+std::vector<std::wstring> OutputIds(Conversation const& c, std::string_view line) {
+    std::string_view key = c.source == Source::kClaude ? "\"tool_use_id\":\"" : "\"call_id\":\"";
+    std::vector<std::wstring> ids;
+    for (size_t at = line.find(key); at != std::string_view::npos && ids.size() < 64; at = line.find(key, at)) {
+        at += key.size();
+        size_t end = line.find('"', at);
+        if (end == std::string_view::npos || end - at > 128) break;
+        ids.push_back(Widen(line.substr(at, end - at)));
+        at = end;
+    }
+    return ids;
+}
+
+// A line of tools' output, `length` long from `at`, of which `line` is all or
+// the start: where each call's output is, and a question's answers.
+void TakeOutput(Conversation& c, std::string_view line, uint64_t at, uint64_t length) {
+    auto ids = OutputIds(c, line);
+    for (auto const& id : ids) c.results[id] = {at, length};
+    std::vector<std::pair<std::wstring, std::wstring>> found;
+    std::wstring answered;
+    if (c.source == Source::kClaude && line.size() == length && length <= kMaxLine &&
+        line.find("\"answers\":{") != std::string_view::npos) {
+        wdj::JsonObject record{nullptr};
+        if (wdj::JsonObject::TryParse(Widen(line), record)) {
+            if (auto answers = Child(Child(record, L"toolUseResult"), L"answers")) {
+                for (auto const& pair : answers) {
+                    if (pair.Value().ValueType() == wdj::JsonValueType::String) {
+                        found.push_back({std::wstring(pair.Key()), std::wstring(pair.Value().GetString())});
+                    }
+                }
+                for (auto const& item : Objects(Child(record, L"message"), L"content")) {
+                    if (Str(item, L"type") == L"tool_result") {
+                        answered = Str(item, L"tool_use_id");
+                        break;
+                    }
+                }
+                if (!answered.empty()) c.answers[answered] = found;
+            }
+        }
+    }
+    // A question waiting for one of these: answered, or passed by without one.
+    for (auto const& id : ids) {
+        for (size_t i = c.said.size(), seen = 0; i-- > 0 && seen < 64; seen++) {
+            if (c.said[i]->who != Said::Who::kAsk || c.said[i]->ask != id) continue;
+            if (c.said[i]->answer == Said::Answer::kWaiting) {
+                Said& s = Own(c.said[i]);
+                if (id == answered) {
+                    Answer(s, found);
+                } else {
+                    s.answer = Said::Answer::kNone;
+                }
+            }
+            break;
+        }
+    }
+}
+
+void TakeClaude(Conversation& c, wdj::JsonObject const& r, int64_t at, uint64_t line) {
     if (True(r, L"isSidechain") || True(r, L"isMeta") || True(r, L"isCompactSummary")) return;
     std::wstring type = Str(r, L"type");
     if (type == L"attachment") {
         auto a = Child(r, L"attachment");
         if (Str(a, L"type") == L"queued_command" && Str(Child(a, L"origin"), L"kind") == L"human") {
-            Say(c, Said::Who::kMe, Str(a, L"prompt"), at, true);
+            Say(c, Said::Who::kMe, Str(a, L"prompt"), at, line, true);
         }
         return;
     }
@@ -18933,6 +19242,13 @@ void TakeClaude(Conversation& c, wdj::JsonObject const& r, int64_t at) {
         std::wstring text;
         auto add = [&](std::wstring part) {
             part = Tidy(std::move(part));
+            // Notes put before a message come in system-reminder blocks; the message follows them.
+            constexpr std::wstring_view kNote = L"<system-reminder>", kNoteEnd = L"</system-reminder>";
+            while (part.starts_with(kNote)) {
+                size_t end = part.find(kNoteEnd);
+                if (end == std::wstring::npos) return;
+                part = Tidy(part.substr(end + kNoteEnd.size()));
+            }
             // The app's and the harness's own insertions come as tags.
             if (part.empty() || part[0] == L'<' || part.starts_with(L"[Request interrupted")) return;
             text += (text.empty() ? L"" : L"\n") + part;
@@ -18948,18 +19264,38 @@ void TakeClaude(Conversation& c, wdj::JsonObject const& r, int64_t at) {
                 if (kind == L"image") text += (text.empty() ? L"" : L" ") + std::wstring(L"[이미지]");
             }
         }
-        Say(c, Said::Who::kMe, text, at);
+        Say(c, Said::Who::kMe, text, at, line);
     } else if (type == L"assistant" && content.ValueType() == wdj::JsonValueType::Array) {
         for (auto const& item : content.GetArray()) {
             auto o = Object(item);
             std::wstring kind = Str(o, L"type");
-            if (kind == L"text") Say(c, Said::Who::kReply, Str(o, L"text"), at);
-            if (kind == L"tool_use") Say(c, Said::Who::kTool, Str(o, L"name"), at);
+            if (kind == L"text") Say(c, Said::Who::kReply, Str(o, L"text"), at, line);
+            if (kind != L"tool_use") continue;
+            std::wstring name = Str(o, L"name"), id = Str(o, L"id");
+            auto input = Child(o, L"input");
+            if (name == L"AskUserQuestion") {
+                Said s;
+                s.who = Said::Who::kAsk;
+                s.at = at;
+                s.line = line;
+                s.ask = id;
+                s.questions = Questions(input);
+                if (auto it = c.answers.find(id); it != c.answers.end()) {
+                    Answer(s, it->second);
+                } else if (c.results.contains(id)) {
+                    s.answer = Said::Answer::kNone;
+                }
+                if (!s.questions.empty()) {
+                    Add(c, std::move(s));
+                    continue;
+                }
+            }
+            Call(c, {name, About(input), id}, at, line);
         }
     }
 }
 
-void TakeCodex(Conversation& c, wdj::JsonObject const& r, int64_t at) {
+void TakeCodex(Conversation& c, wdj::JsonObject const& r, int64_t at, uint64_t line) {
     if (Str(r, L"type") != L"response_item") return;
     auto p = Child(r, L"payload");
     std::wstring item = Str(p, L"type");
@@ -18978,79 +19314,258 @@ void TakeCodex(Conversation& c, wdj::JsonObject const& r, int64_t at) {
                 text += (text.empty() ? L"" : L" ") + std::wstring(L"[이미지]");
             }
         }
-        Say(c, role == L"user" ? Said::Who::kMe : Said::Who::kReply, text, at);
-    } else if (item == L"function_call" || item == L"custom_tool_call") {
-        Say(c, Said::Who::kTool, Str(p, L"name"), at);
+        Say(c, role == L"user" ? Said::Who::kMe : Said::Who::kReply, text, at, line);
+    } else if (item == L"function_call") {
+        std::wstring arguments = Str(p, L"arguments");
+        wdj::JsonObject input{nullptr};
+        std::wstring about = wdj::JsonObject::TryParse(arguments, input) ? About(input) : OneLine(arguments);
+        Call(c, {Str(p, L"name"), about, Str(p, L"call_id")}, at, line);
+    } else if (item == L"custom_tool_call") {
+        Call(c, {Str(p, L"name"), PatchFiles(Str(p, L"input")), Str(p, L"call_id")}, at, line);
     } else if (item == L"local_shell_call" || item == L"web_search_call") {
-        Say(c, Said::Who::kTool, item.substr(0, item.size() - 5), at);
+        Call(c, {item.substr(0, item.size() - 5), About(Child(p, L"action")), Str(p, L"call_id")}, at, line);
     }
 }
 
-void TakeLine(Conversation& c, std::string_view line) {
-    if (line.empty() || line.size() > kMaxLine) return;
-    // Most lines are tool output; those are passed over unparsed.
+// A whole line of the log, from `at`.
+void TakeLine(Conversation& c, std::string_view line, uint64_t at) {
+    if (line.empty()) return;
+    // Tools' output, most of a log, is only noted.
+    if (IsOutput(c, line)) return TakeOutput(c, line, at, line.size());
+    if (line.size() > kMaxLine) return;
     bool claude = c.source == Source::kClaude;
-    if (claude ? (line.find("\"type\":\"user\"") == std::string_view::npos &&
-                  line.find("\"type\":\"assistant\"") == std::string_view::npos &&
-                  line.find("\"queued_command\"") == std::string_view::npos) ||
-                     line.find("\"type\":\"tool_result\"") != std::string_view::npos
+    if (claude ? line.find("\"type\":\"user\"") == std::string_view::npos &&
+                     line.find("\"type\":\"assistant\"") == std::string_view::npos &&
+                     line.find("\"queued_command\"") == std::string_view::npos
                : line.find("\"type\":\"response_item\"") == std::string_view::npos ||
-                     line.find("_output\"") != std::string_view::npos ||
                      line.find("\"type\":\"reasoning\"") != std::string_view::npos) {
         return;
     }
     wdj::JsonObject record{nullptr};
     if (!wdj::JsonObject::TryParse(Widen(line), record)) return;
-    int64_t at = TimeOf(record, L"timestamp");
-    claude ? TakeClaude(c, record, at) : TakeCodex(c, record, at);
+    int64_t time = TimeOf(record, L"timestamp");
+    claude ? TakeClaude(c, record, time, at) : TakeCodex(c, record, time, at);
 }
 
-// Reads what the log added since the last look, its tail at first; false when
-// nothing changed. A replaced or shorter log starts over.
+winrt::file_handle OpenLog(std::wstring const& path) {
+    return winrt::file_handle{CreateFileW(path.c_str(), GENERIC_READ,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+}
+
+// Where the line holding byte `at` starts: just after the '\n' before it, or 0.
+uint64_t LineStart(HANDLE file, uint64_t at) {
+    std::string bytes;
+    while (at > 0) {
+        uint64_t from = at > 64 * 1024 ? at - 64 * 1024 : 0;
+        if (!ReadAt(file, from, (size_t)(at - from), bytes) || bytes.size() != at - from) return 0;
+        if (size_t nl = bytes.rfind('\n'); nl != std::string::npos) return from + nl + 1;
+        at = from;
+    }
+    return 0;
+}
+
+// Reads what the log added since the last look, its tail at first, a part at a
+// time; false when nothing changed. A replaced or shorter log starts over.
 bool Update(Conversation& c) {
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (c.path.empty() || !GetFileAttributesExW(c.path.c_str(), GetFileExInfoStandard, &data)) return false;
     uint64_t size = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
     int64_t created = Unix(data.ftCreationTime);
     if (c.started && (created != c.created || size < c.offset)) {
-        c.started = false;
-        c.partial.clear();
-        c.said.clear();
+        Conversation fresh;
+        fresh.source = c.source;
+        fresh.path = c.path;
+        c = std::move(fresh);
     }
     if (c.started && size == c.offset) return false;
-    bool cut = false;
-    if (!c.started || size - c.offset > kChatTailBytes) {
+    auto file = OpenLog(c.path);
+    if (!file) return false;
+    bool first = !c.started;
+    if (first) {
         c.started = true;
         c.created = created;
-        c.partial.clear();
-        c.offset = size > kChatTailBytes ? size - kChatTailBytes : 0;
-        cut = c.offset > 0;
+        c.offset = c.begin = size > kChatTailBytes ? size - kChatTailBytes : 0;
+        c.skip = c.offset > 0;  // the line cut at the tail's start
     }
-    winrt::file_handle file{CreateFileW(c.path.c_str(), GENERIC_READ,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
     std::string bytes;
-    if (!file || !ReadAt(file.get(), c.offset, (size_t)(size - c.offset), bytes)) return false;
-    c.offset += bytes.size();
-    std::string text = std::move(c.partial);
-    c.partial.clear();
-    text += bytes;
-    std::string_view view(text);
-    size_t start = 0;
-    if (cut) {
-        size_t first = view.find('\n');
-        start = first == std::string_view::npos ? view.size() : first + 1;
-    }
-    while (start < view.size()) {
-        size_t next = view.find('\n', start);
-        if (next == std::string_view::npos) {
-            c.partial.assign(view.substr(start));
-            break;
+    while (c.offset < size) {
+        size_t want = (size_t)std::min<uint64_t>(size - c.offset, kChatTailBytes);
+        if (!ReadAt(file.get(), c.offset, want, bytes) || bytes.empty()) break;
+        uint64_t base = c.offset - c.partial.size();  // the file's place of text[0]
+        c.offset += bytes.size();
+        std::string text = std::move(c.partial);
+        c.partial.clear();
+        text += bytes;
+        std::string_view view(text);
+        size_t start = 0;
+        if (c.skip) {
+            size_t nl = view.find('\n');
+            if (nl == std::string_view::npos) {
+                // A line longer than the tail: the parts before it start at its start.
+                if (first) c.begin = LineStart(file.get(), base);
+                first = false;
+                continue;
+            }
+            start = nl + 1;
+            c.skip = false;
+            if (first) c.begin = base + start;
         }
-        TakeLine(c, view.substr(start, next - start));
-        start = next + 1;
+        first = false;
+        while (start < view.size()) {
+            size_t next = view.find('\n', start);
+            if (next == std::string_view::npos) {
+                c.partial.assign(view.substr(start));
+                break;
+            }
+            TakeLine(c, view.substr(start, next - start), base + start);
+            start = next + 1;
+        }
+        if (bytes.size() < want) break;
     }
     return true;
+}
+
+// The part of the log before what was read: whole lines in up to
+// kChatTailBytes before `begin`, their entries put before the others. False at
+// the log's start or when it can't be read. What it reads stays, and from then
+// on nothing is let go: the panel was scrolled up to see it.
+bool Earlier(Conversation& c) {
+    if (!c.started || c.begin == 0) return false;
+    auto file = OpenLog(c.path);
+    if (!file) return false;
+    c.kept = true;
+    uint64_t from = c.begin > kChatTailBytes ? c.begin - kChatTailBytes : 0;
+    std::string bytes;
+    if (!ReadAt(file.get(), from, (size_t)(c.begin - from), bytes) || bytes.size() != c.begin - from) return false;
+    size_t start = 0;
+    if (from > 0) {
+        size_t nl = bytes.find('\n');
+        if (nl == std::string::npos || nl + 1 >= bytes.size()) {
+            // One line longer than the part, a tool's output: where it is, from its start.
+            uint64_t line = LineStart(file.get(), from);
+            std::string head;
+            ReadAt(file.get(), line, (size_t)std::min<uint64_t>(kPrefixBytes, c.begin - line), head);
+            if (IsOutput(c, head)) TakeOutput(c, head, line, c.begin - line - 1);
+            c.begin = line;
+            return true;
+        }
+        start = nl + 1;
+    }
+    auto later = std::move(c.said);
+    c.said.clear();
+    std::string_view view(bytes);
+    for (size_t at = start; at < view.size();) {
+        size_t next = view.find('\n', at);
+        if (next == std::string_view::npos) break;  // `begin` follows a line's end
+        TakeLine(c, view.substr(at, next - at), from + at);
+        at = next + 1;
+    }
+    // A tool line split between the two parts is one.
+    if (!c.said.empty() && !later.empty() && c.said.back()->who == Said::Who::kTool &&
+        later.front()->who == Said::Who::kTool) {
+        Said& joined = Own(c.said.back());
+        joined.calls.insert(joined.calls.end(), later.front()->calls.begin(), later.front()->calls.end());
+        joined.at = later.front()->at;
+        later.erase(later.begin());
+    }
+    c.said.insert(c.said.end(), std::make_move_iterator(later.begin()), std::make_move_iterator(later.end()));
+    c.begin = from + start;
+    return true;
+}
+
+std::shared_ptr<const Talk> TalkOf(Conversation const& c) {
+    auto talk = std::make_shared<Talk>();
+    talk->said = c.said;
+    talk->start = c.started && c.begin == 0;
+    return talk;
+}
+
+// The line without long text in its JSON strings for pictures, so it parses small.
+std::string WithoutPictures(std::string const& line) {
+    std::string out;
+    size_t from = 0;
+    while (true) {
+        size_t data = line.find("\"data\":\"", from), url = line.find("\"image_url\":\"", from);
+        size_t at = std::min(data, url);
+        if (at == std::string::npos) break;
+        size_t value = at + (at == data ? 8 : 13), end = value;
+        while (end < line.size() && line[end] != '"') end += line[end] == '\\' ? 2 : 1;
+        end = std::min(end, line.size());
+        out.append(line, from, value - from);
+        if (end - value <= 1024) out.append(line, value, end - value);
+        from = end;
+    }
+    out.append(line, from, std::string::npos);
+    return out;
+}
+
+// The text of an output: its text parts, [이미지] for a picture.
+std::wstring OutputText(wdj::IJsonValue const& value) {
+    if (!value) return {};
+    if (value.ValueType() == wdj::JsonValueType::String) return std::wstring(value.GetString());
+    if (value.ValueType() != wdj::JsonValueType::Array) return {};
+    std::wstring text;
+    for (auto const& item : value.GetArray()) {
+        auto o = Object(item);
+        std::wstring kind = Str(o, L"type"), part;
+        if (kind == L"image" || kind == L"input_image") {
+            part = L"[이미지]";
+        } else {
+            part = Str(o, L"text");
+        }
+        if (!part.empty()) text += (text.empty() ? L"" : L"\n") + part;
+    }
+    return text;
+}
+
+// A call's output, read from its line now.
+Result ReadResult(std::wstring const& path, Source source, std::wstring const& id, Place place) {
+    Result r;
+    if (!place.length) {
+        r.text = L"기록에 이 도구의 결과가 아직 없어요";
+        r.missing = true;
+        return r;
+    }
+    if (place.length > kResultBytes) {
+        r.text = L"결과가 너무 커서 읽지 않았어요 (" + std::to_wstring(place.length / (1024 * 1024)) + L" MB)";
+        return r;
+    }
+    auto file = OpenLog(path);
+    std::string bytes;
+    if (!file || !ReadAt(file.get(), place.at, (size_t)place.length, bytes) || bytes.size() != place.length) {
+        r.text = L"기록을 읽지 못했어요";
+        r.error = true;
+        return r;
+    }
+    bytes = WithoutPictures(bytes);
+    wdj::JsonObject record{nullptr};
+    if (!wdj::JsonObject::TryParse(Widen(bytes), record)) {
+        r.text = L"결과 줄을 읽지 못했어요";
+        r.error = true;
+        return r;
+    }
+    if (source == Source::kClaude) {
+        for (auto const& item : Objects(Child(record, L"message"), L"content")) {
+            if (Str(item, L"type") != L"tool_result" || Str(item, L"tool_use_id") != id) continue;
+            r.error = True(item, L"is_error");
+            r.text = OutputText(item.TryLookup(L"content"));
+            break;
+        }
+    } else {
+        auto p = Child(record, L"payload");
+        auto output = p ? p.TryLookup(L"output") : nullptr;
+        r.text = OutputText(output);
+        // Older Codex logs wrap it: {"output": ..., "metadata": ...}.
+        wdj::JsonObject wrapped{nullptr};
+        if (!r.text.empty() && r.text[0] == L'{' && wdj::JsonObject::TryParse(r.text, wrapped)) {
+            if (auto inner = wrapped.TryLookup(L"output")) r.text = OutputText(inner);
+        }
+    }
+    r.text = Tidy(std::move(r.text));
+    if (r.text.size() > kSaidChars) r.text = r.text.substr(0, kSaidChars - 1) + L"…";
+    if (r.text.empty()) r.text = L"(출력 없음)";
+    return r;
 }
 
 // ---- Codex's models (worker) ------------------------------------------------------------
@@ -20148,8 +20663,13 @@ struct Chat {
     std::wstring model, effort, mode;  // ids, as the logs and records name them; Codex's mode its sandbox
     int ultracode = -1;
     std::wstring cannot;  // why nothing can be sent from here
-    std::shared_ptr<const std::vector<ai_sessions::Said>> said;
-    std::wstring lastSaid;  // the last entry drawn, to scroll down as more come
+    std::shared_ptr<const ai_sessions::Talk> said;
+    size_t lastSaid = 0;  // the last entry drawn, to scroll down as more come
+    bool earlier = false;  // the log's part before is being read
+    // Tool lines opened to every call, by their first call's id; calls opened to
+    // their output, by id (empty while it is read).
+    std::unordered_set<std::wstring> openTools;
+    std::unordered_map<std::wstring, std::shared_ptr<const ai_sessions::Result>> outputs;
     std::shared_ptr<const std::vector<ai_sessions::CodexModel>> codexModels;
     std::wstring menu;  // the open popover: model, mode, folder
     std::wstring status;
@@ -20185,6 +20705,7 @@ struct Open {
     Controls::StackPanel chatHead{nullptr}, chatSaid{nullptr}, chatChips{nullptr};
     Controls::Border chatMeter{nullptr};
     Controls::ScrollViewer chatScroll{nullptr};
+    std::vector<std::pair<size_t, wux::UIElement>> saidRows;  // in chatSaid, each by what it shows
     Controls::TextBlock chatStatus{nullptr};
     Controls::TextBox chatBox{nullptr}, folderBox{nullptr};
     Controls::Border chatSend{nullptr};
@@ -20202,6 +20723,10 @@ struct Open {
     uint32_t widenRun = 0;
     double widenTo = 0, slide = 0, spareLeft = 0, spareRight = 0;
     int placeLogs = 0;
+    // A session's chat asked for from outside (OpenChatFor), by its row's key, opened
+    // once its row comes, until the tick count given.
+    std::wstring pendingChat;
+    uint64_t pendingUntil = 0;
 };
 [[clang::no_destroy]] std::optional<Open> g_open;
 // Set when the popup hooked the tray's hide timer itself (the folders, which do
@@ -20875,7 +21400,7 @@ FrameworkElement AgentLine(ai_sessions::Row const& a, int64_t now) {
     return line;
 }
 
-// A session this one started: "└ ◯ title · 진행 … 2분 전  1,234 tok", outlined
+// A session this one started: "└ ▣ title · 진행 … 2분 전  1,234 tok", outlined
 // under the pointer; a click opens its details under it.
 FrameworkElement Details(ai_sessions::Row const& r, std::wstring const& key, int64_t now);
 
@@ -20908,7 +21433,17 @@ FrameworkElement ChildLine(ai_sessions::Row const& c, int64_t now) {
     elbow.CornerRadius({0, 0, 0, 3});
     elbow.VerticalAlignment(VerticalAlignment::Top);
     elbow.Margin({0, 0, 5, 0});
-    auto mark = StateMark(c, 8);
+    // Its state's mark in a square, apart from a subagent's bare one.
+    auto state = StateMark(c, 6);
+    state.HorizontalAlignment(HorizontalAlignment::Center);
+    Controls::Border mark;
+    mark.Width(12);
+    mark.Height(12);
+    mark.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+    mark.BorderThickness({1, 1, 1, 1});
+    mark.BorderBrush(Brush(C().dim));
+    mark.VerticalAlignment(VerticalAlignment::Center);
+    mark.Child(state);
     mark.Margin({0, 0, 7, 0});
     Controls::Border line;
     line.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
@@ -21451,9 +21986,25 @@ void DrawSessions() {
     }
 }
 
+// The chat asked for from outside, once its row is in the list; given up on after a while.
+void TryPendingChat() {
+    if (!Ours() || g_open->pendingChat.empty()) return;
+    auto& o = *g_open;
+    if (GetTickCount64() > o.pendingUntil) {
+        o.pendingChat.clear();
+        return;
+    }
+    auto snapshot = ai_sessions::g_snapshot;  // held while its row is used
+    if (auto const* r = RowByKey(snapshot.get(), o.pendingChat)) {
+        o.pendingChat.clear();
+        OpenChat(r);
+    }
+}
+
 void RenderSessions() {
     DrawSessions();
     Settle(L"sessions");
+    TryPendingChat();
 }
 
 void StopSessions() {
@@ -21478,7 +22029,6 @@ void StopSessions() {
 constexpr double kChatWidth = 340, kChatGap = 12;
 constexpr int kWidenMs = 380, kNarrowMs = 280;
 constexpr ULONGLONG kKeepOpenMs = 12000;  // an app's window may come forward meanwhile
-constexpr size_t kSaidShown = 16;
 constexpr size_t kFoldersShown = 8;
 
 std::mutex g_driveLock;  // one job on the apps at a time
@@ -21786,56 +22336,986 @@ void DrawChatHead() {
     o.chatMeter.Child(r ? ContextMeter(*r, L"컨텍스트") : nullptr);
 }
 
+/// A fill a shade under what it sits on: code, a table's head.
+uint32_t Recess() {
+    return g_open->dark ? 0x38000000 : 0x14111111;
+}
+
+// Text on the accent: dark on a light accent, white on a deep one.
+uint32_t OnAccent() {
+    auto linear = [](uint32_t channel) {
+        double v = (channel & 0xFF) / 255.0;
+        return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+    };
+    uint32_t a = C().accent;
+    double y = 0.2126 * linear(a >> 16) + 0.7152 * linear(a >> 8) + 0.0722 * linear(a);
+    return y > 0.3 ? 0xFF18181B : 0xFFFFFFFF;
+}
+
+namespace chat_md {
+// An answer's Markdown drawn as the apps draw it: paragraphs and headings,
+// lists, quotes, code blocks, rules and tables, with bold, italic, code, links
+// and strikethrough inside the text. Anything else shows as written. Made once
+// per entry; the rows are kept.
+
+constexpr PCWSTR kMono = L"Cascadia Mono, Consolas, Malgun Gothic";
+constexpr int kDeepest = 6;  // lists and quotes in each other
+
+struct Look {
+    bool bold = false, italic = false, strike = false;
+};
+
+// One text block's settings, and its code runs to shade once it is filled: by
+// where they are in its text, which the shading counts in letters only.
+struct Ink {
+    double size = kTextSize;
+    uint32_t color = 0;
+    int letters = 0;
+    std::vector<std::pair<int, int>> code;  // start, length
+};
+
+std::wstring_view Trim(std::wstring_view s) {
+    size_t a = s.find_first_not_of(L" \t"), b = s.find_last_not_of(L" \t");
+    return a == std::wstring_view::npos ? std::wstring_view{} : s.substr(a, b - a + 1);
+}
+
+bool Blank(std::wstring_view line) {
+    return Trim(line).empty();
+}
+
+size_t Indent(std::wstring_view line) {
+    size_t n = 0;
+    for (WCHAR ch : line) {
+        if (ch == L' ') {
+            n++;
+        } else if (ch == L'\t') {
+            n += 4;
+        } else {
+            break;
+        }
+    }
+    return n;
+}
+
+// The line without up to `columns` of its leading space.
+std::wstring_view Dedent(std::wstring_view line, size_t columns) {
+    size_t n = 0, i = 0;
+    while (i < line.size() && n < columns && (line[i] == L' ' || line[i] == L'\t')) {
+        n += line[i] == L'\t' ? 4 : 1;
+        i++;
+    }
+    return line.substr(i);
+}
+
+bool IsRule(std::wstring_view t) {
+    if (t.empty() || (t[0] != L'-' && t[0] != L'*' && t[0] != L'_')) return false;
+    size_t n = 0;
+    for (WCHAR ch : t) {
+        if (ch == t[0]) {
+            n++;
+        } else if (ch != L' ' && ch != L'\t') {
+            return false;
+        }
+    }
+    return n >= 3;
+}
+
+// A table's line under its head: | --- | :-: |
+bool IsTableRule(std::wstring_view line) {
+    auto t = Trim(line);
+    return t.find(L'-') != std::wstring_view::npos && t.find(L'|') != std::wstring_view::npos &&
+           t.find_first_not_of(L"|:- \t") == std::wstring_view::npos;
+}
+
+struct Mark {
+    size_t indent = 0, content = 0, width = 0;  // the mark's column, its text's, the mark with its space
+    bool ordered = false;
+    std::wstring number;
+};
+
+bool ListMark(std::wstring_view line, Mark& m) {
+    size_t p = line.find_first_not_of(L" \t");
+    if (p == std::wstring_view::npos) return false;
+    auto t = line.substr(p);
+    m.indent = Indent(line);
+    if (t.size() >= 2 && (t[0] == L'-' || t[0] == L'*' || t[0] == L'+') && (t[1] == L' ' || t[1] == L'\t')) {
+        m.ordered = false;
+        m.width = p + 2;
+        m.content = m.indent + 2;
+        return true;
+    }
+    size_t d = 0;
+    while (d < t.size() && d < 9 && iswdigit(t[d])) d++;
+    if (d > 0 && d + 1 < t.size() && (t[d] == L'.' || t[d] == L')') && (t[d + 1] == L' ' || t[d + 1] == L'\t')) {
+        m.ordered = true;
+        m.number = std::wstring(t.substr(0, d)) + L".";
+        m.width = p + d + 2;
+        m.content = m.indent + d + 2;
+        return true;
+    }
+    return false;
+}
+
+bool IsFence(std::wstring_view t) {
+    return t.starts_with(L"```") || t.starts_with(L"~~~");
+}
+
+bool IsHeading(std::wstring_view t) {
+    size_t n = t.find_first_not_of(L'#');
+    return !t.empty() && t[0] == L'#' && n != std::wstring_view::npos && n <= 6 && (t[n] == L' ' || t[n] == L'\t');
+}
+
+// A line that starts a block of its own, so it doesn't run on a paragraph.
+bool StartsBlock(std::wstring_view line) {
+    Mark m;
+    auto t = Trim(line);
+    return Indent(line) < 4 && (IsFence(t) || IsHeading(t) || (!t.empty() && t[0] == L'>') || IsRule(t) || ListMark(line, m));
+}
+
+std::vector<std::wstring> Cells(std::wstring_view line) {
+    auto t = Trim(line);
+    if (!t.empty() && t[0] == L'|') t.remove_prefix(1);
+    if (!t.empty() && t.back() == L'|' && !(t.size() >= 2 && t[t.size() - 2] == L'\\')) t.remove_suffix(1);
+    std::vector<std::wstring> cells;
+    std::wstring cell;
+    bool code = false;
+    for (size_t i = 0; i < t.size(); i++) {
+        if (t[i] == L'\\' && i + 1 < t.size() && t[i + 1] == L'|') {
+            cell += L'|';
+            i++;
+            continue;
+        }
+        if (t[i] == L'`') code = !code;
+        if (t[i] == L'|' && !code) {
+            cells.emplace_back(Trim(cell));
+            cell.clear();
+            continue;
+        }
+        cell += t[i];
+    }
+    cells.emplace_back(Trim(cell));
+    return cells;
+}
+
+Documents::Run Piece(std::wstring const& text, Look look, Ink& ink, bool code = false) {
+    Documents::Run run;
+    run.Text(text);
+    if (look.bold) run.FontWeight(Semi());
+    if (look.italic) run.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+    if (look.strike) run.TextDecorations(winrt::Windows::UI::Text::TextDecorations::Strikethrough);
+    if (code) {
+        run.FontFamily(Media::FontFamily{kMono});
+        run.FontSize(ink.size - 1);
+        ink.code.push_back({ink.letters, (int)text.size()});
+    }
+    ink.letters += (int)text.size();
+    return run;
+}
+
+bool IsWeb(std::wstring_view url) {
+    return url.starts_with(L"https://") || url.starts_with(L"http://");
+}
+
+// A link opens in the default browser, off the taskbar thread.
+Documents::Hyperlink Link(std::wstring const& url) {
+    Documents::Hyperlink link;
+    link.Foreground(Brush(C().accentText));
+    link.Click([url](auto&&, auto&&) {
+        core::Guard(L"Usage chat link", [&] {
+            folders::StartJob([url] { ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL); });
+        });
+    });
+    return link;
+}
+
+void Inlines(Documents::InlineCollection const& out, std::wstring_view s, Look look, Ink& ink, bool inLink);
+
+// `s` from `i` as a link: [text](address), <address> or an address as it is.
+// Where it ends, or 0 when it isn't one.
+size_t TakeLink(Documents::InlineCollection const& out, std::wstring_view s, size_t i, Look look, Ink& ink) {
+    auto wordy = [](WCHAR ch) { return iswalnum(ch) != 0; };
+    if (s[i] == L'[') {
+        size_t close = i + 1;
+        for (int depth = 1; close < s.size(); close++) {
+            if (s[close] == L'\\') {
+                close++;
+            } else if (s[close] == L'[') {
+                depth++;
+            } else if (s[close] == L']' && --depth == 0) {
+                break;
+            }
+        }
+        if (close >= s.size() || close + 1 >= s.size() || s[close + 1] != L'(') return 0;
+        size_t end = close + 2;
+        for (int depth = 1; end < s.size(); end++) {
+            if (s[end] == L'(') depth++;
+            if (s[end] == L')' && --depth == 0) break;
+        }
+        if (end >= s.size()) return 0;
+        auto target = Trim(s.substr(close + 2, end - close - 2));
+        target = target.substr(0, target.find(L' '));
+        if (!target.empty() && target[0] == L'<' && target.back() == L'>') target = target.substr(1, target.size() - 2);
+        auto text = s.substr(i + 1, close - i - 1);
+        if (IsWeb(target)) {
+            auto link = Link(std::wstring(target));
+            Inlines(link.Inlines(), text, look, ink, true);
+            out.Append(link);
+        } else {
+            // A file or a place in the app: its name, in the link's colour.
+            Documents::Span span;
+            span.Foreground(Brush(C().accentText));
+            Inlines(span.Inlines(), text, look, ink, true);
+            out.Append(span);
+        }
+        return end + 1;
+    }
+    if (s[i] == L'<' && IsWeb(s.substr(i + 1))) {
+        size_t end = s.find(L'>', i);
+        if (end == std::wstring_view::npos || s.substr(i, end - i).find_first_of(L" \n") != std::wstring_view::npos) return 0;
+        std::wstring url(s.substr(i + 1, end - i - 1));
+        auto link = Link(url);
+        link.Inlines().Append(Piece(url, look, ink));
+        out.Append(link);
+        return end + 1;
+    }
+    if (s[i] == L'h' && IsWeb(s.substr(i)) && (i == 0 || !wordy(s[i - 1]))) {
+        size_t end = s.find_first_of(L" \t\n<>\"'`", i);
+        if (end == std::wstring_view::npos) end = s.size();
+        while (end > i && std::wstring_view(L".,;:!?*_~").find(s[end - 1]) != std::wstring_view::npos) end--;
+        auto url = s.substr(i, end - i);
+        if (url.ends_with(L")") && std::ranges::count(url, L'(') < std::ranges::count(url, L')')) end--;
+        std::wstring address(s.substr(i, end - i));
+        auto link = Link(address);
+        link.Inlines().Append(Piece(address, look, ink));
+        out.Append(link);
+        return end;
+    }
+    return 0;
+}
+
+void Inlines(Documents::InlineCollection const& out, std::wstring_view s, Look look, Ink& ink, bool inLink) {
+    auto wordy = [](WCHAR ch) { return iswalnum(ch) != 0; };
+    std::wstring plain;
+    auto flush = [&] {
+        if (!plain.empty()) out.Append(Piece(plain, look, ink));
+        plain.clear();
+    };
+    for (size_t i = 0; i < s.size();) {
+        WCHAR ch = s[i];
+        if (ch == L'\\' && i + 1 < s.size() && iswpunct(s[i + 1])) {
+            plain += s[i + 1];
+            i += 2;
+            continue;
+        }
+        if (ch == L'\n') {
+            flush();
+            out.Append(Documents::LineBreak{});
+            ink.letters++;
+            i++;
+            continue;
+        }
+        if (ch == L'`') {
+            size_t run = s.find_first_not_of(L'`', i);
+            run = (run == std::wstring_view::npos ? s.size() : run) - i;
+            size_t close = std::wstring_view::npos;
+            for (size_t j = i + run; (j = s.find(L'`', j)) != std::wstring_view::npos;) {
+                size_t r = s.find_first_not_of(L'`', j);
+                r = r == std::wstring_view::npos ? s.size() : r;
+                if (r - j == run) {
+                    close = j;
+                    break;
+                }
+                j = r;
+            }
+            if (close != std::wstring_view::npos && close > i + run) {
+                flush();
+                std::wstring code(s.substr(i + run, close - i - run));
+                if (code.size() > 2 && code.front() == L' ' && code.back() == L' ') code = code.substr(1, code.size() - 2);
+                out.Append(Piece(code, look, ink, true));
+                i = close + run;
+                continue;
+            }
+            plain.append(run, L'`');
+            i += run;
+            continue;
+        }
+        if (ch == L'*' || ch == L'_' || (ch == L'~' && i + 1 < s.size() && s[i + 1] == L'~')) {
+            size_t run = s.find_first_not_of(ch, i);
+            run = (run == std::wstring_view::npos ? s.size() : run) - i;
+            bool opens = i + run < s.size() && !iswspace(s[i + run]) && (ch != L'_' || i == 0 || !wordy(s[i - 1]));
+            size_t taken = 0;
+            for (size_t k = ch == L'~' ? 2 : std::min<size_t>(run, 3); opens && k >= 1 && !taken; k--) {
+                if (ch == L'~' && k != 2) break;
+                // A closing run of exactly k, after something that isn't space.
+                for (size_t j = i + run; (j = s.find(ch, j)) != std::wstring_view::npos;) {
+                    size_t r = s.find_first_not_of(ch, j);
+                    r = r == std::wstring_view::npos ? s.size() : r;
+                    bool after = r < s.size() && wordy(s[r]);
+                    if (r - j == k && !iswspace(s[j - 1]) && (ch != L'_' || !after)) {
+                        flush();
+                        Look inner = look;
+                        if (ch == L'~') {
+                            inner.strike = true;
+                        } else {
+                            inner.bold = inner.bold || k >= 2;
+                            inner.italic = inner.italic || k != 2;
+                        }
+                        // The opening run's extra marks stay as written.
+                        plain.append(run - k, ch);
+                        flush();
+                        Inlines(out, s.substr(i + run, j - i - run), inner, ink, inLink);
+                        taken = r;
+                        break;
+                    }
+                    j = r;
+                }
+                if (k == 1) break;
+            }
+            if (taken) {
+                i = taken;
+                continue;
+            }
+            plain.append(run, ch);
+            i += run;
+            continue;
+        }
+        bool link = ch == L'[' || (ch == L'<' && IsWeb(s.substr(i + 1))) ||
+                    (ch == L'h' && IsWeb(s.substr(i)) && (i == 0 || !wordy(s[i - 1])));
+        if (!inLink && link) {
+            flush();
+            if (size_t end = TakeLink(out, s, i, look, ink)) {
+                i = end;
+                continue;
+            }
+        }
+        plain += ch;
+        i++;
+    }
+    flush();
+}
+
+Controls::RichTextBlock Flow(Ink const& ink) {
+    Controls::RichTextBlock block;
+    block.FontFamily(Media::FontFamily{kFont});
+    block.FontSize(ink.size);
+    block.Foreground(Brush(ink.color));
+    block.TextWrapping(TextWrapping::Wrap);
+    block.IsTextSelectionEnabled(false);
+    return block;
+}
+
+// The code runs shaded in the text block that has them (its one paragraph).
+void Shade(Controls::RichTextBlock const& block, Ink& ink) {
+    if (!ink.code.empty()) {
+        try {
+            Documents::TextHighlighter shade;
+            shade.Background(Brush(Recess()));
+            for (auto const& [start, length] : ink.code) {
+                if (length > 0) shade.Ranges().Append({start, length});
+            }
+            block.TextHighlighters().Append(shade);
+        } catch (...) {
+        }
+    }
+    ink.code.clear();
+    ink.letters = 0;
+}
+
+// A paragraph or heading as `block`'s one paragraph.
+void Para(Controls::RichTextBlock const& block, std::wstring_view text, Ink& ink, double size, bool bold) {
+    Documents::Paragraph p;
+    if (size != ink.size) p.FontSize(size);
+    if (bold) p.FontWeight(Semi());
+    Inlines(p.Inlines(), text, {}, ink, false);
+    block.Blocks().Append(p);
+    Shade(block, ink);
+}
+
+FrameworkElement CodeBlock(std::wstring const& code, std::wstring_view language, Ink const& ink) {
+    Controls::StackPanel inside;
+    if (!language.empty()) {
+        auto name = Text(std::wstring(language), 10, C().faint, Medium());
+        name.Margin({0, 0, 0, 3});
+        inside.Children().Append(name);
+    }
+    auto text = Text(code, ink.size - 1, C().text);
+    text.FontFamily(Media::FontFamily{kMono});
+    text.TextWrapping(TextWrapping::Wrap);
+    text.TextTrimming(TextTrimming::None);
+    inside.Children().Append(text);
+    Controls::Border box;
+    box.Background(Brush(Recess()));
+    box.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    box.Padding({8, 6, 8, 7});
+    box.Child(inside);
+    return box;
+}
+
+FrameworkElement Table(std::vector<std::vector<std::wstring>> const& rows, std::vector<std::wstring> const& rule,
+                       Ink const& base) {
+    size_t columns = 0;
+    for (auto const& r : rows) columns = std::max(columns, r.size());
+    columns = std::min<size_t>(columns, 8);
+    Controls::Grid grid;
+    for (size_t c = 0; c < columns; c++) {
+        size_t widest = 3;
+        for (auto const& r : rows) {
+            if (c < r.size()) widest = std::max(widest, std::min<size_t>(r[c].size(), 40));
+        }
+        Controls::ColumnDefinition column;
+        column.Width({double(widest), GridUnitType::Star});
+        grid.ColumnDefinitions().Append(column);
+    }
+    for (size_t r = 0; r < rows.size(); r++) {
+        Controls::RowDefinition row;
+        row.Height(GridLengthHelper::Auto());
+        grid.RowDefinitions().Append(row);
+        for (size_t c = 0; c < columns; c++) {
+            Ink ink{base.size - 0.5, base.color, {}};
+            auto block = Flow(ink);
+            if (c < rule.size()) {
+                auto a = Trim(rule[c]);
+                bool left = a.starts_with(L":"), right = a.ends_with(L":");
+                block.TextAlignment(left && right ? TextAlignment::Center : right ? TextAlignment::Right : TextAlignment::Left);
+            }
+            Documents::Paragraph p;
+            if (r == 0) p.FontWeight(Semi());
+            Inlines(p.Inlines(), c < rows[r].size() ? std::wstring_view(rows[r][c]) : L"", {}, ink, false);
+            block.Blocks().Append(p);
+            Shade(block, ink);
+            Controls::Border cell;
+            cell.Padding({6, 4, 6, 4});
+            cell.BorderBrush(Brush(C().edge));
+            cell.BorderThickness({0, 0, c + 1 < columns ? 1.0 : 0, r + 1 < rows.size() ? 1.0 : 0});
+            if (r == 0) cell.Background(Brush(Recess()));
+            cell.Child(block);
+            Controls::Grid::SetRow(cell, (int)r);
+            Controls::Grid::SetColumn(cell, (int)c);
+            grid.Children().Append(cell);
+        }
+    }
+    Controls::Border frame;
+    frame.BorderThickness({1, 1, 1, 1});
+    frame.BorderBrush(Brush(C().edge));
+    frame.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    frame.Child(grid);
+    return frame;
+}
+
+FrameworkElement Blocks(std::wstring_view text, int depth, Ink base);
+
+// A list from line `i`: its items, each drawn as Markdown of its own. The line after.
+size_t List(std::vector<std::wstring_view> const& lines, size_t i, Controls::StackPanel const& out, int depth,
+            Ink const& base) {
+    Mark first;
+    ListMark(lines[i], first);
+    std::vector<std::pair<Mark, std::wstring>> items;
+    bool blank = false;
+    for (; i < lines.size(); i++) {
+        auto line = lines[i];
+        Mark m;
+        if (Blank(line)) {
+            blank = true;
+            if (!items.empty()) items.back().second += L"\n";
+            continue;
+        }
+        if (Indent(line) <= first.indent + 1 && ListMark(line, m) && m.ordered == first.ordered) {
+            items.push_back({m, std::wstring(line.substr(m.width))});
+        } else if (!items.empty() && Indent(line) > items.back().first.indent) {
+            items.back().second += L"\n" + std::wstring(Dedent(line, items.back().first.content));
+        } else if (!items.empty() && !blank && !StartsBlock(line)) {
+            items.back().second += L"\n" + std::wstring(Trim(line));
+        } else {
+            break;
+        }
+        blank = false;
+    }
+    Controls::StackPanel list;
+    list.Spacing(3);
+    for (auto& [m, body] : items) {
+        std::wstring_view rest = body;
+        std::wstring mark = m.ordered ? m.number : depth % 3 == 0 ? L"•" : depth % 3 == 1 ? L"◦" : L"▪";
+        if (rest.starts_with(L"[ ] ") || rest.starts_with(L"[x] ") || rest.starts_with(L"[X] ")) {
+            mark = rest[1] == L' ' ? L"☐" : L"☑";
+            rest.remove_prefix(4);
+        }
+        auto sign = Text(mark, base.size, m.ordered ? C().dim : C().faint, m.ordered ? Medium() : winrt::Windows::UI::Text::FontWeights::Normal());
+        sign.VerticalAlignment(VerticalAlignment::Top);
+        sign.TextTrimming(TextTrimming::None);
+        sign.MinWidth(m.ordered ? 14 : 10);
+        sign.Margin({0, 0, 5, 0});
+        auto content = Blocks(rest, depth + 1, base);
+        list.Children().Append(Columns(sign, content, nullptr));
+    }
+    out.Children().Append(list);
+    return i;
+}
+
+// Markdown's blocks, one under another.
+FrameworkElement Blocks(std::wstring_view text, int depth, Ink base) {
+    std::vector<std::wstring_view> lines;
+    for (size_t at = 0; at <= text.size();) {
+        size_t end = text.find(L'\n', at);
+        if (end == std::wstring_view::npos) end = text.size();
+        lines.push_back(text.substr(at, end - at));
+        at = end + 1;
+    }
+    Controls::StackPanel out;
+    out.Spacing(6);
+    // A text block for each paragraph and heading.
+    auto prose = [&](double above = 0) {
+        auto block = Flow(base);
+        if (above > 0 && out.Children().Size() > 0) block.Margin({0, above, 0, 0});
+        out.Children().Append(block);
+        return block;
+    };
+    for (size_t i = 0; i < lines.size();) {
+        auto line = lines[i];
+        auto t = Trim(line);
+        if (t.empty()) {
+            i++;
+            continue;
+        }
+        bool top = Indent(line) < 4;
+        if (depth >= kDeepest) {
+            std::wstring all;
+            for (; i < lines.size(); i++) all += (all.empty() ? L"" : L"\n") + std::wstring(lines[i]);
+            Para(prose(), Trim(all), base, base.size, false);
+            break;
+        }
+        if (top && IsFence(t)) {
+            size_t ticks = t.find_first_not_of(t[0]);
+            std::wstring_view fence = t.substr(0, ticks == std::wstring_view::npos ? t.size() : ticks);
+            auto language = Trim(t.substr(fence.size()));
+            size_t indent = Indent(line);
+            std::wstring code;
+            for (i++; i < lines.size() && !Trim(lines[i]).starts_with(fence); i++) {
+                code += (code.empty() ? L"" : L"\n") + std::wstring(Dedent(lines[i], indent));
+            }
+            i++;
+            out.Children().Append(CodeBlock(code, language, base));
+            continue;
+        }
+        if (top && IsHeading(t)) {
+            size_t level = t.find_first_not_of(L'#');
+            auto words = Trim(t.substr(level));
+            while (words.ends_with(L'#')) words.remove_suffix(1);
+            static constexpr double kGrow[] = {3.5, 2, 1, 0.5, 0, 0};
+            Para(prose(4), Trim(words), base, base.size + kGrow[level - 1], true);
+            i++;
+            continue;
+        }
+        if (top && IsRule(t)) {
+            Controls::Border rule;
+            rule.Height(1);
+            rule.Background(Brush(C().edge));
+            rule.Margin({0, 3, 0, 3});
+            out.Children().Append(rule);
+            i++;
+            continue;
+        }
+        if (t.find(L'|') != std::wstring_view::npos && i + 1 < lines.size() && IsTableRule(lines[i + 1])) {
+            std::vector<std::vector<std::wstring>> rows{Cells(line)};
+            auto rule = Cells(lines[i + 1]);
+            for (i += 2; i < lines.size() && !Blank(lines[i]) && lines[i].find(L'|') != std::wstring_view::npos; i++) {
+                rows.push_back(Cells(lines[i]));
+            }
+            out.Children().Append(Table(rows, rule, base));
+            continue;
+        }
+        if (top && t[0] == L'>') {
+            std::wstring inner;
+            for (; i < lines.size(); i++) {
+                auto q = Trim(lines[i]);
+                if (!q.empty() && q[0] == L'>') {
+                    q.remove_prefix(1);
+                    if (!q.empty() && q[0] == L' ') q.remove_prefix(1);
+                } else if (q.empty() || StartsBlock(lines[i])) {
+                    break;
+                }
+                inner += (inner.empty() ? L"" : L"\n") + std::wstring(q);
+            }
+            Controls::Border quote;
+            quote.BorderThickness({3, 0, 0, 0});
+            quote.BorderBrush(Brush(C().edge));
+            quote.Padding({9, 1, 0, 1});
+            quote.Child(Blocks(inner, depth + 1, {base.size, C().dim, {}}));
+            out.Children().Append(quote);
+            continue;
+        }
+        if (Mark m; top && ListMark(line, m)) {
+            i = List(lines, i, out, depth, base);
+            continue;
+        }
+        std::wstring para(t);
+        for (i++; i < lines.size() && !Blank(lines[i]) && !StartsBlock(lines[i]) &&
+                   !(lines[i].find(L'|') != std::wstring_view::npos && i + 1 < lines.size() && IsTableRule(lines[i + 1]));
+             i++) {
+            para += L"\n" + std::wstring(Trim(lines[i]));
+        }
+        Para(prose(), para, base, base.size, false);
+    }
+    if (out.Children().Size() == 1) {
+        auto only = out.Children().GetAt(0).as<FrameworkElement>();
+        out.Children().Clear();
+        return only;
+    }
+    return out;
+}
+
+}  // namespace chat_md
+
+// ---- the conversation's rows -------------------------------------------------------------
+
+constexpr size_t kCallsShown = 3;     // a longer tool line opens to show the rest
+constexpr double kEarlierPx = 160;    // this near the top reads the part before
+
+// A tool's name as the line shows it: an MCP tool's own part.
+std::wstring ToolName(std::wstring const& name) {
+    if (name.starts_with(L"mcp__")) {
+        size_t at = name.rfind(L"__");
+        if (at > 3) return name.substr(at + 2);
+    }
+    return name;
+}
+
+// "Bash ×3, Read ×2, …": a long tool line's calls by name, in order of first use.
+std::wstring CallNames(std::vector<ai_sessions::ToolCall> const& calls) {
+    std::vector<std::pair<std::wstring, int>> names;
+    for (auto const& call : calls) {
+        std::wstring name = ToolName(call.name);
+        auto it = std::ranges::find(names, name, &std::pair<std::wstring, int>::first);
+        if (it == names.end()) {
+            names.push_back({name, 1});
+        } else {
+            it->second++;
+        }
+    }
+    std::wstring out;
+    for (size_t i = 0; i < names.size() && i < 3; i++) {
+        out += (i ? L", " : L"") + names[i].first + (names[i].second > 1 ? L" ×" + std::to_wstring(names[i].second) : L"");
+    }
+    return names.size() > 3 ? out + L", …" : out;
+}
+
+FrameworkElement OutputBox(std::shared_ptr<const ai_sessions::Result> const& result) {
+    Controls::StackPanel inside;
+    if (!result) {
+        inside.Children().Append(Text(L"결과를 읽는 중…", kSmallSize, C().dim));
+    } else {
+        if (result->error) {
+            auto label = Text(L"오류", 10, C().danger, Semi());
+            label.Margin({0, 0, 0, 3});
+            inside.Children().Append(label);
+        }
+        auto text = Text(result->text, kSmallSize - 1, C().text);
+        text.FontFamily(Media::FontFamily{chat_md::kMono});
+        text.TextWrapping(TextWrapping::Wrap);
+        text.TextTrimming(TextTrimming::None);
+        inside.Children().Append(text);
+    }
+    Controls::Border box;
+    box.Background(Brush(Recess()));
+    box.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    box.Padding({8, 6, 8, 7});
+    box.Margin({22, 1, 2, 4});
+    box.Child(inside);
+    return box;
+}
+
+// A call: its name and what it was asked; open, its output under it.
+FrameworkElement CallRow(ai_sessions::ToolCall const& call, Chat const& c) {
+    auto icon = Glyph(L"\xE756", 10, C().faint);
+    icon.Margin({0, 0, 6, 0});
+    auto words = Text(L"", kSmallSize, C().faint);
+    words.Inlines().Append(Span(ToolName(call.name), kSmallSize, C().dim, true));
+    if (!call.about.empty()) words.Inlines().Append(Span(L"  " + call.about, kSmallSize, C().faint));
+    auto output = call.id.empty() ? c.outputs.end() : c.outputs.find(call.id);
+    bool open = output != c.outputs.end();
+    FrameworkElement chevron = call.id.empty() ? nullptr : Glyph(open ? L"\xE70D" : L"\xE76C", 8, C().faint);
+    Controls::Border hit;
+    hit.Background(Brush(0));
+    hit.Padding({6, 3, 6, 3});
+    hit.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+    hit.Child(Columns(icon, words, chevron));
+    if (!call.id.empty()) {
+        SetTag(hit, L"call|" + call.id);
+        Automation::AutomationProperties::SetName(hit, ToolName(call.name) + L" " + call.about);
+    }
+    if (!open) return hit;
+    Controls::StackPanel both;
+    both.Children().Append(hit);
+    both.Children().Append(OutputBox(output->second));
+    return both;
+}
+
+// A tool line: each call, or past kCallsShown a line to open them by.
+FrameworkElement ToolRows(ai_sessions::Said const& s, Chat const& c) {
+    Controls::StackPanel rows;
+    rows.Margin({0, 2, 0, 2});
+    std::wstring const& first = s.calls.front().id;
+    bool many = s.calls.size() > kCallsShown && !first.empty();
+    bool open = !many || c.openTools.contains(first);
+    if (many) {
+        auto icon = Glyph(L"\xE756", 10, C().faint);
+        icon.Margin({0, 0, 6, 0});
+        auto words = Text(L"도구 " + std::to_wstring(s.calls.size()) + L"개 · " + CallNames(s.calls), kSmallSize, C().faint);
+        Controls::Border hit;
+        hit.Background(Brush(0));
+        hit.Padding({6, 3, 6, 3});
+        hit.Child(Columns(icon, words, Glyph(open ? L"\xE70E" : L"\xE70D", 8, C().faint)));
+        SetTag(hit, L"tools|" + first);
+        Automation::AutomationProperties::SetName(hit, open ? L"도구 줄 접기" : L"도구 줄 펼치기");
+        rows.Children().Append(hit);
+    }
+    if (open) {
+        for (auto const& call : s.calls) {
+            auto row = CallRow(call, c);
+            if (many) row.Margin({10, 0, 0, 0});
+            rows.Children().Append(row);
+        }
+    }
+    return rows;
+}
+
+// Which choices the answer picked, and what was written instead of one.
+std::vector<bool> Picked(ai_sessions::Question const& q, std::wstring& other) {
+    std::vector<bool> on(q.choices.size());
+    other.clear();
+    if (q.answer.empty()) return on;
+    for (size_t k = 0; k < q.choices.size(); k++) {
+        if (q.choices[k].label == q.answer) {
+            on[k] = true;
+            return on;
+        }
+    }
+    for (size_t at = 0; at <= q.answer.size();) {
+        size_t end = q.answer.find(L", ", at);
+        if (end == std::wstring::npos) end = q.answer.size();
+        std::wstring part = q.answer.substr(at, end - at);
+        auto it = std::ranges::find(q.choices, part, &ai_sessions::Choice::label);
+        if (it != q.choices.end()) {
+            on[size_t(it - q.choices.begin())] = true;
+        } else if (!part.empty()) {
+            other += (other.empty() ? L"" : L", ") + part;
+        }
+        at = end + 2;
+    }
+    return on;
+}
+
+FrameworkElement ChoiceRow(ai_sessions::Choice const& choice, bool on, bool multi) {
+    Controls::Border mark;
+    mark.Width(13);
+    mark.Height(13);
+    mark.CornerRadius(CornerRadiusHelper::FromUniformRadius(multi ? 3 : 6.5));
+    mark.BorderThickness({1.5, 1.5, 1.5, 1.5});
+    mark.BorderBrush(Brush(on ? C().accent : C().faint));
+    mark.VerticalAlignment(VerticalAlignment::Top);
+    mark.Margin({0, 2, 8, 0});
+    if (on && multi) {
+        mark.Background(Brush(C().accent));
+        auto check = Glyph(L"\xE73E", 8, OnAccent());
+        check.HorizontalAlignment(HorizontalAlignment::Center);
+        mark.Child(check);
+    } else if (on) {
+        Controls::Border dot;
+        dot.Width(6);
+        dot.Height(6);
+        dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+        dot.Background(Brush(C().accent));
+        dot.HorizontalAlignment(HorizontalAlignment::Center);
+        dot.VerticalAlignment(VerticalAlignment::Center);
+        mark.Child(dot);
+    }
+    Controls::StackPanel words;
+    auto label = Text(choice.label, kTextSize, on ? C().accentText : C().text, on ? Semi() : Medium());
+    label.TextWrapping(TextWrapping::Wrap);
+    words.Children().Append(label);
+    if (!choice.about.empty()) {
+        auto about = Text(choice.about, kSmallSize - 0.5, C().faint);
+        about.TextWrapping(TextWrapping::Wrap);
+        about.Margin({0, 1, 0, 0});
+        words.Children().Append(about);
+    }
+    Controls::Border row;
+    row.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+    row.Padding({9, 6, 9, 7});
+    row.Margin({0, 5, 0, 0});
+    row.BorderThickness({1, 1, 1, 1});
+    row.BorderBrush(Brush(on ? C().accent : C().edge));
+    row.Background(Brush(on ? C().accentSoft : 0));
+    row.Child(Columns(mark, words, nullptr));
+    return row;
+}
+
+// Claude's question as the app asks it: its head, the question, the choices
+// and the one picked, or that it waits for an answer.
+FrameworkElement AskCard(ai_sessions::Said const& s) {
+    using Answer = ai_sessions::Said::Answer;
+    Controls::StackPanel inside;
+    auto icon = Glyph(L"\xE897", 11, C().accentText);
+    icon.Margin({0, 0, 6, 0});
+    std::wstring state = s.answer == Answer::kGiven ? L"답함" : s.answer == Answer::kNone ? L"답 없이 넘어감" : L"답을 기다리는 중";
+    uint32_t ink = s.answer == Answer::kGiven ? C().accentText : s.answer == Answer::kNone ? C().faint : C().warn;
+    inside.Children().Append(Line(Across({icon, Text(L"질문", kSmallSize, C().dim, Medium())}), Text(state, kSmallSize, ink, Medium())));
+    for (auto const& q : s.questions) {
+        if (!q.header.empty()) {
+            Controls::Border chip;
+            chip.Background(Brush(C().accentSoft));
+            chip.CornerRadius(CornerRadiusHelper::FromUniformRadius(5));
+            chip.Padding({6, 1, 6, 2});
+            chip.Margin({0, 9, 0, 0});
+            chip.HorizontalAlignment(HorizontalAlignment::Left);
+            chip.Child(Text(q.header, 10.5, C().accentText, Medium()));
+            inside.Children().Append(chip);
+        }
+        auto question = Text(q.text, kTextSize, C().text, Semi());
+        question.TextWrapping(TextWrapping::Wrap);
+        question.Margin({0, q.header.empty() ? 9.0 : 5.0, 0, 1});
+        inside.Children().Append(question);
+        if (q.multi) {
+            auto many = Text(L"여러 개 고를 수 있음", 10.5, C().faint);
+            many.Margin({0, 1, 0, 0});
+            inside.Children().Append(many);
+        }
+        std::wstring other;
+        auto on = Picked(q, other);
+        for (size_t k = 0; k < q.choices.size(); k++) inside.Children().Append(ChoiceRow(q.choices[k], on[k], q.multi));
+        if (!other.empty()) inside.Children().Append(ChoiceRow({L"직접 쓴 답: " + other, L""}, true, q.multi));
+        if (s.answer == Answer::kGiven && q.answer.empty()) {
+            auto none = Text(L"이 질문에는 답하지 않았어요", kSmallSize, C().faint);
+            none.Margin({0, 5, 0, 0});
+            inside.Children().Append(none);
+        }
+    }
+    Controls::Border card;
+    card.CornerRadius(CornerRadiusHelper::FromUniformRadius(12));
+    card.Background(Brush(C().tile));
+    card.BorderThickness({1, 1, 1, 1});
+    card.BorderBrush(Brush(s.answer == Answer::kWaiting ? C().warn : C().edge));
+    card.Padding({12, 9, 12, 11});
+    card.MaxWidth(300);
+    card.HorizontalAlignment(HorizontalAlignment::Left);
+    card.Margin({0, 4, 0, 4});
+    card.Child(inside);
+    return card;
+}
+
+// What a row of the conversation shows, in the palette it was drawn in: the
+// same key, the same row. With a tool line, which of it is open and read.
+size_t SaidKey(ai_sessions::Said const& s) {
+    auto const& c = *g_open->chat;
+    size_t key = std::hash<std::wstring>{}(s.text);
+    auto mix = [&](size_t part) { key = key * 31 + part; };
+    for (int64_t part : {int64_t(s.who), s.at, int64_t(s.line), int64_t(s.steered), int64_t(s.answer),
+                         int64_t(C().text), int64_t(C().accent)}) {
+        mix(std::hash<int64_t>{}(part));
+    }
+    for (auto const& call : s.calls) {
+        mix(std::hash<std::wstring>{}(call.id) ^ std::hash<std::wstring>{}(call.name));
+        auto it = call.id.empty() ? c.outputs.end() : c.outputs.find(call.id);
+        mix(it == c.outputs.end() ? 0 : 1 + reinterpret_cast<size_t>(it->second.get()));
+    }
+    if (!s.calls.empty()) mix(c.openTools.contains(s.calls.front().id));
+    for (auto const& q : s.questions) {
+        mix(std::hash<std::wstring>{}(q.text));
+        mix(std::hash<std::wstring>{}(q.answer));
+    }
+    return key;
+}
+
+// A row of the conversation: a tool line, a question, or a bubble with the
+// whole message, an answer's in Markdown.
+wux::UIElement SaidRow(ai_sessions::Said const& s) {
+    using Who = ai_sessions::Said::Who;
+    if (s.who == Who::kTool) return ToolRows(s, *g_open->chat);
+    if (s.who == Who::kAsk) return AskCard(s);
+    bool me = s.who == Who::kMe;
+    FrameworkElement text{nullptr};
+    if (me) {
+        auto plain = Text(s.text, kTextSize, C().text);
+        plain.TextWrapping(TextWrapping::Wrap);
+        text = plain;
+    } else {
+        text = chat_md::Blocks(s.text, 0, {kTextSize, C().text, {}});
+    }
+    Controls::StackPanel inside;
+    if (me && s.steered) {
+        auto mark = Text(L"턴 중에 보냄", 10, C().accentText, Medium());
+        mark.Margin({0, 0, 0, 2});
+        inside.Children().Append(mark);
+    }
+    inside.Children().Append(text);
+    Controls::Border bubble;
+    bubble.CornerRadius(me ? CornerRadius{12, 12, 4, 12} : CornerRadius{12, 12, 12, 4});
+    bubble.Background(Brush(me ? C().accentSoft : C().tile));
+    bubble.Padding({10, 7, 10, 8});
+    bubble.MaxWidth(me ? 260 : 300);
+    bubble.HorizontalAlignment(me ? HorizontalAlignment::Right : HorizontalAlignment::Left);
+    bubble.Margin({0, 3, 0, 3});
+    bubble.Child(inside);
+    return bubble;
+}
+
+// Every row read, drawn again as the log grows, a call opens or the part
+// before comes in: rows already drawn stay, and only new or changed ones are
+// made and laid out. At the top, the log's start or how to read before it.
 void DrawSaid() {
     auto& c = *g_open->chat;
-    auto list = g_open->chatSaid;
-    list.Children().Clear();
+    auto rows = g_open->chatSaid.Children();
+    auto& drawn = g_open->saidRows;
     auto note = [&](std::wstring const& text) {
+        rows.Clear();
+        drawn.clear();
         auto n = Text(text, kSmallSize, C().dim);
         n.TextWrapping(TextWrapping::Wrap);
         n.Margin({10, 10, 10, 10});
-        list.Children().Append(n);
+        rows.Append(n);
     };
     if (c.fresh) {
         return note(L"첫 메시지를 보내면 앱에서 새 세션이 시작돼요. 폴더, 모델, 권한은 아래 칩에서 고릅니다.");
     }
     if (c.logPath.empty()) return note(L"이 세션의 기록 파일을 모릅니다");
     if (!c.said) return note(L"대화 기록을 읽는 중…");
-    if (c.said->empty()) return note(L"기록 끝부분에 대화가 없어요");
-    size_t from = c.said->size() > kSaidShown ? c.said->size() - kSaidShown : 0;
-    for (size_t i = from; i < c.said->size(); i++) {
-        auto const& s = (*c.said)[i];
-        if (s.who == ai_sessions::Said::Who::kTool) {
-            auto icon = Glyph(L"\xE756", 10, C().faint);
-            icon.Margin({0, 0, 6, 0});
-            std::wstring words = s.tools > 1 ? L"도구 " + std::to_wstring(s.tools) + L"개 · " + s.text
-                                             : ToolWords(s.text) + L" · " + s.text;
-            auto line = Across({icon, Text(words, kSmallSize, C().faint)});
-            line.Margin({6, 3, 6, 3});
-            list.Children().Append(line);
-            continue;
+    if (c.said->said.empty()) return note(c.said->start ? L"기록에 대화가 없어요" : L"앞쪽 기록에서 대화를 찾는 중…");
+    std::unordered_map<size_t, wux::UIElement> had;
+    for (auto const& [key, row] : drawn) had.emplace(key, row);
+    std::vector<std::pair<size_t, wux::UIElement>> next;
+    auto put = [&](size_t key, auto&& make) {
+        auto it = had.find(key);
+        if (it == had.end()) {
+            next.emplace_back(key, make());
+        } else {
+            next.emplace_back(key, it->second);
+            had.erase(it);
         }
-        bool me = s.who == ai_sessions::Said::Who::kMe;
-        auto text = Text(s.text, kTextSize, C().text);
-        text.TextWrapping(TextWrapping::Wrap);
-        text.MaxLines(me ? 10 : 16);
-        Controls::StackPanel inside;
-        if (me && s.steered) {
-            auto mark = Text(L"턴 중에 보냄", 10, C().accentText, Medium());
-            mark.Margin({0, 0, 0, 2});
-            inside.Children().Append(mark);
-        }
-        inside.Children().Append(text);
-        Controls::Border bubble;
-        bubble.CornerRadius(me ? CornerRadius{12, 12, 4, 12} : CornerRadius{12, 12, 12, 4});
-        bubble.Background(Brush(me ? C().accentSoft : C().tile));
-        bubble.Padding({10, 7, 10, 8});
-        bubble.MaxWidth(me ? 260 : 300);
-        bubble.HorizontalAlignment(me ? HorizontalAlignment::Right : HorizontalAlignment::Left);
-        bubble.Margin({0, 3, 0, 3});
-        bubble.Child(inside);
-        list.Children().Append(bubble);
+    };
+    std::wstring top = c.said->start ? L"대화 처음" : c.earlier ? L"앞 대화를 읽는 중…" : L"위로 굴리면 앞 대화를 더 읽어요";
+    put(std::hash<std::wstring>{}(top) * 31 + C().text, [&] {
+        auto t = Text(top, 10.5, C().faint);
+        t.HorizontalAlignment(HorizontalAlignment::Center);
+        t.Margin({0, 2, 0, 6});
+        return wux::UIElement(t);
+    });
+    for (auto const& s : c.said->said) put(SaidKey(*s), [&] { return SaidRow(*s); });
+    // Out what has gone (and a note), then in each new row where it goes.
+    std::unordered_set<void*> kept;
+    for (auto const& n : next) kept.insert(winrt::get_abi(n.second));
+    for (int i = int(rows.Size()) - 1; i >= 0; i--) {
+        if (!kept.contains(winrt::get_abi(rows.GetAt(i)))) rows.RemoveAt(i);
     }
+    for (uint32_t i = 0; i < next.size(); i++) {
+        if (i < rows.Size() && rows.GetAt(i) == next[i].second) continue;
+        uint32_t at = 0;
+        if (rows.IndexOf(next[i].second, at)) {  // a kept row out of its order: all in again
+            rows.Clear();
+            for (auto const& n : next) rows.Append(n.second);
+            break;
+        }
+        rows.InsertAt(i, next[i].second);
+    }
+    drawn = std::move(next);
 }
 
 void DrawChips() {
@@ -21876,31 +23356,56 @@ void DrawSendButton() {
     }
 }
 
+// A few choices as Bloom's Segmented (Ui\Controls\Segmented.cs) draws them: the
+// options on a faint well, the chosen one on a lighter fill with a light line
+// along its top. Here they fill the width, evenly or each by its label's length.
+struct Segment {
+    std::wstring label, tag, tip;
+    bool on = false, can = true;
+};
+
+FrameworkElement Segments(std::vector<Segment> const& items, bool byLength) {
+    Controls::Grid well;
+    well.Background(Brush(C().card));
+    well.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+    well.Padding({2, 2, 2, 2});
+    for (size_t i = 0; i < items.size(); i++) {
+        auto const& s = items[i];
+        Controls::ColumnDefinition column;
+        column.Width({byLength ? double(s.label.size() + 3) : 1.0, GridUnitType::Star});
+        well.ColumnDefinitions().Append(column);
+        Controls::Border cell;
+        cell.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+        cell.Height(24);
+        cell.Margin({i ? 2.0 : 0.0, 0, 0, 0});
+        cell.Background(Brush(s.on ? C().edge : 0));  // clear, not none: the whole cell takes the click
+        cell.BorderThickness({0, s.on ? 1.0 : 0.0, 0, 0});
+        cell.BorderBrush(Brush(C().hilite));
+        auto label = Text(s.label, 12, s.on ? C().text : C().faint, Medium());
+        label.HorizontalAlignment(HorizontalAlignment::Center);
+        label.VerticalAlignment(VerticalAlignment::Center);
+        if (!s.can) label.Opacity(0.5);
+        cell.Child(label);
+        SetTag(cell, s.tag);
+        Automation::AutomationProperties::SetName(cell, s.label);
+        if (!s.tip.empty()) Controls::ToolTipService::SetToolTip(cell, winrt::box_value(s.tip));
+        Controls::Grid::SetColumn(cell, (int)i);
+        well.Children().Append(cell);
+    }
+    return well;
+}
+
 void DrawModelMenu(Controls::StackPanel const& pop) {
     auto& c = *g_open->chat;
     // Claude | ChatGPT: the session's own lit; a new session picks.
-    Controls::Grid segments;
-    segments.Background(Brush(C().tile));
-    segments.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
-    segments.Padding({2, 2, 2, 2});
-    for (int i = 0; i < 2; i++) {
-        Controls::ColumnDefinition column;
-        segments.ColumnDefinitions().Append(column);
-        bool codex = i == 1, on = c.codex == codex, can = c.fresh || on;
-        Controls::Border cell;
-        cell.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
-        cell.Padding({0, 5, 0, 5});
-        cell.Background(Brush(on ? (g_open->dark ? 0xFF3F3F46 : 0xFFFFFFFF) : 0));
-        auto label = Text(codex ? L"ChatGPT" : L"Claude", kSmallSize, on ? C().text : can ? C().dim : C().faint,
-                          on ? Semi() : Medium());
-        label.HorizontalAlignment(HorizontalAlignment::Center);
-        cell.Child(label);
-        SetTag(cell, can && !on ? (codex ? L"platform|codex" : L"platform|claude") : L"none|");
-        if (!can) Controls::ToolTipService::SetToolTip(cell, winrt::box_value(L"이 세션의 앱은 바꿀 수 없어요"));
-        Controls::Grid::SetColumn(cell, i);
-        segments.Children().Append(cell);
+    std::vector<Segment> apps;
+    for (bool codex : {false, true}) {
+        bool on = c.codex == codex, can = c.fresh || on;
+        apps.push_back({codex ? L"ChatGPT" : L"Claude",
+                        can && !on ? (codex ? L"platform|codex" : L"platform|claude") : L"none|",
+                        can ? L"" : L"이 세션의 앱은 바꿀 수 없어요", on, can});
     }
-    pop.Children().Append(segments);
+    pop.Children().Append(Segments(apps, false));
 
     pop.Children().Append(Caption(L"모델", 10));
     std::vector<std::pair<std::wstring, std::wstring>> models;  // id, label
@@ -21919,55 +23424,21 @@ void DrawModelMenu(Controls::StackPanel const& pop) {
         pop.Children().Append(MenuRow(L"model|" + id, Columns(nullptr, Text(label, kNameSize, C().text, Medium()), Check(current)), current));
     }
 
+    // The levels as Bloom's segments, named; with none of them in use, the app's own.
     auto efforts = EffortsOf(c);
-    auto level = std::ranges::find(efforts, c.effort, &Option::id);
-    auto now = Text(level != efforts.end() ? level->label : L"앱 기본값", kSmallSize, C().text, Medium());
-    auto effortHead = Columns(nullptr, Caption(L"노력", 0), now);
-    now.Margin({8, 0, 4, 4});  // on the caption's line
-    effortHead.Margin({0, 12, 0, 0});
+    bool known = std::ranges::find(efforts, c.effort, &Option::id) != efforts.end();
+    FrameworkElement fallback{nullptr};
+    if (!known) fallback = Text(L"앱 기본값", kSmallSize, C().dim);
+    auto effortHead = Columns(nullptr, Caption(L"노력", 0), fallback);
+    effortHead.Margin({0, 12, 4, 0});
     pop.Children().Append(effortHead);
-    // The levels as stops on a track, filled up to the one in use.
-    Controls::Grid track;
-    track.Height(22);
-    track.Margin({4, 0, 4, 0});
-    size_t n = efforts.size();
-    for (size_t i = 0; i < n; i++) {
-        Controls::ColumnDefinition column;
-        track.ColumnDefinitions().Append(column);
+    std::vector<Segment> levels;
+    for (auto const& e : efforts) {
+        levels.push_back({e.label, L"effort|" + e.id, L"", e.id == c.effort, true});
     }
-    if (n > 1) {
-        Controls::Border line;
-        line.Height(3);
-        line.CornerRadius(CornerRadiusHelper::FromUniformRadius(1.5));
-        line.Background(Brush(C().edge));
-        line.VerticalAlignment(VerticalAlignment::Center);
-        Controls::Grid::SetColumnSpan(line, (int)n);
-        line.Margin({0, 0, 0, 0});
-        track.Children().Append(line);
-    }
-    for (size_t i = 0; i < n; i++) {
-        bool filled = level != efforts.end() && i <= size_t(level - efforts.begin());
-        bool at = level != efforts.end() && i == size_t(level - efforts.begin());
-        Controls::Border hit;  // the whole cell takes the click
-        hit.Background(Brush(0));
-        Controls::Border dot;
-        dot.Width(at ? 14 : 10);
-        dot.Height(at ? 14 : 10);
-        dot.CornerRadius(CornerRadiusHelper::FromUniformRadius(at ? 7 : 5));
-        dot.Background(Brush(filled ? C().accent : (g_open->dark ? 0xFF3F3F46 : 0xFFE4E4E7)));
-        dot.BorderThickness({at ? 2.0 : 0, at ? 2.0 : 0, at ? 2.0 : 0, at ? 2.0 : 0});
-        dot.BorderBrush(Brush(0xFFFFFFFF));
-        dot.HorizontalAlignment(i == 0 ? HorizontalAlignment::Left : i + 1 == n ? HorizontalAlignment::Right : HorizontalAlignment::Center);
-        hit.Child(dot);
-        SetTag(hit, L"effort|" + efforts[i].id);
-        Automation::AutomationProperties::SetName(hit, efforts[i].label);
-        Controls::ToolTipService::SetToolTip(hit, winrt::box_value(efforts[i].label));
-        Controls::Grid::SetColumn(hit, (int)i);
-        track.Children().Append(hit);
-    }
-    pop.Children().Append(track);
+    pop.Children().Append(Segments(levels, true));
     auto ends = Line(Text(L"빠르게", 10.5, C().faint), Text(L"똑똑하게", 10.5, C().faint));
-    ends.Margin({4, 0, 4, 2});
+    ends.Margin({4, 3, 4, 2});
     pop.Children().Append(ends);
 
     if (!c.codex) {
@@ -22064,7 +23535,7 @@ void DrawOverlay() {
 }
 
 // The panel drawn again; the conversation only with `said`, scrolled down when
-// more came and it was at its end.
+// more came at its end and it was there.
 void RenderChat(bool said) {
     if (!Ours() || !g_open->chat || !g_open->chatPanel) return;
     auto& o = *g_open;
@@ -22072,11 +23543,9 @@ void RenderChat(bool said) {
     DrawChatHead();
     bool down = false;
     if (said) {
-        std::wstring last = c.said && !c.said->empty() ? c.said->back().text + std::to_wstring(c.said->back().at) +
-                                                             std::to_wstring(c.said->size())
-                                                       : L"";
+        size_t last = c.said && !c.said->said.empty() ? SaidKey(*c.said->said.back()) : 0;
         bool atEnd = o.chatScroll.VerticalOffset() >= o.chatScroll.ScrollableHeight() - 8;
-        down = last != c.lastSaid && (atEnd || c.lastSaid.empty());
+        down = last != c.lastSaid && (atEnd || c.lastSaid == 0);
         c.lastSaid = last;
         DrawSaid();
     }
@@ -22098,37 +23567,142 @@ void HoverChat() {
 
 // ---- reading and driving -------------------------------------------------------------------
 
+ai_sessions::Source ChatSource(bool codex) {
+    return codex ? ai_sessions::Source::kCodex : ai_sessions::Source::kClaude;
+}
+
+void LookEarlier();
+void ReadOutput(std::wstring const& id);
+
+// More from before while the conversation doesn't fill the panel: there is
+// nothing to scroll up by.
+void MoreIfShort() {
+    if (!Ours() || !g_open->chat || !g_open->chat->said || g_open->chat->said->start) return;
+    if (g_open->chat->said->said.empty() || g_open->chatScroll.ScrollableHeight() < 1) LookEarlier();
+}
+
 // The picked session's log, read again as it grows (one look at a time).
 void LookChat() {
     if (!Ours() || !g_open->chat || g_open->chat->logPath.empty() || g_chatLooking.exchange(true)) return;
     auto& c = *g_open->chat;
     folders::StartJob([path = c.logPath, codex = c.codex, generation = c.generation] {
-        std::shared_ptr<const std::vector<ai_sessions::Said>> said;
+        std::shared_ptr<const ai_sessions::Talk> talk;
+        bool first = false;
         try {
             std::lock_guard guard(g_chatLock);
-            auto source = codex ? ai_sessions::Source::kCodex : ai_sessions::Source::kClaude;
+            auto source = ChatSource(codex);
             if (g_conversation.path != path || g_conversation.source != source) {
                 g_conversation = ai_sessions::Conversation{};
                 g_conversation.path = path;
                 g_conversation.source = source;
             }
-            if (ai_sessions::Update(g_conversation)) {
-                said = std::make_shared<const std::vector<ai_sessions::Said>>(g_conversation.said);
-            }
+            first = !g_conversation.started;
+            if (ai_sessions::Update(g_conversation)) talk = ai_sessions::TalkOf(g_conversation);
         } catch (...) {
             Wh_Log(L"Chat read failed: %08X", winrt::to_hresult());
         }
         g_chatLooking = false;
-        core::Post([said, generation] {
+        core::Post([talk, first, generation] {
             core::Guard(L"Usage chat said", [&] {
                 if (!Ours() || !g_open->chat) return;
                 if (g_open->chat->generation != generation) return LookChat();
-                if (!said && g_open->chat->said) return;
-                g_open->chat->said = said ? said : std::make_shared<const std::vector<ai_sessions::Said>>();
+                if (!talk && (g_open->chat->said || !first)) return;
+                if (talk) {
+                    g_open->chat->said = talk;
+                    for (auto const& [id, output] : g_open->chat->outputs) {
+                        if (output && output->missing) ReadOutput(id);
+                    }
+                } else {  // the log can't be read
+                    auto none = std::make_shared<ai_sessions::Talk>();
+                    none->start = true;
+                    g_open->chat->said = none;
+                }
+                RenderChat(true);
+                MoreIfShort();
+            });
+        });
+    });
+}
+
+// The log's part before what is shown, as the panel is scrolled to its top: up
+// to a few parts until one has something to show. The rows shown stay where
+// they were on the screen.
+void LookEarlier() {
+    if (!Ours() || !g_open->chat) return;
+    auto& c = *g_open->chat;
+    if (c.earlier || !c.said || c.said->start || c.logPath.empty()) return;
+    c.earlier = true;
+    core::Post([] { core::Guard(L"Usage chat earlier mark", [] { RenderChat(true); }); });
+    folders::StartJob([path = c.logPath, codex = c.codex, generation = c.generation] {
+        std::shared_ptr<const ai_sessions::Talk> talk;
+        try {
+            std::lock_guard guard(g_chatLock);
+            if (g_conversation.path == path && g_conversation.source == ChatSource(codex) && g_conversation.started) {
+                size_t had = g_conversation.said.size();
+                for (int part = 0; part < 8 && ai_sessions::Earlier(g_conversation) && g_conversation.said.size() == had;
+                     part++) {
+                }
+                talk = ai_sessions::TalkOf(g_conversation);
+            }
+        } catch (...) {
+            Wh_Log(L"Chat read back failed: %08X", winrt::to_hresult());
+        }
+        core::Post([talk, generation] {
+            core::Guard(L"Usage chat earlier", [&] {
+                if (!Ours() || !g_open->chat || g_open->chat->generation != generation) return;
+                g_open->chat->earlier = false;
+                if (!talk) return RenderChat(true);
+                auto scroll = g_open->chatScroll;
+                double before = scroll.ExtentHeight(), offset = scroll.VerticalOffset();
+                g_open->chat->said = talk;
+                RenderChat(true);
+                if (!Ours() || !g_open->chat) return;  // its layout failed
+                double grown = scroll.ExtentHeight() - before;
+                if (grown > 0) scroll.ChangeView(nullptr, wf::IReference<double>(offset + grown), nullptr, true);
+                if (offset + std::max(0.0, grown) < kEarlierPx) LookEarlier();
+            });
+        });
+    });
+}
+
+// An opened call's output, read from its line; one not in the log yet is read
+// again as the log grows.
+void ReadOutput(std::wstring const& id) {
+    auto& c = *g_open->chat;
+    folders::StartJob([path = c.logPath, codex = c.codex, generation = c.generation, id] {
+        std::shared_ptr<const ai_sessions::Result> result;
+        try {
+            ai_sessions::Place place;
+            {
+                std::lock_guard guard(g_chatLock);
+                if (g_conversation.path == path && g_conversation.source == ChatSource(codex)) {
+                    if (auto it = g_conversation.results.find(id); it != g_conversation.results.end()) place = it->second;
+                }
+            }
+            result = std::make_shared<const ai_sessions::Result>(ai_sessions::ReadResult(path, ChatSource(codex), id, place));
+        } catch (...) {
+            result = std::make_shared<const ai_sessions::Result>(ai_sessions::Result{L"결과를 읽지 못했어요", true});
+        }
+        core::Post([result, generation, id] {
+            core::Guard(L"Usage chat output", [&] {
+                if (!Ours() || !g_open->chat || g_open->chat->generation != generation) return;
+                auto it = g_open->chat->outputs.find(id);
+                if (it == g_open->chat->outputs.end()) return;  // closed meanwhile
+                if (it->second && !(it->second->missing && !result->missing)) return;
+                it->second = result;
                 RenderChat(true);
             });
         });
     });
+}
+
+// A call opened to its output; closed, let go.
+void OpenOutput(std::wstring const& id) {
+    auto& c = *g_open->chat;
+    if (c.outputs.erase(id)) return RenderChat(true);
+    c.outputs.emplace(id, nullptr);
+    RenderChat(true);
+    ReadOutput(id);
 }
 
 void ForgetChat() {
@@ -22569,6 +24143,11 @@ void ChatAct(std::wstring const& tag) {
     if (what == L"chat") {
         if (value == L"close") return CloseChat();
         if (value == L"send") return Send();
+    } else if (what == L"tools") {
+        if (!c.openTools.erase(value)) c.openTools.insert(value);
+        return RenderChat(true);
+    } else if (what == L"call") {
+        return OpenOutput(value);
     } else if (what == L"menu") {
         c.menu = value == L"close" || c.menu == value ? L"" : value;
     } else if (what == L"platform" && c.fresh) {
@@ -22756,6 +24335,7 @@ Controls::Grid BuildChat(folders::Popup& p) {
     o.chatPanel = panel;
     o.chatHead = head;
     o.chatSaid = said;
+    o.saidRows.clear();
     o.chatScroll = scroll;
     o.chatBox = box;
     o.chatSend = send;
@@ -22792,6 +24372,14 @@ Controls::Grid BuildChat(folders::Popup& p) {
                 SetStatus(L"", 0);
             }
             core::Post([] { core::Guard(L"Usage chat folder set", [] { RenderChat(false); }); });
+        });
+    }));
+    // Scrolled near the top, the part of the log before comes in.
+    folders::Keep(p, scroll.ViewChanged(winrt::auto_revoke, [](auto&&, auto&&) {
+        core::Guard(L"Usage chat scroll", [] {
+            if (!Ours() || !g_open->chat) return;
+            auto s = g_open->chatScroll;
+            if (s.ScrollableHeight() > 0 && s.VerticalOffset() < kEarlierPx) LookEarlier();
         });
     }));
     WatchChat(panel);
@@ -23099,6 +24687,32 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
         core::DiagLine(L"Usage details failed: %08X", winrt::to_hresult());
         LetGo();
     }
+}
+
+// Whether a session's chat can open: the meter, its session list and the chat panel on.
+bool CanChat() {
+    return settings::g.usage.enabled && ChatOn();
+}
+
+// A session's chat asked for from outside (Bloom's card, by the session's log id):
+// the details open on the primary taskbar's meter unless they are open, the
+// session is read even when it isn't among the newest, and its chat opens once
+// its row comes. Bloom lets explorer come forward before it asks.
+void OpenChatFor(bool codex, std::wstring const& id) {
+    if (!CanChat() || folders::g_unloading) return;
+    if (!(Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen())) {
+        HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
+        auto ui = std::ranges::find(usage::g_uis, primary, &usage::Ui::taskbar);
+        if (!primary || ui == usage::g_uis.end() || !ui->root) return;
+        SetForegroundWindow(primary);
+        Toggle(primary, ui->root);
+        if (!Ours()) return;
+    }
+    ai_sessions::Want(codex, id);
+    ai_sessions::Request();
+    g_open->pendingChat = (codex ? L"x:" : L"c:") + id;
+    g_open->pendingUntil = GetTickCount64() + 15000;
+    TryPendingChat();
 }
 
 // The meter goes (an unload, new settings): its popup and everything it set up
@@ -24535,6 +26149,7 @@ constexpr wchar_t kBadName[] = L"badName";
 constexpr wchar_t kNotFound[] = L"notFound";
 constexpr wchar_t kBadArgs[] = L"badArgs";
 constexpr wchar_t kFailed[] = L"failed";
+constexpr wchar_t kChatOff[] = L"chatOff";  // the meter, its session list or the chat panel is off
 
 // ---- JSON text and names (no shell) -------------------------------------------
 
@@ -24789,7 +26404,7 @@ void WriteState() {
 // ---- commands (folder jobs) ---------------------------------------------------
 
 struct Command {
-    std::wstring id, cmd, folder, name, kind, path, dark, light, app, item;
+    std::wstring id, cmd, folder, name, kind, path, dark, light, app, item, source, session;
     int index = 0;
     std::vector<std::wstring> apps, names;
     bool badArgs = false;  // a field of the wrong type or size, or no JSON object at all
@@ -25043,7 +26658,21 @@ void PruneIcons() {
     FindClose(find);
 }
 
+// "chat": a Claude Code or Codex session's chat in the usage meter's details, by its
+// log id (Bloom's card, 설정 > 작업 알림 > 카드를 누르면); with the folders off too.
+PCWSTR Chat(const Command& c) {
+    bool codex = c.source == L"codex";
+    if (c.badArgs || (!codex && c.source != L"claude") || c.session.empty() || c.session.size() > kMaxIdLength ||
+        !std::ranges::all_of(c.session, [](wchar_t ch) { return iswalnum(ch) || ch == L'-' || ch == L'_'; }))
+        return kBadArgs;
+    if (folders::g_unloading) return kFailed;
+    if (!usage_detail::CanChat()) return kChatOff;
+    std::wstring id = ai_sessions::Lower(c.session);
+    return core::Post([codex, id] { usage_detail::OpenChatFor(codex, id); }) ? nullptr : kFailed;
+}
+
 PCWSTR Execute(const Command& c) {
+    if (c.cmd == L"chat") return Chat(c);
     if (!hooks::g_features.folders || folders::Root().empty()) return kFoldersOff;
     if (c.badArgs) return kBadArgs;
     if (folders::g_unloading) return kFailed;
@@ -25071,7 +26700,7 @@ void Handle(const Command& c, const std::wstring& file) {
     PCWSTR error = Execute(c);
     Wh_Log(L"Bloom command %s %s: %s", c.id.c_str(), c.cmd.c_str(), error ? error : L"ok");
     DeleteFileW((g_inbox + L"\\" + file).c_str());
-    if (!error) PruneIcons();
+    if (!error && c.cmd != L"chat") PruneIcons();
     WriteState();
     SYSTEMTIME now;
     GetSystemTime(&now);
@@ -25110,7 +26739,7 @@ bool ParseCommand(const std::wstring& text, Command* c) {
     const std::pair<PCWSTR, std::wstring*> texts[] = {
         {L"folder", &c->folder}, {L"name", &c->name}, {L"kind", &c->kind},
         {L"path", &c->path},     {L"dark", &c->dark}, {L"light", &c->light},
-        {L"app", &c->app},       {L"item", &c->item}};
+        {L"app", &c->app},       {L"item", &c->item}, {L"source", &c->source}, {L"session", &c->session}};
     for (auto [key, out] : texts)
         if (auto v = value(key)) readText(v, out);
     const std::tuple<PCWSTR, std::vector<std::wstring>*, size_t> lists[] = {

@@ -17,6 +17,14 @@
       Also the ==BloomFileSettings== items (below), for a Bloom that reads their kinds.
   --names <names-en.tsv> (with --schema, --check)
       Another add-on's English text instead of this folder's names-en.tsv.
+  --easy <settings.easy.json> (with --schema, --check)
+      How Bloom's page words and draws the settings (below), merged into the schema.
+
+settings.easy.json holds the schema's optional "easy" parts by id, as Bloom reads them
+(docs/addon-protocol.md, settings.schema.json): {"easy": {"order", "pictures"}} for the
+schema, "groups": {<group>: {...}}, "items": {<group.key>: {..., "options": {<value>:
+{...}}}}. An id the schema doesn't have is an error, so a renamed setting can't leave
+its words behind.
 
 The block is the small YAML subset the mod uses: groups "- group:", leaves
 "  - key: value" with $name/$description/$options under them. A leaf's kind comes
@@ -325,6 +333,41 @@ def check_schema(schema, items, found):
     return problems
 
 
+def add_easy(schema, path):
+    """Puts settings.easy.json's parts into the schema; returns what it names that the
+    schema lacks."""
+    with open(path, encoding="utf-8") as f:
+        easy = json.load(f)
+    problems = []
+    if not isinstance(easy, dict):
+        return [f"{path}: not a JSON object"]
+    if easy.get("easy"):
+        schema["easy"] = easy["easy"]
+    groups = {g["id"]: g for g in schema["groups"]}
+    for gid, part in easy.get("groups", {}).items():
+        if gid not in groups:
+            problems.append(f"{path}: group {gid} is not in the schema")
+        else:
+            groups[gid]["easy"] = part
+    leaves = {e["key"]: e for g in schema["groups"] for e in g["items"]}
+    for key, part in easy.get("items", {}).items():
+        item = leaves.get(key)
+        if item is None:
+            problems.append(f"{path}: {key} is not in the schema")
+            continue
+        part = dict(part)
+        options = part.pop("options", {})
+        if part:
+            item["easy"] = part
+        by_value = {str(o["value"]): o for o in item.get("options", [])}
+        for value, opart in options.items():
+            if value not in by_value:
+                problems.append(f"{path}: {key}={value} is not one of its options")
+            else:
+                by_value[value]["easy"] = opart
+    return problems
+
+
 def write_schema(schema, path):
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(schema, f, ensure_ascii=False, indent=2)
@@ -383,6 +426,7 @@ def main():
     ap.add_argument("--values")
     ap.add_argument("--with-files", action="store_true")
     ap.add_argument("--names", default=NAMES_EN)
+    ap.add_argument("--easy")
     ap.add_argument("source")
     args = ap.parse_args()
     with open(args.source, encoding="utf-8") as f:
@@ -408,6 +452,10 @@ def main():
             raise SystemExit("\n".join(problems))
         kept = files if args.with_files else ()
         schema = build_schema(items, groups, found, read_names(args.names), kept)
+        if args.easy:
+            problems = add_easy(schema, args.easy)
+            if problems:
+                raise SystemExit("\n".join(problems))
         write_schema(schema, args.schema)
         print(f"{len(groups)} groups, {len(items)} settings, {len(kept)} in files -> {args.schema}")
     if args.check:
@@ -419,6 +467,8 @@ def main():
         problems = check(items, found)
         schema = json.loads(json.dumps(build_schema(items, groups, found, read_names(args.names), files)))
         problems += check_schema(schema, items, found)
+        if args.easy:
+            problems += add_easy(schema, args.easy)
         leaves = [e for g in schema["groups"] for e in g["items"]]
         counts = {t: sum(e["type"] == t for e in leaves) for t in ("bool", "int", "choice", "text")}
         print(f"schema: {len(schema['groups'])} groups, {len(leaves)} settings "
