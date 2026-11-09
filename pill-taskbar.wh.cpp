@@ -19030,6 +19030,45 @@ std::wstring Joined(std::initializer_list<std::wstring> parts) {
     return out;
 }
 
+// A ring `size` across on the track, filled clockwise from the top to `fraction`.
+Controls::Grid Ring(double fraction, uint32_t fill, double size) {
+    constexpr double kThickness = 2;
+    Controls::Grid ring;
+    ring.Width(size);
+    ring.Height(size);
+    Shapes::Ellipse track;
+    track.Stroke(Brush(C().track));
+    track.StrokeThickness(kThickness);
+    ring.Children().Append(track);
+    fraction = std::clamp(fraction, 0.0, 1.0);
+    if (fraction >= 0.999) {
+        Shapes::Ellipse full;
+        full.Stroke(Brush(fill));
+        full.StrokeThickness(kThickness);
+        ring.Children().Append(full);
+    } else if (fraction > 0) {
+        double c = size / 2, r = c - kThickness / 2, angle = 2 * std::numbers::pi * fraction;
+        Media::PathFigure figure;
+        figure.StartPoint({float(c), float(c - r)});
+        Media::ArcSegment arc;
+        arc.Size({float(r), float(r)});
+        arc.IsLargeArc(fraction > 0.5);
+        arc.SweepDirection(Media::SweepDirection::Clockwise);
+        arc.Point({float(c + r * std::sin(angle)), float(c - r * std::cos(angle))});
+        figure.Segments().Append(arc);
+        Media::PathGeometry geometry;
+        geometry.Figures().Append(figure);
+        Shapes::Path path;
+        path.Data(geometry);
+        path.Stroke(Brush(fill));
+        path.StrokeThickness(kThickness);
+        path.StrokeStartLineCap(Media::PenLineCap::Round);
+        path.StrokeEndLineCap(Media::PenLineCap::Round);
+        ring.Children().Append(path);
+    }
+    return ring;
+}
+
 // Bloom's home bar (HomeViews.Bar): 4 high, `fill` (the accent; red when the
 // limit is nearly used up) on the track.
 Controls::Grid Bar(double fraction, uint32_t fill, double width = 0) {
@@ -19730,9 +19769,19 @@ FrameworkElement SessionItem(ai_sessions::Row const& r, int64_t now) {
         third.Margin({0, 2, 0, 0});
         put(third, 2, 1);
         if (r.contextUsed >= 0 && r.contextWindow > 0) {
+            // How full: a ring in the accent, amber from 65 %, red from 80 % (the number too).
             int percent = (int)std::lround(100.0 * r.contextUsed / r.contextWindow);
-            auto context = Text(L"컨텍스트 " + std::to_wstring(percent) + L"% 사용", kSmallSize,
-                                percent >= 85 ? C().warn : C().faint);
+            bool red = percent >= 80, amber = !red && percent >= 65;
+            uint32_t ink = red ? C().danger : amber ? (g_open->dark ? C().warn : 0xFFB7791F) : C().accent;
+            Controls::StackPanel context;
+            context.Orientation(Controls::Orientation::Horizontal);
+            context.Background(Brush(0));  // so the tooltip shows over the gap too
+            auto ring = Ring(percent / 100.0, ink, 11);
+            ring.VerticalAlignment(VerticalAlignment::Center);
+            ring.Margin({0, 0, 4, 0});
+            context.Children().Append(ring);
+            context.Children().Append(
+                Text(std::to_wstring(percent) + L"%", kSmallSize, red ? C().danger : amber ? C().warn : C().faint));
             context.Margin({0, 2, 0, 0});
             Controls::ToolTipService::SetToolTip(context, winrt::box_value(L"컨텍스트 " + Compact(r.contextUsed) +
                                                                                 L" / " + Compact(r.contextWindow)));
