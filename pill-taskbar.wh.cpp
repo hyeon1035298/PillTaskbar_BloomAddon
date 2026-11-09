@@ -15088,8 +15088,22 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
         ReleasePopupHold();
     }));
     bool below = p.look.side == Look::Side::Auto ? taskbarOnTop : p.look.side == Look::Side::Below;
+    // `gap` is from the pill's edge, not the button's: a button may stop short of it (the
+    // usage meter does). The pill is the taskbar's XAML root less its pieces' margin (the
+    // apps piece keeps the tray's).
+    double toEdge = 0;
+    try {
+        if (auto root = anchor.XamlRoot()) {
+            auto box = anchor.TransformToVisual(nullptr).TransformBounds(
+                {0, 0, float(anchor.ActualWidth()), float(anchor.ActualHeight())});
+            auto const& margin = settings::theme::kTrayMargin;
+            toEdge = std::max(0.0, below ? root.Size().Height - margin.Bottom - (box.Y + box.Height)
+                                         : box.Y - margin.Top);
+        }
+    } catch (...) {
+    }
     // The bubble sits kShadowRoom, at the folder size, inside the flyout's window.
-    float offset = float(p.look.gap - kShadowRoom * UiScale(p.look));
+    float offset = float(toEdge + p.look.gap - kShadowRoom * UiScale(p.look));
     wux::Controls::Primitives::FlyoutShowOptions options;
     options.Placement(below ? wux::Controls::Primitives::FlyoutPlacementMode::Bottom
                             : wux::Controls::Primitives::FlyoutPlacementMode::Top);
