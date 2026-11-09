@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """check-release.py <repo> : checks an add-on's latest GitHub release the way Bloom's AddonDownload does: bloom-addon.json, the zip's SHA-256
 and size, addon.json's id/version/minBloom, and every file addon.json lists (present, same SHA-256)."""
 import hashlib
