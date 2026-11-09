@@ -14619,6 +14619,7 @@ struct Popup {
     const Palette* colors = &kDarkPalette;
     wux::Controls::Primitives::FlyoutBase flyout{nullptr};
     wux::FrameworkElement content{nullptr};  // the bubble
+    wux::Controls::Grid room{nullptr};        // the clear margin around it, for its shadow
     wux::Shapes::Path body{nullptr};          // its glass, maybe a brush of this module
     wux::Controls::TextBox name{nullptr};
     wux::Controls::Canvas canvas{nullptr};
@@ -14634,6 +14635,8 @@ struct Popup {
     HWND taskbar = nullptr;  // the taskbar window it opened from
     bool selfClose = false;  // hidden by the mod, not dismissed by a press
     std::shared_ptr<void> foreground;  // the foreground hook while it shows
+    HWND cut = nullptr;  // its window, once cut where it lies over the taskbar
+    RECT cutRect{};      // that cut, in the window's coordinates
     wux::DispatcherTimer watch{nullptr};  // WatchTick, while it shows
     bool activating = false;  // its taskbar was asked to the front since the pointer came onto it
     // Every handler the popup attached, revoked as these go: XAML raises some events
@@ -14652,6 +14655,8 @@ void ClosePopup() {
     if (!g_popup) return;
     try {
         g_popup->foreground.reset();
+        // Whole again, should XAML show that window for something else.
+        if (g_popup->cut && IsWindow(g_popup->cut)) SetWindowRgn(g_popup->cut, nullptr, FALSE);
         if (g_popup->watch) g_popup->watch.Stop();
         g_popup->handlers.clear();
         if (g_popup->body) g_popup->body.Fill(nullptr);  // the brush goes now, not with XAML's last reference
@@ -14756,6 +14761,7 @@ wux::FrameworkElement BuildBubble(Popup& p, const wux::FrameworkElement& content
     room.Padding({kShadowRoom, kShadowRoom, kShadowRoom, kShadowRoom});
     room.Children().Append(shell);
     p.content = shell;
+    p.room = room;
     return room;
 }
 
@@ -15049,6 +15055,58 @@ void GiveBackLater();
 void StartWatch(Popup& p);
 void ReleasePopupHold();
 
+// XAML makes the flyout's window larger than its content, for a shadow: a little above it,
+// more on its sides and most below it. Over the taskbar that part takes the clicks meant for
+// the taskbar's buttons (that it answers HTTRANSPARENT does not let them through), so the
+// window is cut there. Ours is the largest of the thread's popup windows over the taskbar.
+// Looked at again while it shows: XAML moves the window after it opens above the taskbar.
+void CutOverTaskbar(Popup& p) {
+    struct Find {
+        RECT bar{}, rect{};
+        HWND window = nullptr;
+        LONG area = 0;
+    } find;
+    if (!p.taskbar || !GetWindowRect(p.taskbar, &find.bar)) return;
+    EnumThreadWindows(
+        GetCurrentThreadId(),
+        [](HWND window, LPARAM param) -> BOOL {
+            auto& find = *reinterpret_cast<Find*>(param);
+            wchar_t name[32];
+            RECT rect, over;
+            if (IsWindowVisible(window) && GetClassNameW(window, name, ARRAYSIZE(name)) &&
+                wcscmp(name, L"Xaml_WindowedPopupClass") == 0 && GetWindowRect(window, &rect) &&
+                IntersectRect(&over, &rect, &find.bar)) {
+                LONG area = (rect.right - rect.left) * (rect.bottom - rect.top);
+                if (area > find.area) {
+                    find.window = window;
+                    find.rect = rect;
+                    find.area = area;
+                }
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&find));
+    if (!find.window) {  // off the taskbar now
+        if (p.cut && IsWindow(p.cut)) SetWindowRgn(p.cut, nullptr, TRUE);
+        p.cut = nullptr;
+        return;
+    }
+    // In window coordinates. What is kept reaches past the window, so the cut holds as it grows.
+    RECT over{find.bar.left - find.rect.left, find.bar.top - find.rect.top,
+              find.bar.right - find.rect.left, find.bar.bottom - find.rect.top};
+    if (find.window == p.cut && EqualRect(&over, &p.cutRect)) return;
+    HRGN keep = CreateRectRgn(-0x4000, -0x4000, 0x4000, 0x4000);
+    HRGN bar = CreateRectRgnIndirect(&over);
+    CombineRgn(keep, keep, bar, RGN_DIFF);
+    DeleteObject(bar);
+    if (SetWindowRgn(find.window, keep, TRUE)) {
+        p.cut = find.window;
+        p.cutRect = over;
+    } else {
+        DeleteObject(keep);
+    }
+}
+
 // Shows the popup's flyout over the taskbar, in its own window: the taskbar's XAML root
 // is only as tall as the taskbar. It opens on the chosen side, `gap` from the button.
 void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
@@ -15065,6 +15123,7 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
     Keep(p, p.flyout.Opened(winrt::auto_revoke, [](const auto&, const auto&) {
         Wh_Log(L"popup opened");
         AllowHostBackdrop();
+        if (g_popup) CutOverTaskbar(*g_popup);
         if (g_popup) StartWatch(*g_popup);
         if (g_popup && g_popup->name) {
             g_popup->name.Focus(wux::FocusState::Programmatic);
@@ -15102,8 +15161,18 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
         }
     } catch (...) {
     }
-    // The bubble sits kShadowRoom, at the folder size, inside the flyout's window.
-    float offset = float(toEdge + p.look.gap - kShadowRoom * UiScale(p.look));
+    // The bubble sits kShadowRoom, at the folder size, inside the flyout's window for its
+    // shadow. Toward the taskbar only `gap` of it is kept, so the room ends at the pill's edge:
+    // XAML hit-tests the popup's content first, and the room would take the clicks meant for
+    // the taskbar's buttons under it.
+    double scale = UiScale(p.look);
+    double room = std::min(kShadowRoom, p.look.gap / scale);
+    if (p.room) {  // not content's Parent(): out of the live tree it has none yet
+        wux::Thickness padding = p.room.Padding();
+        (below ? padding.Top : padding.Bottom) = room;
+        p.room.Padding(padding);
+    }
+    float offset = float(toEdge + p.look.gap - room * scale);
     wux::Controls::Primitives::FlyoutShowOptions options;
     options.Placement(below ? wux::Controls::Primitives::FlyoutPlacementMode::Bottom
                             : wux::Controls::Primitives::FlyoutPlacementMode::Top);
@@ -15499,6 +15568,7 @@ void WatchTick() {
             if (p.watch) p.watch.Stop();
             return;
         }
+        CutOverTaskbar(p);
         HWND front = GetForegroundWindow();
         if (front == p.taskbar) return;
         // Held now, or pressed since the last look: a tap can be shorter than kWatchMs.
@@ -20218,6 +20288,7 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
                   folders::kShadowRoom});
     room.Children().Append(shell);
     p.content = shell;
+    p.room = room;
     return room;
 }
 
