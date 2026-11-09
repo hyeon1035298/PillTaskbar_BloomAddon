@@ -18464,6 +18464,87 @@ std::wstring SpawnedBy(std::wstring const& log) {
     return {};
 }
 
+// ---- how big a Claude session's context is (worker) -----------------------------
+// Claude Code logs no window size. Its user settings, settings.json beside each
+// projects folder, may name one: "autoCompactWindow", for a model under
+// "modelSettings" or for all; it never goes past the model's own.
+
+struct ClaudeSettings {
+    std::wstring projects;  // the projects folder beside it
+    int64_t written = 0;
+    int all = 0;  // 0: not set
+    std::unordered_map<std::wstring, int> byModel;  // by model id in lower case
+};
+[[clang::no_destroy]] std::vector<ClaudeSettings> g_claudeSettings;  // under g_lock
+constexpr size_t kMaxSettingsBytes = 256 * 1024;
+
+// Read again only when a file changes.
+void FindClaudeSettings() {
+    std::vector<ClaudeSettings> next;
+    for (auto const& projects : ClaudeRoots()) {
+        ClaudeSettings s{projects};
+        std::wstring path = projects.substr(0, projects.size() - 9) + L"\\settings.json";  // less "\projects"
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) ||
+            data.nFileSizeHigh || data.nFileSizeLow > kMaxSettingsBytes) {
+            next.push_back(std::move(s));
+            continue;
+        }
+        s.written = Unix(data.ftLastWriteTime);
+        auto old = std::ranges::find(g_claudeSettings, projects, &ClaudeSettings::projects);
+        if (old != g_claudeSettings.end() && old->written == s.written) {
+            next.push_back(std::move(*old));
+            continue;
+        }
+        winrt::file_handle file{CreateFileW(path.c_str(), GENERIC_READ,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        std::string bytes;
+        wdj::JsonObject root{nullptr};
+        if (file && ReadAt(file.get(), 0, data.nFileSizeLow, bytes) &&
+            wdj::JsonObject::TryParse(usage::Widen(bytes), root)) {
+            s.all = Count(root, L"autoCompactWindow").value_or(0);
+            if (auto models = Child(root, L"modelSettings")) {
+                for (auto const& [model, value] : models) {
+                    if (value.ValueType() != wdj::JsonValueType::Object) continue;
+                    if (int n = Count(value.GetObject(), L"autoCompactWindow").value_or(0)) {
+                        s.byModel[Lower(std::wstring(model))] = n;
+                    }
+                }
+            }
+        }
+        next.push_back(std::move(s));
+    }
+    g_claudeSettings = std::move(next);
+}
+
+// A model's window in Claude Code: 1M for the current ones (the Claude API's
+// model table), 200k for older; 0 for a model not Claude's.
+int ModelWindow(std::wstring const& model) {
+    static constexpr std::wstring_view kMillion[] = {
+        L"claude-fable-5",  L"claude-mythos-5", L"claude-opus-5",   L"claude-sonnet-5", L"claude-haiku-5",
+        L"claude-opus-4-6", L"claude-opus-4-7", L"claude-opus-4-8", L"claude-sonnet-4-6"};
+    if (!model.starts_with(L"claude-")) {
+        return 0;
+    }
+    bool million = std::ranges::any_of(kMillion, [&](auto prefix) { return model.starts_with(prefix); });
+    return million ? 1000000 : 200000;
+}
+
+int ClaudeWindow(Log const& g) {
+    int own = ModelWindow(g.model);
+    auto settings = std::ranges::find_if(g_claudeSettings, [&](ClaudeSettings const& s) {
+        size_t n = s.projects.size();
+        return g.path.size() > n && g.path[n] == L'\\' && _wcsnicmp(g.path.c_str(), s.projects.c_str(), n) == 0;
+    });
+    int set = 0;
+    if (settings != g_claudeSettings.end()) {
+        auto it = settings->byModel.find(Lower(g.model));
+        set = it != settings->byModel.end() ? it->second : settings->all;
+    }
+    return set && own ? std::min(set, own) : set ? set : own;
+}
+
 Row RowOf(Log const& g, int64_t now) {
     Row r;
     r.source = g.source;
@@ -18497,7 +18578,7 @@ Row RowOf(Log const& g, int64_t now) {
     r.lastTurnOutput = g.lastTurnOutput;
     r.turnOutput = g.TurnOutput();
     r.contextUsed = g.contextUsed;
-    r.contextWindow = g.contextWindow;
+    r.contextWindow = g.source == Source::kClaude ? ClaudeWindow(g) : g.contextWindow;
     return r;
 }
 
@@ -18507,6 +18588,7 @@ void Look() {
     if (g_findNow.exchange(false) || ++g_looks % kFindEvery == 0) {
         g_found = FindClaude(now);
         FindSpawns(now);
+        FindClaudeSettings();
         std::vector<Found> codex = FindCodex(now);
         g_found.insert(g_found.end(), codex.begin(), codex.end());
         std::wstring home = CodexHome();
@@ -18624,6 +18706,7 @@ void Forget() {
         std::unordered_map<std::wstring, Log>().swap(g_logs);
         std::unordered_map<std::wstring, Spawn>().swap(g_spawns);
         std::unordered_map<std::wstring, size_t>().swap(g_agentTotals);
+        std::vector<ClaudeSettings>().swap(g_claudeSettings);
         g_names = Names{};
         std::vector<Found>().swap(g_found);
         g_looks = 0;
