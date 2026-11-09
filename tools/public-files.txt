@@ -20,6 +20,7 @@ tools/make-manifest.py       writes addon.json for the bundle
 tools/make-identity.py       turns addon/addon.conf into the names header and identity.json
 tools/symbol-list.py         builds symbols.txt from the mod
 tools/check-public.py        pre-commit check for personal data
+tools/check-release.py       checks an add-on release the way Bloom installs it
 tools/public-files.txt       this list
 .github/workflows/build.yml  CI build and release zip
 .gitignore                   keeps private output out
