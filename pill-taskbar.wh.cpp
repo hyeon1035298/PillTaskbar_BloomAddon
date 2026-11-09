@@ -15393,10 +15393,12 @@ std::wstring FolderFromAppId(const std::wstring& appId) {
     return {};
 }
 
+// A click on a top taskbar is in the upper half of its monitor. Not the work area: with
+// the mod's edge Windows keeps room at its own edge, and an auto-hiding taskbar keeps none.
 bool TaskbarOnTop(POINT pt) {
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &monitor);
-    return pt.y < monitor.rcWork.top;
+    return pt.y < (monitor.rcMonitor.top + monitor.rcMonitor.bottom) / 2;
 }
 
 // Found by symbol only, never hooked.
@@ -20301,6 +20303,7 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
     folders::g_folderTaskbar = taskbar;
     folders::Popup& p = folders::NewPopup(kKey, anchor);
     p.look.scale = 100;  // Bloom's sizes, not the folder popup's
+    p.look.side = folders::Look::Side::Auto;  // away from the taskbar, whichever side folders open on
     Open& open = g_open.emplace();
     open.dark = p.colors != &folders::kLightPalette;
     open.colors = MakeColors(open.dark);
