@@ -19482,8 +19482,9 @@ FrameworkElement ChildLine(ai_sessions::Row const& c, int64_t now) {
     mark.Margin({0, 0, 7, 0});
     Controls::Border line;
     line.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
-    line.Padding({4, 3, 0, 3});
-    line.Margin({0, 2, 0, 0});
+    // Rows touch, their spacing inside them: a gap would be the parent's, and the pointer
+    // crossing it would light the whole session.
+    line.Padding({4, 4, 0, 4});
     line.Background(Brush(!tag.empty() && g_open->hover == tag ? C().hover : 0));
     line.Child(Columns(Across({elbow, mark}), what, when));
     Controls::ToolTipService::SetToolTip(line, winrt::box_value(L"이 세션이 띄운 하위 세션"));
