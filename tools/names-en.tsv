@@ -99,7 +99,9 @@ usage.gapBefore#about	Space added between the last app button and the usage
 usage.gapAfter	Right gap (px)
 usage.gapAfter#about	Space from the end of the usage to the tray icons on the right
 usage.sessions	Show sessions in the details
-usage.sessions#about	The window a click on the usage opens lists this PC's Claude Code and Codex sessions (state, this turn's tokens, context). The end of each tool's session logs is read only while the window is open, and never what was said
+usage.sessions#about	The window a click on the usage opens lists this PC's Claude Code and Codex sessions (state, this turn's tokens, context). The end of each tool's session logs is read only while the window is open, and never what was said (with the chat panel below on, only the picked session's recent conversation is read)
+usage.chat	Session chat panel (experimental)
+usage.chat#about	Clicking a session in the details widens the window and shows that session's recent conversation and a message box on the right (a right-click shows its details). From there you reply, add to a running turn, change the model, effort, Ultracode and permissions, and start new sessions. Sending and changing work by driving the Claude desktop app's and the Codex app's own screens through UI Automation, so the apps do it; no token or credential is touched. This is a gray zone under the terms: Anthropic's consumer terms bar accessing the services through automated or non-human means (bots, scripts) without an API key or explicit permission, and whether putting text a person chose into the app's screen counts is unclear. Using it is your responsibility. Needs session view on
 group:island	Auto-hide island
 island.enabled	Auto-hide island
 island.enabled#about	While the taskbar is hidden by auto-hide, puts a small black island on its edge (top or bottom). Clicking the island (setting below) or pointing at it expands the island and brings out the taskbar. Drag it with Ctrl held to move it along the edge; Ctrl and a right click put it back in the middle. Auto-hide helper must also be on
