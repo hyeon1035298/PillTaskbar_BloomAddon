@@ -326,3 +326,13 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 | `accounts[].icon` | 아이콘 파일 절대 경로(`.svg`, `.png`, `.ico`) | 사용자가 설정 › AI 계정에서 고른 로고. 빠지면 `kind`의 첫 글자. 파일이 없거나 못 읽으면 글자 타일(`kind`의 첫 글자, Claude `C`, ChatGPT `G`) |
 
 아이콘 색(원래 색, 단색)은 파일이 아니라 `values.json`의 `usage.logoColor`다. Bloom은 홈 카드와 같은 "아이콘 색" 설정 값을 그 키에도 쓴다. 모드에는 회사 로고가 들어 있지 않다.
+
+## 8. Windows 알림 배너를 Bloom 카드로
+
+Bloom 설정 › 알림 › "Windows 알림"이 켜져 있으면 Bloom은 다른 앱의 Windows 알림 배너 대신 자기 카드를 띄운다. 배너는 explorer 안의 모드가 숨긴다. 알림은 Windows 알림 센터에 그대로 쌓인다.
+
+- 신청: Bloom이 주 작업표시줄 창(`Shell_TrayWnd`)에 창 속성 `Bloom.ToastCards` = Bloom의 메시지 전용 창 핸들을 건다. 끄거나 Bloom이 끝나면 지운다. explorer가 새로 뜨면 속성이 없으므로 Bloom이 4초마다 다시 건다.
+- 모드는 그 핸들이 `Bloom.exe` 프로세스의 창일 때만 숨긴다. 창이 없거나(Bloom이 죽음) 다른 프로세스면 배너가 원래대로 뜬다.
+- 숨기기: explorer가 배너 창(ShellExperienceHost `ActionCenter` 스레드의 CoreWindow 중 폭이 32px보다 넓고 높이가 작업 영역의 3/4보다 낮은 것. 창 영역은 보지 않는다: 알림 센터가 한 번 열린 뒤에는 배너 창에도 영역이 붙는다)의 가림을 풀려는 `DwmSetWindowAttribute(DWMWA_CLOAK, FALSE)`를 원래 함수로 넘기지 않고 `S_OK`를 돌려준다. 다시 가리는 호출은 그대로 넘긴다. `tray.panelsNearTray`가 켜져 있어야 한다(같은 훅).
+- 신호: 숨길 때마다, 그리고 숨긴 배너가 알림이 더 와서 커질 때(`SetWindowPos`) 그 창에 등록 메시지 `PillTaskbar.ToastBanner`(wParam, lParam 0)를 `PostMessage`한다.
+- Bloom은 신호 60 ms 뒤 `%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`를 읽기 전용으로 열어 마지막으로 본 `Notification.Id` 뒤의 `toast` 행을 카드로 띄운다(Bloom이 이미 알리는 Claude · Codex 앱의 알림은 빼고, 그것들은 알림 센터에만 남는다). 카드를 누르면 `ms-actioncenter:`로 알림 센터를 연다.

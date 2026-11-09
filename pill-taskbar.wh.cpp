@@ -20611,8 +20611,10 @@ bool HasName(PCWSTR path, PCWSTR name) {
     return _wcsicmp(slash ? slash + 1 : path, name) == 0;
 }
 
-// The CoreWindow on the "ActionCenter" thread of ShellExperienceHost (or ShellHost).
-bool IsNotificationCenter(HWND hwnd) {
+// A CoreWindow on an "ActionCenter" thread of ShellExperienceHost (or ShellHost): the
+// notification center's or the notification banner's (toasts as they come), each on
+// its own thread.
+bool IsActionCenterWindow(HWND hwnd) {
     WCHAR cls[32];
     DWORD pid = 0;
     DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
@@ -20641,6 +20643,82 @@ bool IsNotificationCenter(HWND hwnd) {
         CloseHandle(process);
     }
     return center;
+}
+
+// The banner's window is as tall as the notifications it shows (0 between them); the
+// notification center's is as tall as the work area, cut to the panel. Explorer cuts
+// the banner's too at times (after the notification center has shown), so the region
+// tells nothing. Narrower than a notification: a placeholder, never a banner.
+bool IsBannerShape(HWND hwnd) {
+    RECT rc;
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    return GetWindowRect(hwnd, &rc) &&
+           GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi) &&
+           rc.right - rc.left > 32 &&
+           (rc.bottom - rc.top) * 4 < (mi.rcWork.bottom - mi.rcWork.top) * 3;
+}
+
+bool IsNotificationCenter(HWND hwnd) {
+    return IsActionCenterWindow(hwnd) && !IsBannerShape(hwnd);
+}
+
+bool IsToastBanner(HWND hwnd) {
+    return IsActionCenterWindow(hwnd) && IsBannerShape(hwnd);
+}
+
+// ---- explorer: notification banners as Bloom's cards ----------------------------------
+// While Bloom runs and asks for it (its window as a property on the primary taskbar
+// window), the banner stays cloaked as Windows uncloaks it and Bloom's window gets
+// BannerMsg, again as more notifications grow the banner; Bloom shows them as its own
+// cards. The notifications stay in the notification center. docs/addon-protocol.md 8.
+constexpr WCHAR kCardsProp[] = L"Bloom.ToastCards";
+std::atomic<HWND> g_heldBanner;  // the banner kept cloaked while Windows shows it
+
+UINT BannerMsg() {
+    static UINT msg = RegisterWindowMessage(L"PillTaskbar.ToastBanner");
+    return msg;
+}
+
+// Bloom's window that asked; null if none did or it's gone.
+HWND CardsWindow() {
+    HWND taskbar = FindWindow(L"Shell_TrayWnd", nullptr);
+    auto bloom = taskbar ? (HWND)GetProp(taskbar, kCardsProp) : nullptr;
+    DWORD pid = 0;
+    if (!bloom || !GetWindowThreadProcessId(bloom, &pid)) {
+        return nullptr;
+    }
+    bool ok = false;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        WCHAR path[MAX_PATH];
+        DWORD size = ARRAYSIZE(path);
+        ok = QueryFullProcessImageName(process, 0, path, &size) && HasName(path, L"Bloom.exe");
+        CloseHandle(process);
+    }
+    return ok ? bloom : nullptr;
+}
+
+bool TellBloom() {
+    HWND bloom = CardsWindow();
+    return bloom && PostMessage(bloom, BannerMsg(), 0, 0);
+}
+
+// Windows cloaks or uncloaks a window. True: the banner stays cloaked, for Bloom.
+bool HoldBanner(HWND hwnd, BOOL cloak) {
+    if (cloak) {
+        HWND held = hwnd;
+        g_heldBanner.compare_exchange_strong(held, nullptr);
+        return false;
+    }
+    if (core::g_unloading || !IsToastBanner(hwnd)) {
+        return false;
+    }
+    if (!TellBloom()) {
+        Wh_Log(L"Banner %p shown: Bloom didn't ask", hwnd);
+        return false;
+    }
+    g_heldBanner = hwnd;
+    Wh_Log(L"Banner %p kept cloaked for Bloom", hwnd);
+    return true;
 }
 
 // The window is as tall as the work area; Windows shows only the panel through the
@@ -20727,9 +20805,13 @@ bool PlaceCenterMove(HWND hwnd, int& x, int& y, int cx, int cy, UINT flags) {
 // Explorer uncloaks the window once it's in place; the move comes just before.
 HRESULT WINAPI DwmSetWindowAttribute_Hook(HWND hwnd, DWORD attribute, LPCVOID value,
                                           DWORD size) {
-    if (attribute == DWMWA_CLOAK && size == sizeof(BOOL) && value &&
-        !*(const BOOL*)value && !core::g_unloading) {
-        PlaceNotificationCenter(hwnd, nullptr);
+    if (attribute == DWMWA_CLOAK && size == sizeof(BOOL) && value) {
+        if (HoldBanner(hwnd, *(const BOOL*)value)) {
+            return S_OK;
+        }
+        if (!*(const BOOL*)value && !core::g_unloading) {
+            PlaceNotificationCenter(hwnd, nullptr);
+        }
     }
     return DwmSetWindowAttribute_Original(hwnd, attribute, value, size);
 }
@@ -20847,6 +20929,11 @@ BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int c
                               UINT flags) {
     constexpr UINT kStill = SWP_NOMOVE | SWP_NOSIZE;
     RECT rc;
+    // More notifications while the banner is held: it grows.
+    if (hwnd && hwnd == g_heldBanner.load() && !(flags & SWP_NOSIZE) && cy > 0 &&
+        GetWindowRect(hwnd, &rc) && cy > rc.bottom - rc.top) {
+        TellBloom();
+    }
     if (!PlaceCenterMove(hwnd, x, y, cx, cy, flags) && g_on && (flags & kStill) != kStill &&
         IsQuickSettings(hwnd) &&
         GetWindowRect(hwnd, &rc)) {
