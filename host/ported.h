@@ -225,6 +225,9 @@ struct PortReport {
     std::wstring detail;  // for the log
 };
 PortStatus PortModule(const PortRequest& req, PortReport& report);
+// The NEW build port::Run must find: the CodeView its offsets will be labelled with
+// (TimeDateStamp, SizeOfImage, RSDS GUID and age).
+port::Identity ExpectedNew(const CodeView& cv);
 // Runs work on a worker thread while this thread calls idle about every 100 ms (the
 // host's messages, forwarded commands, Stop), or just waits without one. False when
 // idle asked to stop: work's cancel flag is set, the worker gets a few seconds to

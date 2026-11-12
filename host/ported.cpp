@@ -942,19 +942,6 @@ void Porter::RememberFailure(const std::wstring& why) {
         Log(L"%ls: could not write its %ls", req_.module.name.c_str(), kPortFailExt);
 }
 
-// The build the offsets will be labelled with: a NEW file replaced since the host read
-// its CodeView makes port::Run fail rather than label one build's addresses with another.
-port::Identity ExpectedNew(const CodeView& cv) {
-    port::Identity id;
-    id.timeDateStamp = cv.timeDateStamp;
-    id.sizeOfImage = cv.sizeOfImage;
-    id.hasPdbId = !cv.pdbName.empty();  // ReadCodeView found an RSDS record
-    static_assert(sizeof(id.pdbGuid) == sizeof(GUID), "RSDS GUID layout");
-    memcpy(id.pdbGuid, &cv.guid, sizeof(GUID));
-    id.pdbAge = cv.age;
-    return id;
-}
-
 PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     std::wstring oldDll, oldPdb;
     PortStatus st = GetOldDll(c, oldDll, why);
@@ -982,6 +969,8 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     e->oldPdb = oldPdb;
     e->in.oldDll = oldDll;
     e->in.newDll = req_.module.path;
+    // A NEW file replaced since the host read its CodeView fails the try rather than
+    // label one build's addresses with another.
     e->in.expectNew = ExpectedNew(req_.cv);
     if (!RunOnWorker([e](const std::atomic<bool>& cancel) {
             e->ok = port::ResolveAll(e->oldPdb, e->in.oldDll, e->in.oldSymbols, e->error, &cancel);
@@ -1162,6 +1151,17 @@ PortStatus Porter::Run(PortReport& rep) {
 }
 
 }  // namespace
+
+port::Identity ExpectedNew(const CodeView& cv) {
+    port::Identity id;
+    id.timeDateStamp = cv.timeDateStamp;
+    id.sizeOfImage = cv.sizeOfImage;
+    id.hasPdbId = !cv.pdbName.empty();  // ReadCodeView found an RSDS record
+    static_assert(sizeof(id.pdbGuid) == sizeof(GUID), "RSDS GUID layout");
+    memcpy(id.pdbGuid, &cv.guid, sizeof(GUID));
+    id.pdbAge = cv.age;
+    return id;
+}
 
 PortStatus PortModule(const PortRequest& req, PortReport& report) {
     Porter p(req);
