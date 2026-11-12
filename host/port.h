@@ -18,7 +18,7 @@ namespace port {
 
 // Stored with every .ported sidecar and every recorded port failure. Raise it whenever a
 // change to the engine can change what it answers.
-inline constexpr int kEngineVersion = 1;
+inline constexpr int kEngineVersion = 2;
 
 // One public of the OLD PDB, code or data, named as the host undecorates it.
 struct OldSymbol {
