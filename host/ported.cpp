@@ -167,6 +167,18 @@ bool ParsePortSources(const std::string& utf8, PortSources& out) {
     return true;
 }
 
+bool ReadPortSources(const std::wstring& exeDir, PortSources& out) {
+    out = PortSources{};
+    std::string text;
+    if (!ReadFileBytes(JoinPath(exeDir, kPortSources), text)) return true;
+    return ParsePortSources(text, out);
+}
+
+bool SourceDenied(const PortSources& src, const std::wstring& module, const std::wstring& key) {
+    std::wstring mod = Lower(module), k = Upper(key);
+    return std::any_of(src.deny.begin(), src.deny.end(), [&](auto& d) { return d.first == mod && d.second == k; });
+}
+
 std::vector<Candidate> LocalCandidates(const std::wstring& offsetsDir, const std::wstring& module,
                                        const CodeView& current) {
     std::vector<Candidate> out;
@@ -225,9 +237,7 @@ std::vector<Candidate> FilterCandidates(const std::vector<Candidate>& all, const
     for (auto& c : all) {
         if (!c.version.valid || !c.version.SameBranch(newVersion) || c.version.Value() >= newVersion.Value())
             continue;
-        bool denied = std::any_of(src.deny.begin(), src.deny.end(),
-                                  [&](auto& d) { return d.first == mod && d.second == c.key; });
-        if (denied) continue;
+        if (SourceDenied(src, mod, c.key)) continue;
         out.push_back(c);
     }
     std::stable_sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.version.Value() > b.version.Value(); });
@@ -323,6 +333,29 @@ bool ParseSidecar(const std::string& utf8, Sidecar& out) {
 
 bool ProbeDue(const Sidecar& s, uint64_t now) {
     return s.lastProbe == 0 || now < s.lastProbe || now - s.lastProbe >= kPortProbeInterval;
+}
+
+std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
+                         const PortSources& src) {
+    std::wstring sidecarPath = JoinPath(offsetsDir, key + kPortedExt);
+    if (!FileExists(sidecarPath)) return {};  // real offsets
+    std::string text;
+    Sidecar sc;
+    if (!ReadFileBytes(sidecarPath, text) || !ParseSidecar(text, sc)) return L"its sidecar does not parse";
+    if (sc.engine != port::kEngineVersion)
+        return Format(L"engine %d ported them, this host has engine %d", sc.engine, port::kEngineVersion);
+    if (SourceDenied(src, module, sc.sourceKey))
+        return L"their source build " + sc.sourceKey + L" is denied in " + kPortSources;
+    return {};
+}
+
+bool DropPorted(const std::wstring& offsetsDir, const std::wstring& key) {
+    // The offsets first: alone, a sidecar only makes the next start look again.
+    std::wstring off = JoinPath(offsetsDir, key + L".txt");
+    if (!DeleteFileW(off.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
+    if (FileExists(off)) return false;
+    DeleteFileW(JoinPath(offsetsDir, key + kPortedExt).c_str());
+    return true;
 }
 
 // --- the module-write rule ---
@@ -518,6 +551,16 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
 
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key) {
     return FileExists(JoinPath(offsetsDir, key + kQuarantinedExt));
+}
+
+bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine) {
+    std::wstring path = JoinPath(offsetsDir, key + kQuarantinedExt);
+    if (!FileExists(path)) return false;
+    std::string text;
+    if (!ReadFileBytes(path, text)) return true;
+    for (auto& [k, v] : KeyValues(text))
+        if (k == L"engine") return _wtoi(v.c_str()) == engine;
+    return true;
 }
 
 // --- verifying a downloaded old DLL ---
@@ -812,9 +855,14 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
 
 PortStatus Porter::Run(PortReport& rep) {
     const std::wstring& mod = req_.module.name;
-    if (IsQuarantined(offsetsDir_, key_)) {
+    if (QuarantineBlocks(offsetsDir_, key_, port::kEngineVersion)) {
         rep.detail = L"ported offsets of this build crashed explorer before; waiting for the real PDB";
         return PortStatus::Quarantined;
+    }
+    if (IsQuarantined(offsetsDir_, key_)) {
+        // Another engine's port crashed; this one starts on probation under the guard.
+        Log(L"%ls: the quarantine is another engine's; porting with engine %d", mod.c_str(), port::kEngineVersion);
+        DeleteFileW(JoinPath(offsetsDir_, key_ + kQuarantinedExt).c_str());
     }
     FileVersion newVersion;
     if (!ReadFileVersion(req_.module.path, newVersion)) {
@@ -825,11 +873,7 @@ PortStatus Porter::Run(PortReport& rep) {
     required_ = ParseSymbolsMeta(ReadFileBytes(JoinPath(req_.exeDir, kSymbolsMeta), text) ? text : std::string(),
                                  req_.names);
     PortSources src;
-    text.clear();
-    if (ReadFileBytes(JoinPath(req_.exeDir, kPortSources), text) && !ParsePortSources(text, src)) {
-        Log(L"%ls is broken; using local sources only", kPortSources);
-        src = PortSources{};
-    }
+    if (!ReadPortSources(req_.exeDir, src)) Log(L"%ls is broken; using local sources only", kPortSources);
     std::vector<Candidate> all = MergeCandidates(LocalCandidates(offsetsDir_, mod, req_.cv), src, mod);
     // What this attempt would start from, known before any download: a failed one is
     // not repeated for a day unless this changes.
@@ -857,10 +901,7 @@ PortStatus Porter::Run(PortReport& rep) {
     size_t probes = 0;
     std::wstring why;
     for (auto& c : all) {
-        if (c.version.valid || probes >= kMaxVersionProbes) continue;
-        bool denied = std::any_of(src.deny.begin(), src.deny.end(),
-                                  [&](auto& d) { return d.first == Lower(mod) && d.second == c.key; });
-        if (denied) continue;
+        if (c.version.valid || probes >= kMaxVersionProbes || SourceDenied(src, mod, c.key)) continue;
         probes++;
         std::wstring path, w;
         PortStatus st = GetOldDll(c, path, w);
