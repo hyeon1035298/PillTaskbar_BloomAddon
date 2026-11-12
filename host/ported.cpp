@@ -991,17 +991,24 @@ PortStatus Porter::Run(PortReport& rep) {
 
     // A local file of a build the list does not know: its version is in its DLL.
     size_t probes = 0;
-    std::wstring why;
+    std::wstring why, probeFailed;
     for (auto& c : all) {
         if (c.version.valid || probes >= kMaxVersionProbes || SourceDenied(src, mod, c.key)) continue;
         probes++;
         std::wstring path, w;
         PortStatus st = GetOldDll(c, path, w);
-        if (st == PortStatus::Stopped || st == PortStatus::Failed) {
+        if (st == PortStatus::Stopped) {
             rep.detail = w;
             return st;
         }
-        if (st != PortStatus::Written) Log(L"%ls: %ls", mod.c_str(), w.c_str());
+        // One build out of reach is no reason not to try the others; it stays of
+        // unknown version, so the filter drops it.
+        if (st == PortStatus::Failed) {
+            Log(L"%ls: %ls; skipping that build", mod.c_str(), w.c_str());
+            probeFailed = w;
+        } else if (st != PortStatus::Written) {
+            Log(L"%ls: %ls", mod.c_str(), w.c_str());
+        }
     }
     std::vector<Candidate> picked = FilterCandidates(all, src, mod, newVersion, kMaxPortSources);
     if (picked.empty()) {
@@ -1016,6 +1023,11 @@ PortStatus Porter::Run(PortReport& rep) {
         }
         Log(L"%ls: %ls", mod.c_str(), w.c_str());
         why = w;
+    }
+    // A skipped build was never judged: nothing is remembered, the next start tries again.
+    if (!probeFailed.empty()) {
+        rep.detail = L"not ported; " + probeFailed;
+        return PortStatus::Failed;
     }
     RememberFailure(why);
     rep.detail = L"not ported: " + why;

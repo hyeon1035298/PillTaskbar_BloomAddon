@@ -659,7 +659,31 @@ void TestPrepare() {
         Check(r == addon::kExitDownload && rep.reason.empty() && !FileExists(JoinPath(off, key + kPortFailExt)) &&
                   !FileExists(JoinPath(off, key + L".txt")),
               L"prepare: --no-download ports from caches only");
+
+        // A local build whose version probe fails is skipped; the listed one is still
+        // tried, and the skipped one is never remembered as a failure.
+        std::wstring local = JoinPath(off, L"kernel32.dll_LOCAL1.txt");
+        WriteText(local, "1#kernel32.dll#1-4096#name one#");  // msdl key 000000011000
+        WriteText(JoinPath(exe, kPortSources), Narrow(L"kernel32.dll " + kv.Text() + L" 00000002200000\n"));
+        PortRequest req;
+        req.dataDir = data;
+        req.exeDir = exe;
+        req.module = k32;
+        req.cv = cv;
+        req.names = {L"name one", L"name two"};
+        req.noDownload = true;
+        req.noWindhawkCache = true;
+        PortReport pr;
+        PortStatus st = PortModule(req, pr);
+        Check(st == PortStatus::Failed && pr.detail.find(L"00000002200000") != std::wstring::npos &&
+                  !FileExists(JoinPath(off, key + kPortFailExt)),
+              L"port: a failed version probe skips that build, the listed one is still tried");
         DeleteFileW(JoinPath(exe, kPortSources).c_str());
+        st = PortModule(req, pr);
+        Check(st == PortStatus::Failed && pr.detail.find(L"000000011000") != std::wstring::npos &&
+                  !FileExists(JoinPath(off, key + kPortFailExt)),
+              L"port: a build skipped for a failed probe is not remembered");
+        DeleteFileW(local.c_str());
     } else {
         Check(false, L"prepare: kernel32.dll has a file version to list an older build by");
     }
