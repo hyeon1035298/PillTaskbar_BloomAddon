@@ -935,11 +935,23 @@ std::wstring FunctionClass(const std::wstring& n) {
     return last == std::wstring::npos ? std::wstring() : head.substr(0, last);
 }
 
-// WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...>): one instance of
-// the same code and data per feature, so references cannot tell one feature from another.
+// "Feature_<number>_" in a name: WIL's per-feature globals and helpers
+// (Feature_<n>__descriptor, Feature_<n>__private_cppFeatureState, ...).
+bool PerFeatureName(const std::wstring& n) {
+    for (size_t p = n.find(L"Feature_"); p != std::wstring::npos; p = n.find(L"Feature_", p + 1)) {
+        size_t e = p + 8;
+        while (e < n.size() && n[e] >= L'0' && n[e] <= L'9') e++;
+        if (e > p + 8 && e < n.size() && n[e] == L'_') return true;
+    }
+    return false;
+}
+
+// WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...> and the
+// Feature_<n>_ names): one instance of the same code and data per feature, so references
+// cannot tell one feature from another.
 bool NeverPorted(const std::wstring& n) {
     return n.find(L"wil::details::FeatureImpl<") != std::wstring::npos ||
-           n.find(L"__WilFeatureTraits_") != std::wstring::npos;
+           n.find(L"__WilFeatureTraits_") != std::wstring::npos || PerFeatureName(n);
 }
 
 // MSVC names a lambda's type by a hash of where it sits ("<lambda_3c46...>"), and a
