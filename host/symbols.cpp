@@ -106,6 +106,13 @@ std::wstring BinaryKey(DWORD timeDateStamp, DWORD sizeOfImage) {
     return Format(L"%08lX%lX", timeDateStamp, sizeOfImage);
 }
 
+bool ParseBinaryKey(const std::wstring& key, DWORD& timeDateStamp, DWORD& sizeOfImage) {
+    if (key.size() < 9 || key.size() > 16 || !std::all_of(key.begin(), key.end(), iswxdigit)) return false;
+    timeDateStamp = (DWORD)wcstoul(key.substr(0, 8).c_str(), nullptr, 16);
+    sizeOfImage = (DWORD)wcstoul(key.substr(8).c_str(), nullptr, 16);
+    return true;
+}
+
 std::wstring FileVersion::Text() const {
     return Format(L"%u.%u.%u.%u", part[0], part[1], part[2], part[3]);
 }
@@ -402,8 +409,9 @@ Download DownloadForStatus(DWORD httpStatus) {
 // The server answers with a redirect to a signed storage URL; WinHTTP follows it and
 // nothing keeps that URL.
 Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
-                            uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
+                            uint64_t maxBytes, uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
     bytes = 0;
+    const ULONGLONG start = GetTickCount64();
     std::wstring agent = std::wstring(ADDON_NAME L"Host/") + addon::kVersion;
     Internet session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                  WINHTTP_NO_PROXY_BYPASS, 0));
@@ -438,6 +446,11 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
     if (WinHttpQueryHeaders(req.h, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, lenText, &len,
                             WINHTTP_NO_HEADER_INDEX))
         total = wcstoull(lenText, nullptr, 10);
+    if (total > maxBytes) {
+        Log(L"%ls/%ls: %llu bytes is more than the %llu this file may be", file.c_str(), key.c_str(), total,
+            maxBytes);
+        return Download::Failed;
+    }
 
     std::wstring part = dest + L".part";
     Download result = Download::Ok;
@@ -453,6 +466,18 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
                 break;
             }
             if (got == 0) break;
+            if (bytes + got > maxBytes) {
+                Log(L"%ls/%ls: more than the %llu bytes this file may be; stopped", file.c_str(), key.c_str(),
+                    maxBytes);
+                result = Download::Failed;
+                break;
+            }
+            if (GetTickCount64() - start > kDownloadDeadlineMs) {
+                Log(L"%ls/%ls: not done after %llu minutes (%llu bytes); stopped", file.c_str(), key.c_str(),
+                    kDownloadDeadlineMs / 60000, bytes);
+                result = Download::Failed;
+                break;
+            }
             DWORD written = 0;
             if (!WriteFile(out.get(), buf.data(), got, &written, nullptr) || written != got) {
                 result = Download::Failed;
@@ -559,7 +584,7 @@ PdbLookup FindPdb(const SymbolOptions& opt, const SymbolModule& m, const CodeVie
     CreateDirs(ownDir);
     auto t0 = std::chrono::steady_clock::now();
     uint64_t bytes = 0;
-    r.result = DownloadSymbolFile(cv.pdbName, id, r.path, downloaded, opt.progress, bytes);
+    r.result = DownloadSymbolFile(cv.pdbName, id, r.path, kMaxPdbBytes, downloaded, opt.progress, bytes);
     if (r.result != Download::Ok) {
         RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
         return r;
