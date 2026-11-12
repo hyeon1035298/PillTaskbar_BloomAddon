@@ -10,10 +10,17 @@ all of them in each taskbar module; which ones are required is decided in explor
 by the mod's own hook tables.
 
 symbols-meta.txt is for the host's symbol porting, which writes a module only when
-every required name it can know of ported. A name is "opt" only when every
-SYMBOL_HOOK entry that holds it ({{names}, &original, hook, optional}) sets its fourth
-field to the literal true; anything else (no fourth field, false, an expression, a
-name outside such an entry) makes it "req".
+every required name it can know of ported. A name is "req" only when every
+SYMBOL_HOOK entry that holds it ({{names}, &original, hook, optional}) requires it:
+one entry whose fourth field is the literal true makes it "opt". A name in no such
+entry, or only in entries with no fourth field, false or an expression, is "req".
+
+"opt" anywhere is safe: the port writes a name it could not carry over empty, never
+at a guessed address. An entry that does require that name then fails HookSymbols,
+so the runtime refuses init (exit 11) or reports the module degraded; no hook lands
+on a wrong address. So a name only one table (say, the other Windows version's)
+requires does not keep the module from being ported for the tables that can do
+without it.
 
 Usage: symbol-list.py <pill-taskbar.wh.cpp> <symbols.txt> [<symbols-meta.txt>]
        (the meta file defaults to symbols-meta.txt beside symbols.txt)
@@ -100,7 +107,7 @@ def groups(marks):
 
 
 def flags(source):
-    """name -> True when some entry needs it."""
+    """name -> True when it is required: no SYMBOL_HOOK entry marks it optional."""
     marks, raws = code_marks(source)
     braces = [g for g in groups(marks) if g[0] == "{"]
     required = {}
@@ -117,7 +124,7 @@ def flags(source):
             # The names group must be the entry's first field.
             if inner[2] < cuts[1] and len(args) >= 4:
                 optional = args[3] == "true"
-        required[name] = required.get(name, False) or not optional
+        required[name] = required.get(name, True) and not optional
     return required
 
 
