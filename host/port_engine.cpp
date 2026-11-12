@@ -32,6 +32,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <cwchar>
 #include <map>
 #include <memory>
 #include <set>
@@ -133,7 +134,8 @@ public:
     std::unordered_set<uint32_t> callTargets;  // targets of direct calls
     std::unordered_set<uint32_t> unchainedBegins;
 
-    bool Load(const std::wstring& path, std::wstring& error);
+    // expect: the build the caller means (port::Identity), checked before the analysis.
+    bool Load(const std::wstring& path, std::wstring& error, const Identity* expect);
     const Func* At(uint32_t start) const {
         auto it = index.find(start);
         return it == index.end() ? nullptr : &funcs[it->second];
@@ -351,11 +353,26 @@ void Build::ReadRtti() {
     }
 }
 
-bool Build::Load(const std::wstring& path, std::wstring& error) {
+bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* expect) {
     if (!pe.Load(path, error)) return false;
     if (pe.machine != IMAGE_FILE_MACHINE_AMD64) {
         error = L"not an x64 module";
         return false;
+    }
+    if (expect) {
+        wchar_t buf[200];
+        if ((expect->timeDateStamp && expect->timeDateStamp != pe.timeDateStamp) ||
+            (expect->sizeOfImage && expect->sizeOfImage != pe.sizeOfImage)) {
+            swprintf(buf, 200, L"the NEW module is another build (%08X %X, expected %08X %X)", pe.timeDateStamp,
+                     pe.sizeOfImage, expect->timeDateStamp, expect->sizeOfImage);
+            error = buf;
+            return false;
+        }
+        if (expect->hasPdbId &&
+            (!pe.hasCodeView || memcmp(pe.guid, expect->pdbGuid, 16) != 0 || pe.age != expect->pdbAge)) {
+            error = L"the NEW module is another build (its RSDS GUID or age differs)";
+            return false;
+        }
     }
     if (!ZYAN_SUCCESS(ZydisDecoderInit(&dec_, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
         error = L"Zydis did not start";
@@ -1657,8 +1674,9 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
     auto t0 = std::chrono::steady_clock::now();
     out.clear();
     auto ob = std::make_unique<Build>(), nb = std::make_unique<Build>();
-    if (!ob->Load(in.oldDll, error)) return false;
-    if (!nb->Load(in.newDll, error)) return false;
+    // NEW first: a build other than the one asked for fails before any analysis.
+    if (!nb->Load(in.newDll, error, &in.expectNew)) return false;
+    if (!ob->Load(in.oldDll, error, nullptr)) return false;
     auto t1 = std::chrono::steady_clock::now();
     stats.functionsOld = (uint32_t)ob->funcs.size();
     stats.functionsNew = (uint32_t)nb->funcs.size();
