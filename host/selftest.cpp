@@ -577,6 +577,24 @@ void TestPortFailAndGuard() {
               text.find("source=10.0.26100.9818 617E422B31A000") != std::string::npos,
           L"guard: the quarantine says why and from what");
     Check(QuarantineGuarded(data, L"again", t0).empty(), L"guard: nothing armed, nothing quarantined");
+    // An offsets file that cannot be deleted keeps its sidecar and the guard.
+    WriteText(JoinPath(off, L"taskbar.dll_K3.txt"), "ported");
+    WriteText(JoinPath(off, L"taskbar.dll_K3.ported"), "engine=1\n");
+    SetGuard(data, {L"taskbar.dll_K3"}, t0);
+    {
+        Handle lock(CreateFileW(JoinPath(off, L"taskbar.dll_K3.txt").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, 0, nullptr));
+        q = QuarantineGuarded(data, L"explorer crashed", t0);
+        Check(lock && q.size() == 1 && IsQuarantined(off, L"taskbar.dll_K3") &&
+                  FileExists(JoinPath(off, L"taskbar.dll_K3.txt")) &&
+                  FileExists(JoinPath(off, L"taskbar.dll_K3.ported")) && ReadGuard(data, g) && g.keys.size() == 1 &&
+                  g.keys[0] == L"taskbar.dll_K3",
+              L"guard: offsets that cannot be deleted keep their sidecar and stay guarded");
+    }
+    q = QuarantineGuarded(data, L"explorer crashed", t0);
+    Check(q.size() == 1 && !FileExists(JoinPath(off, L"taskbar.dll_K3.txt")) &&
+              !FileExists(JoinPath(off, L"taskbar.dll_K3.ported")) && !ReadGuard(data, g),
+          L"guard: the next look deletes them and disarms");
     SetGuard(data, {L"x"}, t0);
     Check(SetGuard(data, {}, t0) && !ReadGuard(data, g), L"guard: an empty list disarms");
     RemoveTree(data);
@@ -690,6 +708,13 @@ void TestPrepare() {
     Check(r == addon::kExitOk && rep.modules[0].ported && FileExists(JoinPath(off, key + L".txt")),
           L"prepare: this engine's ported offsets from an allowed build stay");
     DropPorted(off, key);
+
+    // Ported offsets a quarantine could not delete (the sidecar went) are never used.
+    WriteText(JoinPath(off, key + L".txt"), FormatOffsets(f));
+    WriteText(JoinPath(off, key + kQuarantinedExt), "reason=test\n");
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"portCrashed" && !FileExists(JoinPath(off, key + L".txt")),
+          L"prepare: offsets beside a quarantine are dropped");
 
     // A quarantine holds only for the engine that wrote it.
     WriteText(JoinPath(off, key + kQuarantinedExt), Narrow(Format(L"reason=test\nengine=%d\n", port::kEngineVersion)));
