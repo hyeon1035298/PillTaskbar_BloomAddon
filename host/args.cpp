@@ -88,6 +88,8 @@ bool ParseArgs(const std::vector<std::wstring>& argv, Args& a) {
             if (!value(a.bloomLocal)) return false;
         } else if (s == L"--dump") {
             if (!value(a.dumpDir)) return false;
+        } else if (s == L"--simulate-404") {
+            if (!value(a.simulate404)) return false;
         } else if (s == L"--mod") {
             std::wstring m;
             if (!value(m)) return false;
@@ -135,6 +137,11 @@ bool ParseArgs(const std::vector<std::wstring>& argv, Args& a) {
     }
     if (a.dryRun && a.command != Command::Serve) {
         a.error = L"--dry-run goes with --serve";
+        return false;
+    }
+    // A test switch: never honoured by --serve, which serves the real explorer.
+    if (!a.simulate404.empty() && a.command != Command::ResolveSymbols) {
+        a.error = L"--simulate-404 goes with --resolve-symbols";
         return false;
     }
     if (modSeen && a.command != Command::Serve) {
