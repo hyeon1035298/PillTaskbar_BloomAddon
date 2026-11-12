@@ -103,6 +103,7 @@ struct Sidecar {
     int engine = 0;
     std::wstring hostVersion;
     std::wstring sourceVersion, sourceKey, sourceKind;  // kind: local or shipped
+    std::wstring sources;  // the attempt's candidate set, as .portfail's sources
     uint64_t date = 0, lastProbe = 0;
     std::vector<PortedName> names;
 };
@@ -166,6 +167,13 @@ bool SetGuard(const std::wstring& dataDir, const std::vector<std::wstring>& keys
 // still there. Returns the keys quarantined.
 std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const std::wstring& reason, uint64_t now);
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key);
+// The runtime would not start on these ported offsets (initFailed, symbols: a required
+// name came out empty). For each key a .portfail with the sidecar's sources, so the
+// build is not ported again for a day and waits for its real PDB, then the offsets
+// and sidecar go (DropPorted); the guard keeps only keys whose offsets are still
+// there. Returns the keys whose offsets went.
+std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::vector<std::wstring>& keys,
+                                        const std::wstring& why, uint64_t now);
 // A quarantine holds against porting again only for the engine version that wrote it
 // (a record that names none holds for every engine).
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);
