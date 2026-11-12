@@ -36,8 +36,9 @@ def main():
         conf = json.load(f)
     name, version, protocol = conf["ADDON_NAME"], conf["ADDON_VERSION"], protocol_value()
     schema = conf.get("ADDON_SCHEMA") == "1"
-    files = [f"{name}Host.exe", f"{name}Runtime.dll", f"{name}.dll", "symbols.txt", "THIRD_PARTY.md",
-             "THIRD_PARTY_NOTICES.txt"] + (["settings.schema.json"] if schema else [])
+    files = [f"{name}Host.exe", f"{name}Runtime.dll", f"{name}.dll", "symbols.txt", "symbols-meta.txt",
+             "port-sources.txt", "THIRD_PARTY.md", "THIRD_PARTY_NOTICES.txt"] + (
+                 ["settings.schema.json"] if schema else [])
     missing = [n for n in files if not os.path.isfile(os.path.join(folder, n))]
     if missing:
         raise SystemExit(f"missing in {folder}: {', '.join(missing)}")

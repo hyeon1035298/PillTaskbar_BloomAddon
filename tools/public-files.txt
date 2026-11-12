@@ -18,7 +18,9 @@ tools/make-schema.py         generates the settings schema and defaults header
 tools/names-en.tsv           English names for the settings schema
 tools/make-manifest.py       writes addon.json for the bundle
 tools/make-identity.py       turns addon/addon.conf into the names header and identity.json
-tools/symbol-list.py         builds symbols.txt from the mod
+tools/symbol-list.py         builds symbols.txt and symbols-meta.txt from the mod
+tools/port-sources.txt       older published builds the host may port symbols from
+tools/port-sources.py        copies an add-on's lines of that list into its bundle
 tools/check-public.py        pre-commit check for personal data
 tools/check-release.py       checks an add-on release the way Bloom installs it
 tools/public-files.txt       this list

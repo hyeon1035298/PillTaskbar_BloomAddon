@@ -12,6 +12,18 @@ namespace host {
 
 using json::Value;
 
+const wchar_t* ExitReason(int code) {
+    switch (code) {
+        case addon::kExitCrashes: return L"crashes";
+        case addon::kExitNoSymbols: return L"noSymbols";
+        case addon::kExitWindhawk: return L"windhawk";
+        case addon::kExitBlocked: return L"blocked";
+        case addon::kExitDownload: return L"download";
+        case addon::kExitRestart: return L"restart";
+        default: return L"error";
+    }
+}
+
 std::string SerializeHostState(const HostState& s) {
     Value v = Value::Obj();
     v.Set(L"v", Value::Int(1));
@@ -36,6 +48,8 @@ std::string SerializeHostState(const HostState& s) {
     Value crashes = Value::Arr();
     for (uint64_t c : s.crashes) crashes.Push(Value::Str(IsoTime(c)));
     v.Set(L"crashes", crashes);
+    if (!s.symbolsSource.empty()) v.Set(L"symbolsSource", Value::Str(s.symbolsSource));
+    if (!s.portedFrom.empty()) v.Set(L"portedFrom", Value::Str(s.portedFrom));
     v.Set(L"at", Value::Str(IsoTime(s.at)));
     return json::Write(v);
 }
@@ -63,6 +77,8 @@ bool ParseHostState(const std::string& utf8, HostState& out) {
         uint64_t t;
         if (ParseIsoTime(c.AsString(), t)) s.crashes.push_back(t);
     }
+    s.symbolsSource = v.Get(L"symbolsSource").AsString();
+    s.portedFrom = v.Get(L"portedFrom").AsString();
     ParseIsoTime(v.Get(L"at").AsString(), s.at);
     out = std::move(s);
     return true;
@@ -75,6 +91,9 @@ bool ParseRuntimeState(const std::string& utf8, RuntimeState& out) {
     out.pid = (DWORD)v.Get(L"pid").AsInt();
     out.state = v.Get(L"state").AsString();
     out.reason = v.Get(L"reason").AsString();
+    out.degraded.clear();
+    for (const Value& d : v.Get(L"degraded").items)
+        if (!d.AsString().empty()) out.degraded.push_back(d.AsString());
     out.at = 0;
     ParseIsoTime(v.Get(L"at").AsString(), out.at);
     return true;

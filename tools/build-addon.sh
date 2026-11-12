@@ -6,8 +6,11 @@
 # PillTaskbar one); <name> below is its ADDON_NAME:
 #   <name>Runtime.dll  the Windhawk API subset, MinHook, Zydis
 #   <name>.dll         the mod source unchanged, plus addon/addon_entry.cpp
-#   <name>Host.exe     symbols, injection, explorer watch
-#   symbols.txt, addon.json, THIRD_PARTY.md (and settings.schema.json with ADDON_SCHEMA=1,
+#   <name>Host.exe     symbols (and porting them when a PDB is not published), injection,
+#                      explorer watch
+#   symbols.txt, symbols-meta.txt (which names are required), port-sources.txt (the
+#   tools/port-sources.txt lines of ADDON_SYMBOL_MODULES), addon.json, THIRD_PARTY.md
+#   (and settings.schema.json with ADDON_SCHEMA=1,
 #   with the mod's file-kept items too with ADDON_FILE_SETTINGS=1)
 # Usage: tools/build-addon.sh [all|runtime|mod|host|bundle]...  (default all)
 # OUT_DIR (default build/addon), MOD_SRC (default the conf's), DEBUG=1 keeps symbols in the binaries.
@@ -86,15 +89,23 @@ build_mod() {
 }
 
 build_host() {
-    # dbghelp is not linked: the host loads the System32 copy at run time.
+    # dbghelp is not linked: the host loads the System32 copy at run time. Zydis is for
+    # the symbol porting engine (host/port*.cpp), wintrust and bcrypt for checking the
+    # old builds it downloads.
+    local zy="$root/third_party/zydis" zobj
+    zobj="$(c_obj "$zy/Zydis.c" zydis -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD)"
     "$cxx" "${cxxflags[@]}" -Wall -Wextra -municode -mwindows "${static[@]}" "${strip[@]}" \
-        -I"$root/common" -I"$gen" "$root"/host/*.cpp -o "$out/${name}Host.exe" \
-        -lwinhttp -lwevtapi -lpsapi -ladvapi32 -lshell32 -luser32
+        -I"$root/common" -I"$gen" -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD \
+        "$root"/host/*.cpp "$zobj" -o "$out/${name}Host.exe" \
+        -lwinhttp -lwevtapi -lpsapi -ladvapi32 -lshell32 -luser32 -lwintrust -lcrypt32 -lbcrypt
     echo "built $out/${name}Host.exe"
 }
 
 build_bundle() {
-    python -I "$root/tools/symbol-list.py" "$mod_src" "$out/symbols.txt"
+    python -I "$root/tools/symbol-list.py" "$mod_src" "$out/symbols.txt" "$out/symbols-meta.txt"
+    # shellcheck disable=SC2086
+    python -I "$root/tools/port-sources.py" "$root/tools/port-sources.txt" "$out/port-sources.txt" \
+        $ADDON_SYMBOL_MODULES
     cp "$conf_dir/$ADDON_THIRD_PARTY" "$out/THIRD_PARTY.md"
     local tp="$root/third_party"
     {

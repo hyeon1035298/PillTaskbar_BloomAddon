@@ -76,8 +76,8 @@ jobs:
           out="dist/PillTaskbar_BloomAddon"
           mkdir -p "$out"
           cp LICENSE "$out/"
-          for f in PillTaskbarHost.exe PillTaskbarRuntime.dll PillTaskbar.dll symbols.txt addon.json \
-                   settings.schema.json THIRD_PARTY.md THIRD_PARTY_NOTICES.txt SOURCE.txt; do
+          for f in PillTaskbarHost.exe PillTaskbarRuntime.dll PillTaskbar.dll symbols.txt symbols-meta.txt \
+                   port-sources.txt addon.json settings.schema.json THIRD_PARTY.md THIRD_PARTY_NOTICES.txt SOURCE.txt; do
             if [ -f "build/addon/$f" ]; then
               cp "build/addon/$f" "$out/"
             elif [ "$f" != settings.schema.json ] && [ "$f" != SOURCE.txt ]; then

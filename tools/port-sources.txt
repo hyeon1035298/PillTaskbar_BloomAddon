@@ -1,0 +1,14 @@
+# Older published builds the host may port symbols from when Microsoft has not yet
+# published the PDB of a module's new build (host/ported.h). The build copies the lines
+# of an add-on's own ADDON_SYMBOL_MODULES into its bundle as port-sources.txt.
+#
+#   <module> <file version> <msdl key> <sha256>   newest first per module
+#   deny <module> <msdl key>                       never port from that build
+#
+# The msdl key is the DLL's TimeDateStamp (8 hex digits) and SizeOfImage (hex); the
+# SHA-256 is that file as the symbol server serves it. Each line was checked against
+# the server.
+taskbar.dll 10.0.26100.9818 617E422B31A000 a52f99f7be8cc1ee360025d1c06c1480a489b1d309bef230c05eb21a106ccf34
+taskbar.dll 10.0.26100.9711 769B877B308000 ca1e335ac1fae5ff57519035302a2f365c4620d3a230f31f1231af7331760741
+twinui.pcshell.dll 10.0.26100.9818 8E751D2B9D2000 1894863a224d22bd8d3ef0e1ba382b4d3d3079e0fa9a1fdeee82f3ebace003b6
+twinui.pcshell.dll 10.0.26100.9549 BC86BB4D9A5000 8ba440eded430a2417692a98b34695a12ad0ee000333dfed07e0c2723e17111c

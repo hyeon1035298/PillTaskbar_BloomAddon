@@ -100,15 +100,49 @@ bool ReplaceFile(const std::wstring& path, std::string_view bytes) {
     return false;
 }
 
-void WriteState(PCWSTR state, PCWSTR reason) {
+namespace {
+
+// WriteState runs on the control thread and, for a module hooked late, on whichever
+// thread loaded it; one writer at a time keeps the temporary file to itself.
+SRWLOCK g_stateLock = SRWLOCK_INIT;
+std::wstring g_lastState, g_lastReason;
+
+void WriteStateLocked(PCWSTR state, PCWSTR reason) {
+    std::string degraded;
+    if (wcscmp(state, L"running") == 0) {
+        for (const std::wstring& m : hooks::Degraded()) {
+            degraded += (degraded.empty() ? "" : ",") + JsonString(m);
+        }
+    }
     std::string json = "{\"v\":1,\"version\":" + JsonString(g_config.version) +
                        ",\"pid\":" + std::to_string(GetCurrentProcessId()) + ",\"state\":" + JsonString(state) +
-                       ",\"reason\":" + JsonString(reason) + ",\"at\":\"" + IsoNow() + "\"}\n";
+                       ",\"reason\":" + JsonString(reason) +
+                       (degraded.empty() ? std::string() : ",\"degraded\":[" + degraded + "]") + ",\"at\":\"" +
+                       IsoNow() + "\"}\n";
     PCWSTR file = InPanel() ? addon::kPanelRuntimeStateFile : addon::kRuntimeStateFile;
     if (!ReplaceFile(DataPath(file), json)) {
         log::Line(L"could not write %s", file);
     }
-    log::Line(L"state %s%s%s", state, *reason ? L" " : L"", reason);
+    log::Line(L"state %s%s%s%s", state, *reason ? L" " : L"", reason, degraded.empty() ? L"" : L" (degraded)");
+    g_lastState = state;
+    g_lastReason = reason;
+}
+
+}  // namespace
+
+void WriteState(PCWSTR state, PCWSTR reason) {
+    AcquireSRWLockExclusive(&g_stateLock);
+    WriteStateLocked(state, reason);
+    ReleaseSRWLockExclusive(&g_stateLock);
+}
+
+void RewriteRunningState() {
+    AcquireSRWLockExclusive(&g_stateLock);
+    if (g_lastState == L"running") {
+        std::wstring reason = g_lastReason;
+        WriteStateLocked(L"running", reason.c_str());
+    }
+    ReleaseSRWLockExclusive(&g_stateLock);
 }
 
 // ---- log ------------------------------------------------------------------------
