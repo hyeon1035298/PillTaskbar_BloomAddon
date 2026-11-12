@@ -673,8 +673,14 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) 
         if (Single(so[k], y, t)) known.emplace_back(k, y);
     }
     if (known.size() < 2) return false;
+    // Every NEW table that agrees with each known slot inside its own length. One of the
+    // OLD length is a candidate. One of another length is a rival: the real table may
+    // have grown or shrunk while a base or derived class's table kept the length and the
+    // shared slots, and the known slots cannot tell the two apart. Any table longer than
+    // the first known slot holds its target there, so its pointers find them all.
     auto [k0, y0] = known[0];
     std::set<uint32_t> cands;
+    bool rival = false;
     auto it = new_.ptrAt.find(y0);
     if (it != new_.ptrAt.end())
         for (uint32_t q : it->second) {
@@ -682,12 +688,20 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) 
             uint32_t p = q - 8 * k0;
             if (!new_.VtStart(p)) continue;
             const auto& sn = new_.VtSlots(p);
-            if (sn.size() != so.size()) continue;
+            if (sn.size() <= k0) continue;  // q sits in a later table
             bool all = true;
-            for (auto& [k, y] : known) all = all && sn[k] == y;
-            if (all) cands.insert(p);
+            for (auto& [k, y] : known) {
+                if (k >= sn.size()) break;
+                if (sn[k] != y) {
+                    all = false;
+                    break;
+                }
+            }
+            if (!all) continue;
+            if (sn.size() == so.size()) cands.insert(p);
+            else rival = true;
         }
-    if (cands.size() != 1) return false;
+    if (cands.size() != 1 || rival) return false;
     to = *cands.begin();
     if (knownOut)
         for (auto& [k, y] : known) knownOut->push_back(so[k]);
