@@ -337,6 +337,9 @@ bool ProbeDue(const Sidecar& s, uint64_t now) {
 
 std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
                          const PortSources& src) {
+    // Left behind when a quarantine could not delete them (real offsets never are:
+    // writing them removes the record).
+    if (IsQuarantined(offsetsDir, key)) return L"they crashed explorer before";
     std::wstring sidecarPath = JoinPath(offsetsDir, key + kPortedExt);
     if (!FileExists(sidecarPath)) return {};  // real offsets
     std::string text;
@@ -528,6 +531,7 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
     PortGuard g;
     if (!ReadGuard(dataDir, g)) return done;
     std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
+    std::vector<std::wstring> keep;  // offsets that could not be deleted stay guarded
     for (auto& key : g.keys) {
         if (key.find_first_of(L"\\/:") != std::wstring::npos) continue;
         std::wstring sidecarPath = JoinPath(offsetsDir, key + kPortedExt);
@@ -541,11 +545,10 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
         std::wstring q = L"reason=" + NoTabs(reason) + L"\nat=" + IsoTime(now) + L"\nsource=" + source +
                          Format(L"\nengine=%d\n", port::kEngineVersion);
         WriteFileAtomic(JoinPath(offsetsDir, key + kQuarantinedExt), Narrow(q));
-        DeleteFileW(JoinPath(offsetsDir, key + L".txt").c_str());
-        DeleteFileW(sidecarPath.c_str());
+        if (!DropPorted(offsetsDir, key)) keep.push_back(key);
         done.push_back(key);
     }
-    SetGuard(dataDir, {}, now);
+    SetGuard(dataDir, keep, now);
     return done;
 }
 

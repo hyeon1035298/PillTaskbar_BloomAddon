@@ -111,8 +111,8 @@ bool ParseSidecar(const std::string& utf8, Sidecar& out);
 bool ProbeDue(const Sidecar& s, uint64_t now);
 const wchar_t* OutcomeName(port::Outcome o);
 // Why the ported offsets offsets\<key>.txt may no longer be used, or empty when they
-// may: their sidecar does not parse, another engine version ported them, or their
-// source build is now denied in port-sources.txt.
+// may: they are quarantined, their sidecar does not parse, another engine version
+// ported them, or their source build is now denied in port-sources.txt.
 std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
                          const PortSources& src);
 // Deletes offsets\<key>.txt and then its sidecar; the sidecar stays when the offsets
@@ -162,7 +162,8 @@ bool ReadGuard(const std::wstring& dataDir, PortGuard& out);
 // disarms. False when the file could not be written or removed.
 bool SetGuard(const std::wstring& dataDir, const std::vector<std::wstring>& keys, uint64_t now);
 // For every armed key: offsets\<key>.quarantined (reason), the ported offsets and
-// sidecar deleted. Then disarms. Returns the keys.
+// sidecar deleted (DropPorted). Then disarms, except for keys whose offsets file is
+// still there. Returns the keys quarantined.
 std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const std::wstring& reason, uint64_t now);
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key);
 // A quarantine holds against porting again only for the engine version that wrote it
