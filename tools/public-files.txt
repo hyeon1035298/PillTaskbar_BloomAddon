@@ -42,4 +42,7 @@ tools/pe_imports.py          local import check, dev only
 tools/*harness*              test harnesses that need an explorer test setup
 tools/crash-test-mod.cpp     deliberate crash test, dev only
 tools/disasm-check.cpp       local disassembly check, dev only
+tools/port-check.cpp         offline symbol-porter harness, dev only
+tools/build-port-check.sh    builds port-check, dev only
+tools/port/**                symbol-porter backtest against Microsoft PDBs, dev only
 tools/windhawk-values.py     reads the local Windhawk registry, dev only
