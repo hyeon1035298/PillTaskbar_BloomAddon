@@ -173,6 +173,7 @@ struct PortRequest {
     SymbolModule module;
     CodeView cv;
     std::vector<std::wstring> names;  // symbols.txt
+    bool noDownload = false;  // caches only: a file that is not cached ends the try as Failed
     bool noWindhawkCache = false;
     ProgressFn progress;
     uint64_t* downloaded = nullptr;  // running byte count for progress

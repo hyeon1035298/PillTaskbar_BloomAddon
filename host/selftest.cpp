@@ -609,12 +609,27 @@ void TestPrepare() {
               rep.modules[1].exit == addon::kExitDownload && rep.reason.empty(),
           L"prepare: every module is tried, the worst result wins");
 
+    // Downloads off: a listed source build is not cached, so porting asks the network
+    // for nothing and concludes nothing (no .portfail).
     o.modules = {k32};
     o.simulate404 = L"kernel32.dll";
-    o.noDownload = false;  // nothing is downloaded: no source build is listed
-    r = PrepareSymbols(o, &rep);
     std::wstring key = ModuleKey(L"kernel32.dll", cv);
     std::wstring off = JoinPath(data, addon::kOffsetsDir);
+    FileVersion kv;
+    if (ReadFileVersion(k32.path, kv) && kv.part[3] > 0) {
+        kv.part[3]--;
+        WriteText(JoinPath(exe, kPortSources), Narrow(L"kernel32.dll " + kv.Text() + L" 00000001200000\n"));
+        r = PrepareSymbols(o, &rep);
+        Check(r == addon::kExitDownload && rep.reason.empty() && !FileExists(JoinPath(off, key + kPortFailExt)) &&
+                  !FileExists(JoinPath(off, key + L".txt")),
+              L"prepare: --no-download ports from caches only");
+        DeleteFileW(JoinPath(exe, kPortSources).c_str());
+    } else {
+        Check(false, L"prepare: kernel32.dll has a file version to list an older build by");
+    }
+
+    o.noDownload = false;  // nothing is downloaded: no source build is listed
+    r = PrepareSymbols(o, &rep);
     Check(r == addon::kExitDownload && rep.reason == L"pdbMissing" && FileExists(JoinPath(off, key + kPortFailExt)) &&
               !FileExists(JoinPath(off, key + L".txt")),
           L"prepare: a 404 no port covers is pdbMissing, remembered in .portfail");

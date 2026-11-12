@@ -740,6 +740,7 @@ int Preparer::Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep)
     req.module = m;
     req.cv = cv;
     req.names = names_;
+    req.noDownload = opt_.noDownload;
     req.noWindhawkCache = opt_.noWindhawkCache;
     req.progress = opt_.progress;
     req.downloaded = &downloaded;
