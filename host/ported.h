@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -64,6 +65,10 @@ struct PortSources {
     std::vector<std::pair<std::wstring, std::wstring>> deny;  // module lower, key upper
 };
 bool ParsePortSources(const std::string& utf8, PortSources& out);
+// exeDir's port-sources.txt; no file is an empty list. False (and out empty) when the
+// file does not parse.
+bool ReadPortSources(const std::wstring& exeDir, PortSources& out);
+bool SourceDenied(const PortSources& src, const std::wstring& module, const std::wstring& key);
 
 // One older build of the module the port may start from.
 struct Candidate {
@@ -99,6 +104,7 @@ struct Sidecar {
     int engine = 0;
     std::wstring hostVersion;
     std::wstring sourceVersion, sourceKey, sourceKind;  // kind: local or shipped
+    std::wstring sources;  // the attempt's candidate set, as .portfail's sources
     uint64_t date = 0, lastProbe = 0;
     std::vector<PortedName> names;
 };
@@ -106,6 +112,15 @@ std::string FormatSidecar(const Sidecar& s);
 bool ParseSidecar(const std::string& utf8, Sidecar& out);
 bool ProbeDue(const Sidecar& s, uint64_t now);
 const wchar_t* OutcomeName(port::Outcome o);
+// Why the ported offsets offsets\<key>.txt may no longer be used, or empty when they
+// may: they are quarantined, their sidecar does not parse, another engine version
+// ported them, or their source build is now denied in port-sources.txt.
+std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
+                         const PortSources& src);
+// Deletes offsets\<key>.txt and then its sidecar; the sidecar stays when the offsets
+// file could not be deleted, so what is left never passes for real offsets. True when
+// the offsets file is gone.
+bool DropPorted(const std::wstring& offsetsDir, const std::wstring& key);
 
 // --- the module-write rule ---
 // From the engine's results (one per wanted name, in order) builds the offsets file:
@@ -117,7 +132,8 @@ bool BuildPortedOffsets(const std::wstring& module, const CodeView& cv, const st
                         const std::vector<port::OldSymbol>& oldSymbols, const std::vector<port::Result>& results,
                         OffsetsFile& out, std::vector<PortedName>& names, std::vector<std::wstring>& missing);
 // Sidecar first, then the offsets file, each written whole; order (when given) gets
-// the paths in the order written. False when either write failed.
+// the paths in the order written. False when either write failed; then the sidecar
+// just written is deleted again.
 bool WritePortedFiles(const std::wstring& offsetsPath, const std::string& offsets, const std::wstring& sidecarPath,
                       const std::string& sidecar, std::vector<std::wstring>* order = nullptr);
 // "N same, M differ: a, b" between ported entries and the real ones.
@@ -149,9 +165,27 @@ bool ReadGuard(const std::wstring& dataDir, PortGuard& out);
 // disarms. False when the file could not be written or removed.
 bool SetGuard(const std::wstring& dataDir, const std::vector<std::wstring>& keys, uint64_t now);
 // For every armed key: offsets\<key>.quarantined (reason), the ported offsets and
-// sidecar deleted. Then disarms. Returns the keys.
+// sidecar deleted (DropPorted). Then disarms, except for keys whose offsets file is
+// still there. Returns the keys quarantined.
 std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const std::wstring& reason, uint64_t now);
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key);
+// The runtime would not start on these ported offsets (initFailed, symbols: a required
+// name came out empty). For each key a .portfail with the sidecar's sources, so the
+// build is not ported again for a day and waits for its real PDB, then the offsets
+// and sidecar go (DropPorted); the guard keeps only keys whose offsets are still
+// there. Returns the keys whose offsets went.
+std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::vector<std::wstring>& keys,
+                                        const std::wstring& why, uint64_t now);
+// A quarantine holds against porting again only for the engine version that wrote it
+// (a record that names none holds for every engine).
+bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);
+
+// --- port-tmp ---
+// port-tmp\<pid>: each process downloads into its own folder, so two hosts or a
+// --resolve-symbols on one data folder never delete each other's files.
+std::wstring PortTmpDir(const std::wstring& dataDir);
+// Deletes what is in port-tmp but a folder whose process still runs.
+void CleanStalePortTmp(const std::wstring& dataDir);
 
 // --- verifying a downloaded old DLL ---
 // Embedded Authenticode, or a catalog signature this PC knows.
@@ -161,10 +195,12 @@ bool FileSha256(const std::wstring& path, std::wstring& hex);
 // --- one module ---
 enum class PortStatus {
     Written,      // offsets and sidecar written
-    Unported,     // tried; a required name did not port, or no usable source
+    Unported,     // a verdict on the sources: a 404, a hash, signature, version or key
+                  // mismatch, a local file that disagrees, required names not ported
     Skipped,      // a recent .portfail for the same engine and sources
     Quarantined,  // this build crashed explorer with ported offsets before
-    Failed,       // a download failed (not a 404): no conclusion, nothing remembered
+    Failed,       // no conclusion, nothing remembered: a download failed (not a 404) or
+                  // a local step did (reading a file, dbghelp, the engine, writing)
     Stopped,      // progress asked to stop
 };
 struct PortRequest {
@@ -175,7 +211,13 @@ struct PortRequest {
     std::vector<std::wstring> names;  // symbols.txt
     bool noDownload = false;  // caches only: a file that is not cached ends the try as Failed
     bool noWindhawkCache = false;
+    // --simulate-404 named this module: its PDB may well be published, so the sidecar
+    // gets lastProbe 0 and the next start asks for it at once.
+    bool simulated = false;
     ProgressFn progress;
+    // The checks of a downloaded DLL, reading the old PDB and the engine run on a
+    // worker thread; idle keeps the calling thread serving meanwhile.
+    IdleFn idle;
     uint64_t* downloaded = nullptr;  // running byte count for progress
 };
 struct PortReport {
@@ -183,5 +225,15 @@ struct PortReport {
     std::wstring detail;  // for the log
 };
 PortStatus PortModule(const PortRequest& req, PortReport& report);
+// Runs work on a worker thread while this thread calls idle about every 100 ms (the
+// host's messages, forwarded commands, Stop), or just waits without one. False when
+// idle asked to stop: work's cancel flag is set, the worker gets a few seconds to
+// end, and is otherwise left running (PortWorkerLeftRunning). work must own all it
+// touches.
+bool RunOnWorker(std::function<void(const std::atomic<bool>& cancel)> work, const IdleFn& idle);
+// True once a port was stopped while its worker still ran. The worker owns what it
+// touches, but the process should then end with ExitProcess, which ends the worker
+// first, rather than run static destructors under it.
+bool PortWorkerLeftRunning();
 
 }  // namespace host

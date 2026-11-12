@@ -106,6 +106,13 @@ std::wstring BinaryKey(DWORD timeDateStamp, DWORD sizeOfImage) {
     return Format(L"%08lX%lX", timeDateStamp, sizeOfImage);
 }
 
+bool ParseBinaryKey(const std::wstring& key, DWORD& timeDateStamp, DWORD& sizeOfImage) {
+    if (key.size() < 9 || key.size() > 16 || !std::all_of(key.begin(), key.end(), iswxdigit)) return false;
+    timeDateStamp = (DWORD)wcstoul(key.substr(0, 8).c_str(), nullptr, 16);
+    sizeOfImage = (DWORD)wcstoul(key.substr(8).c_str(), nullptr, 16);
+    return true;
+}
+
 std::wstring FileVersion::Text() const {
     return Format(L"%u.%u.%u.%u", part[0], part[1], part[2], part[3]);
 }
@@ -262,8 +269,9 @@ bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names) 
 namespace {
 
 // System32's dbghelp only: an app-local or PATH copy could be any version, and the
-// name rules above were checked against this one. It is not thread safe, and the
-// host calls it from its main thread only.
+// name rules above were checked against this one. It is not thread safe: the host
+// calls it from its main thread, and the porter's worker (port::ResolveAll) only
+// while the main thread waits for it.
 class DbgHelp {
 public:
     bool Load() {
@@ -401,8 +409,9 @@ Download DownloadForStatus(DWORD httpStatus) {
 // The server answers with a redirect to a signed storage URL; WinHTTP follows it and
 // nothing keeps that URL.
 Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
-                            uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
+                            uint64_t maxBytes, uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
     bytes = 0;
+    const ULONGLONG start = GetTickCount64();
     std::wstring agent = std::wstring(ADDON_NAME L"Host/") + addon::kVersion;
     Internet session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                  WINHTTP_NO_PROXY_BYPASS, 0));
@@ -437,6 +446,11 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
     if (WinHttpQueryHeaders(req.h, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, lenText, &len,
                             WINHTTP_NO_HEADER_INDEX))
         total = wcstoull(lenText, nullptr, 10);
+    if (total > maxBytes) {
+        Log(L"%ls/%ls: %llu bytes is more than the %llu this file may be", file.c_str(), key.c_str(), total,
+            maxBytes);
+        return Download::Failed;
+    }
 
     std::wstring part = dest + L".part";
     Download result = Download::Ok;
@@ -452,6 +466,18 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
                 break;
             }
             if (got == 0) break;
+            if (bytes + got > maxBytes) {
+                Log(L"%ls/%ls: more than the %llu bytes this file may be; stopped", file.c_str(), key.c_str(),
+                    maxBytes);
+                result = Download::Failed;
+                break;
+            }
+            if (GetTickCount64() - start > kDownloadDeadlineMs) {
+                Log(L"%ls/%ls: not done after %llu minutes (%llu bytes); stopped", file.c_str(), key.c_str(),
+                    kDownloadDeadlineMs / 60000, bytes);
+                result = Download::Failed;
+                break;
+            }
             DWORD written = 0;
             if (!WriteFile(out.get(), buf.data(), got, &written, nullptr) || written != got) {
                 result = Download::Failed;
@@ -526,11 +552,15 @@ struct PdbLookup {
     bool ours = false;  // in the host's own folder: deleted once used
 };
 
+bool Simulated404(const SymbolOptions& opt, const SymbolModule& m) {
+    return !opt.simulate404.empty() && EqualsNoCase(opt.simulate404, m.name);
+}
+
 // Own cache, then Windhawk's (read only), then the symbol server.
 PdbLookup FindPdb(const SymbolOptions& opt, const SymbolModule& m, const CodeView& cv, uint64_t& downloaded) {
     PdbLookup r;
     std::wstring id = PdbId(cv);
-    if (!opt.simulate404.empty() && EqualsNoCase(opt.simulate404, m.name)) {
+    if (Simulated404(opt, m)) {
         Log(L"%ls: %ls/%ls treated as not published (--simulate-404)", m.name.c_str(), cv.pdbName.c_str(),
             id.c_str());
         r.result = Download::NotFound;
@@ -558,7 +588,7 @@ PdbLookup FindPdb(const SymbolOptions& opt, const SymbolModule& m, const CodeVie
     CreateDirs(ownDir);
     auto t0 = std::chrono::steady_clock::now();
     uint64_t bytes = 0;
-    r.result = DownloadSymbolFile(cv.pdbName, id, r.path, downloaded, opt.progress, bytes);
+    r.result = DownloadSymbolFile(cv.pdbName, id, r.path, kMaxPdbBytes, downloaded, opt.progress, bytes);
     if (r.result != Download::Ok) {
         RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
         return r;
@@ -589,7 +619,10 @@ class Preparer {
 public:
     Preparer(const SymbolOptions& opt, const std::vector<std::wstring>& names)
         : opt_(opt), names_(names), wanted_(names.begin(), names.end()),
-          offsetsDir_(JoinPath(opt.dataDir, addon::kOffsetsDir)) {}
+          offsetsDir_(JoinPath(opt.dataDir, addon::kOffsetsDir)) {
+        // Only its deny lines matter here; the porter reports a broken file.
+        ReadPortSources(DirName(opt.symbolList), sources_);
+    }
 
     // kExitOk or this module's failure; kSymbolsStopped to stop.
     int Module(const SymbolModule& m, ModuleReport& rep);
@@ -609,6 +642,7 @@ private:
     const std::vector<std::wstring>& names_;
     std::unordered_set<std::wstring> wanted_;
     std::wstring offsetsDir_;
+    PortSources sources_;
 };
 
 int Preparer::Module(const SymbolModule& m, ModuleReport& rep) {
@@ -628,11 +662,21 @@ int Preparer::Module(const SymbolModule& m, ModuleReport& rep) {
     OffsetsFile old;
     if (opt_.dumpDir.empty() && ReadFileBytes(offPath, existing) && ParseOffsets(existing, old) &&
         OffsetsMatch(old, m.name, cv, names_)) {
-        if (!FileExists(JoinPath(offsetsDir_, rep.key + kPortedExt))) {
-            Log(L"%ls: offsets for %ls already there", m.name.c_str(), PdbId(cv).c_str());
-            return addon::kExitOk;
+        std::wstring stale = PortedStale(offsetsDir_, rep.key, m.name, sources_);
+        if (stale.empty()) {
+            if (!FileExists(JoinPath(offsetsDir_, rep.key + kPortedExt))) {
+                Log(L"%ls: offsets for %ls already there", m.name.c_str(), PdbId(cv).c_str());
+                return addon::kExitOk;
+            }
+            return ProbePorted(m, cv, offPath, old, rep);
         }
-        return ProbePorted(m, cv, offPath, old, rep);
+        // Ported offsets the host no longer trusts go, and the module is resolved or
+        // ported again as if they had never been written.
+        Log(L"%ls: dropping the ported offsets for %ls: %ls", m.name.c_str(), PdbId(cv).c_str(), stale.c_str());
+        if (!DropPorted(offsetsDir_, rep.key)) {
+            Log(L"%ls: could not delete them (%lu)", m.name.c_str(), GetLastError());
+            return addon::kExitDownload;
+        }
     }
 
     PdbLookup pdb = FindPdb(opt_, m, cv, downloaded);
@@ -707,7 +751,8 @@ int Preparer::ProbePorted(const SymbolModule& m, const CodeView& cv, const std::
         Log(L"%ls: the real PDB is still %ls; keeping the ported offsets", m.name.c_str(),
             pdb.result == Download::NotFound ? L"not published" : L"out of reach");
     }
-    if (known) {
+    // A simulated 404 says nothing about the server: the next start asks again.
+    if (known && !Simulated404(opt_, m)) {
         sc.lastProbe = now;
         if (!WriteFileAtomic(sidecarPath, FormatSidecar(sc)))
             Log(L"%ls: could not update its sidecar", m.name.c_str());
@@ -724,7 +769,9 @@ int Preparer::Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep)
     req.names = names_;
     req.noDownload = opt_.noDownload;
     req.noWindhawkCache = opt_.noWindhawkCache;
+    req.simulated = Simulated404(opt_, m);
     req.progress = opt_.progress;
+    req.idle = opt_.idle;
     req.downloaded = &downloaded;
     PortReport pr;
     PortStatus st = PortModule(req, pr);
