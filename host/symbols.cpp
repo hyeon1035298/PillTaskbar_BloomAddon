@@ -390,24 +390,6 @@ bool WriteDump(const std::wstring& dir, const std::wstring& module,
 
 }  // namespace
 
-bool ResolveAllPublics(const std::wstring& pdbPath, const std::wstring& dllPath,
-                       std::vector<std::pair<std::wstring, DWORD>>& out, std::wstring& error) {
-    CodeView cv;
-    if (!ReadCodeView(dllPath, cv)) {
-        error = L"no RSDS record in " + FileName(dllPath);
-        return false;
-    }
-    std::unordered_map<std::wstring, DWORD> found;
-    if (!Resolve(SymbolModule{FileName(dllPath), dllPath}, cv, pdbPath, nullptr, found, nullptr)) {
-        error = L"the PDB did not load for " + FileName(dllPath);
-        return false;
-    }
-    out.assign(found.begin(), found.end());
-    std::sort(out.begin(), out.end(),
-              [](auto& a, auto& b) { return a.second != b.second ? a.second < b.second : a.first < b.first; });
-    return true;
-}
-
 // --- download ---
 
 Download DownloadForStatus(DWORD httpStatus) {

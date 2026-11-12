@@ -96,12 +96,6 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
 // Windhawk's symbol store, which the host only ever reads.
 std::wstring WindhawkSymbolsDir();
 
-// Every public symbol of a PDB, loaded for dllPath, with the same options and name
-// rules as the wanted-names resolve; the first address of a name wins. False with
-// error set when the PDB does not load or does not match the DLL.
-bool ResolveAllPublics(const std::wstring& pdbPath, const std::wstring& dllPath,
-                       std::vector<std::pair<std::wstring, DWORD>>& out, std::wstring& error);
-
 struct SymbolOptions {
     std::wstring dataDir;
     std::wstring symbolList;  // symbols.txt
