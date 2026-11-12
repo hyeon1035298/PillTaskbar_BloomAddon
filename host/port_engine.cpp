@@ -940,6 +940,11 @@ bool NeverPorted(const std::wstring& n) {
            n.find(L"__WilFeatureTraits_") != std::wstring::npos;
 }
 
+// MSVC names a lambda's type by a hash of where it sits ("<lambda_3c46...>"), and a
+// rebuild renames it whenever that context changes, even when its code stays the same:
+// the evidence can find the code while the NEW build has no such name.
+bool LambdaName(const std::wstring& n) { return n.find(L"<lambda_") != std::wstring::npos; }
+
 // A data name is "<type> <name>": only the name part says whether the data belongs to a
 // template (a static member of one, or a local static of a template function).
 bool DataTemplateName(const std::wstring& n) {
@@ -1492,9 +1497,11 @@ void Acceptor::Collisions() {
 }
 
 void Acceptor::NeverPortedNames() {
-    for (auto& [a, vd] : verdicts_)
-        if (vd.outcome == Outcome::Ported && AnyName(a, NeverPorted))
-            vd = {Outcome::Ambiguous, 0, L"WIL feature state is never ported"};
+    for (auto& [a, vd] : verdicts_) {
+        if (vd.outcome != Outcome::Ported) continue;
+        if (AnyName(a, NeverPorted)) vd = {Outcome::Ambiguous, 0, L"WIL feature state is never ported"};
+        else if (AnyName(a, LambdaName)) vd = {Outcome::Ambiguous, 0, L"a lambda's name is never ported"};
+    }
 }
 
 void Acceptor::Decide() {
