@@ -23,6 +23,7 @@ const wchar_t kUsage[] =
     L"  " ADDON_NAME L"Host --stop\n"
     L"  " ADDON_NAME L"Host --safe-mode [--bloom-local <dir>]\n"
     L"  " ADDON_NAME L"Host --resolve-symbols --bloom-local <dir> [--no-download] [--no-windhawk-cache] [--dump <dir>]\n"
+    L"                  [--simulate-404 <module>]\n"
     L"  " ADDON_NAME L"Host --self-test";
 
 }  // namespace
