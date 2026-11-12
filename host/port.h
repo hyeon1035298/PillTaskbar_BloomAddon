@@ -72,8 +72,8 @@ struct Stats {
 // NEW build other than in.expectNew) or a stop, with error set.
 bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& error);
 
-// Every public of a PDB through System32's dbghelp, with the host's options and
-// undecoration (symbols.cpp Resolve), in enumeration order. A name the PDB has at several
+// Every public of a PDB, walked as the host walks it for its offsets (host::EnumPublics in
+// symbols.cpp), in enumeration order. A name the PDB has at several
 // addresses comes once per distinct address, the host's address (the first) first.
 // cancel stops the walk; ResolveAll then fails with "stopped".
 bool ResolveAll(const std::wstring& pdbPath, const std::wstring& dllPath,

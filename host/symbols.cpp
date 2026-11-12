@@ -269,13 +269,11 @@ bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names) 
 namespace {
 
 // System32's dbghelp only: an app-local or PATH copy could be any version, and the
-// name rules above were checked against this one. It is not thread safe: the host
-// calls it from its main thread, and the porter's worker (port::ResolveAll) only
-// while the main thread waits for it.
+// name rules above were checked against this one.
 class DbgHelp {
 public:
     bool Load() {
-        if (mod_) return true;
+        if (mod_) return undecorate != nullptr;
         mod_ = LoadLibraryExW(L"dbghelp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!mod_) return false;
         return Get(setOptions, "SymSetOptions") && Get(initialize, "SymInitializeW") &&
@@ -307,11 +305,9 @@ DbgHelp g_dbghelp;
 struct EnumContext {
     DbgHelp* dbg;
     ULONG64 base;
-    const std::unordered_set<std::wstring>* wanted;  // null: every name
-    std::unordered_map<std::wstring, DWORD> found;  // first match wins, enumeration order
-    std::vector<std::pair<DWORD, std::wstring>>* dump;
-    std::unordered_set<std::wstring> dumped;
+    const PublicFn* onPublic;
     size_t count = 0;
+    bool stopped = false;
 };
 
 BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
@@ -324,17 +320,21 @@ BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
         if (!ctx->dbg->undecorate(name.c_str(), out, ARRAYSIZE(out), 0x20800)) return TRUE;
         name = FixPtr64(out);
     }
-    DWORD rva = (DWORD)(si->Address - ctx->base);
-    if (!ctx->wanted || ctx->wanted->count(name)) ctx->found.emplace(name, rva);
-    if (ctx->dump && ctx->dumped.insert(name).second) ctx->dump->emplace_back(rva, name);
-    return TRUE;
+    // An address below the base or more than 4 GB past it is no RVA of this image.
+    if (si->Address < ctx->base || si->Address - ctx->base > 0xFFFFFFFFull) return TRUE;
+    if ((*ctx->onPublic)(name, (DWORD)(si->Address - ctx->base))) return TRUE;
+    ctx->stopped = true;
+    return FALSE;
 }
 
-bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbPath,
-             const std::unordered_set<std::wstring>* wanted, std::unordered_map<std::wstring, DWORD>& found,
-             std::vector<std::pair<DWORD, std::wstring>>* dump) {
+}  // namespace
+
+bool EnumPublics(const std::wstring& path, const CodeView& cv, const std::wstring& pdbPath,
+                 const PublicFn& onPublic, std::wstring& error, size_t* count, bool* stopped) {
+    if (count) *count = 0;
+    if (stopped) *stopped = false;
     if (!g_dbghelp.Load()) {
-        Log(L"dbghelp.dll from System32 did not load (%lu)", GetLastError());
+        error = Format(L"dbghelp.dll from System32 did not load (%lu)", GetLastError());
         return false;
     }
     DbgHelp& d = g_dbghelp;
@@ -345,37 +345,54 @@ bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbP
     // No live process: the handle is only a key for dbghelp's own bookkeeping.
     HANDLE proc = (HANDLE)(ULONG_PTR)0x50544831;
     if (!d.initialize(proc, DirName(pdbPath).c_str(), FALSE)) {
-        Log(L"SymInitialize failed (%lu)", GetLastError());
+        error = Format(L"SymInitialize failed (%lu)", GetLastError());
         return false;
     }
     const ULONG64 base = 0x180000000ull;  // any base; RVAs are taken relative to it
     bool ok = false;
-    if (d.loadModule(proc, nullptr, m.path.c_str(), nullptr, base, cv.sizeOfImage, nullptr, 0)) {
-        EnumContext ctx{&d, base, wanted, {}, dump, {}, 0};
+    if (d.loadModule(proc, nullptr, path.c_str(), nullptr, base, cv.sizeOfImage, nullptr, 0)) {
+        EnumContext ctx{&d, base, &onPublic};
         d.enumSymbols(proc, base, L"*", OnSymbol, &ctx);
         IMAGEHLP_MODULEW64 mi{};
         mi.SizeOfStruct = sizeof(mi);
         bool infoOk = d.moduleInfo(proc, base, &mi);
-        bool pdbOk = infoOk && mi.SymType == SymPdb && memcmp(&mi.PdbSig70, &cv.guid, sizeof(GUID)) == 0 &&
-                     mi.PdbAge == cv.age;
-        if (!pdbOk) {
-            Log(L"%ls: dbghelp did not load the matching PDB (type %d)", m.name.c_str(),
-                infoOk ? (int)mi.SymType : -1);
-        } else {
-            if (wanted)
-                Log(L"%ls: %zu public symbols, %zu of %zu names found", m.name.c_str(), ctx.count, ctx.found.size(),
-                    wanted->size());
-            else
-                Log(L"%ls: %zu public symbols, %zu names", m.name.c_str(), ctx.count, ctx.found.size());
-            found = std::move(ctx.found);
-            ok = true;
-        }
+        ok = infoOk && mi.SymType == SymPdb && memcmp(&mi.PdbSig70, &cv.guid, sizeof(GUID)) == 0 &&
+             mi.PdbAge == cv.age;
+        if (!ok) error = Format(L"dbghelp did not load the matching PDB (type %d)", infoOk ? (int)mi.SymType : -1);
+        if (count) *count = ctx.count;
+        if (stopped) *stopped = ctx.stopped;
         d.unloadModule(proc, base);
     } else {
-        Log(L"%ls: SymLoadModuleEx failed (%lu)", m.name.c_str(), GetLastError());
+        error = Format(L"SymLoadModuleEx failed (%lu)", GetLastError());
     }
     d.cleanup(proc);
     return ok;
+}
+
+namespace {
+
+bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbPath,
+             const std::unordered_set<std::wstring>* wanted, std::unordered_map<std::wstring, DWORD>& found,
+             std::vector<std::pair<DWORD, std::wstring>>* dump) {
+    std::unordered_map<std::wstring, DWORD> hits;  // first match wins, enumeration order
+    std::unordered_set<std::wstring> dumped;
+    size_t count = 0;
+    std::wstring error;
+    bool ok = EnumPublics(m.path, cv, pdbPath, [&](std::wstring& name, DWORD rva) {
+        if (!wanted || wanted->count(name)) hits.emplace(name, rva);
+        if (dump && dumped.insert(name).second) dump->emplace_back(rva, name);
+        return true;
+    }, error, &count);
+    if (!ok) {
+        Log(L"%ls: %ls", m.name.c_str(), error.c_str());
+        return false;
+    }
+    if (wanted)
+        Log(L"%ls: %zu public symbols, %zu of %zu names found", m.name.c_str(), count, hits.size(), wanted->size());
+    else
+        Log(L"%ls: %zu public symbols, %zu names", m.name.c_str(), count, hits.size());
+    found = std::move(hits);
+    return true;
 }
 
 struct Internet {
