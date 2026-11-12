@@ -933,6 +933,27 @@ std::wstring FunctionClass(const std::wstring& n) {
     return last == std::wstring::npos ? std::wstring() : head.substr(0, last);
 }
 
+// WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...>): one instance of
+// the same code and data per feature, so references cannot tell one feature from another.
+bool NeverPorted(const std::wstring& n) {
+    return n.find(L"wil::details::FeatureImpl<") != std::wstring::npos ||
+           n.find(L"__WilFeatureTraits_") != std::wstring::npos;
+}
+
+// A data name is "<type> <name>": only the name part says whether the data belongs to a
+// template (a static member of one, or a local static of a template function).
+bool DataTemplateName(const std::wstring& n) {
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < n.size(); i++) {
+        wchar_t c = n[i];
+        if (c == L'<' || c == L'`') depth++;
+        else if ((c == L'>' || c == L'\'') && depth > 0) depth--;
+        else if (c == L' ' && depth == 0) start = i + 1;
+    }
+    return HasTemplateMarks(n.substr(start));
+}
+
 // --- acceptance ---
 
 struct Verdict {
@@ -993,6 +1014,7 @@ private:
     void Vftables();
     void Functions();
     void Globals();
+    void NeverPortedNames();
     void Collisions();
     bool OwnSlotProof(uint32_t a, uint32_t y) const;
     struct TableSig {
@@ -1341,6 +1363,10 @@ void Acceptor::Globals() {
             const PeSection* sn = new_.pe.SectionOf(y);
             if (!sn || sn->exec || sn->name != so->name) {
                 vd.evidence = L"R8 not in the same data section";
+            } else if (AnyName(a, DataTemplateName)) {
+                // R3: references are the only evidence for data, and no structure proves
+                // one instance of a template's data from another.
+                vd.evidence = L"R3 template name, data has no structural proof (refs)";
             } else {
                 vd.outcome = Outcome::Ported;
                 vd.rva = y;
@@ -1361,10 +1387,17 @@ void Acceptor::Collisions() {
             for (uint32_t a : as) verdicts_[a] = {Outcome::Ambiguous, 0, L"R5 two names on one NEW RVA"};
 }
 
+void Acceptor::NeverPortedNames() {
+    for (auto& [a, vd] : verdicts_)
+        if (vd.outcome == Outcome::Ported && AnyName(a, NeverPorted))
+            vd = {Outcome::Ambiguous, 0, L"WIL feature state is never ported"};
+}
+
 void Acceptor::Decide() {
     Vftables();
     Functions();
     Globals();
+    NeverPortedNames();
     Collisions();
 }
 
