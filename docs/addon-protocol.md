@@ -46,7 +46,7 @@
 | `offsets\<같은 이름>.ported`, `.portfail`, `.quarantined` | 호스트 | 호스트 | 옮겨 찾은 오프셋의 표시, 실패 기록, 격리(아래 "옮겨 찾은 오프셋") |
 | `ported-guard.json` | 호스트 | 호스트 | 옮겨 찾은 오프셋을 쓰는 동안의 충돌 가드 |
 | `symbols\<PDB>\<GUID+age>\<PDB>` | 호스트 | 호스트 | 받은 PDB(오프셋을 만든 뒤 지움) |
-| `port-tmp\` | 호스트 | 호스트 | 옮겨 찾기에 받은 옛 DLL과 PDB(끝나면 폴더째 지움) |
+| `port-tmp\<PID>\` | 호스트 | 호스트 | 옮겨 찾기에 받은 옛 DLL과 PDB. 프로세스마다 따로 쓰고 끝나면 폴더째 지운다. 옮겨 찾기를 시작할 때 프로세스가 더는 없는 폴더(와 그 전 형식의 남은 파일)를 지운다 |
 | `host.log`, `runtime.log`, `runtime-panel.log` | 각자 | 사람 | 기록. 1 MB를 넘으면 처음부터 다시 씀 |
 
 JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바꿔 통째로 바꾼다.
@@ -143,12 +143,12 @@ Microsoft가 새 Windows 빌드의 PDB를 아직 올리지 않았으면 기호 �
 
 - **모듈마다.** 호스트는 모든 모듈을 끝까지 시도한다. 공개된 모듈은 바로 오프셋을 쓰고, 종료 코드는 모듈 결과 가운데 가장 나쁜 것이다(1 > 11 > 14 > 0).
 - **출처.** 사용자 데이터 폴더의 옛 `offsets\<모듈>_*.txt`(내용의 stamp-size가 msdl 키다)와 호스트 옆 `port-sources.txt`를 함께 본다. `port-sources.txt`의 줄은 `<모듈> <파일 버전> <msdl 키> [SHA-256]`(모듈마다 새 것부터)과 `deny <모듈> <msdl 키>`다. 빌드가 `tools/port-sources.txt`에서 그 애드온의 `ADDON_SYMBOL_MODULES` 줄만 옮긴다. 새 파일과 같은 갈래(VS_VERSIONINFO의 major.minor.build)이고 그보다 오래되었으며 `deny`가 아닌 빌드를 새 것부터 두 개까지 시도한다. 목록에 없는 로컬 빌드는 버전을 알려고 그 DLL을 먼저 받는다(두 개까지).
-- **받기와 확인.** 옛 DLL은 msdl에서 키로 받아 `port-tmp`에 둔다. stamp와 size가 키와 같아야 하고, `port-sources.txt`가 SHA-256을 주면 그것과 같아야 한다. 주지 않으면 Microsoft 서명(파일에 든 Authenticode나 이 PC가 아는 카탈로그)이 있어야 한다. 옛 PDB는 `symbols`, Windhawk 캐시(읽기만), msdl 순서로 찾는다. 출처가 로컬 오프셋 파일이면 옛 PDB가 그 파일의 주소를 모두 그대로 내야 한다.
+- **받기와 확인.** 옛 DLL은 msdl에서 키로 받아 `port-tmp\<PID>`에 둔다. stamp와 size가 키와 같아야 하고, `port-sources.txt`가 SHA-256을 주면 그것과 같아야 한다. 주지 않으면 Microsoft 서명(파일에 든 Authenticode나 이 PC가 아는 카탈로그)이 있어야 한다. 옛 PDB는 `symbols`, Windhawk 캐시(읽기만), msdl 순서로 찾는다. 출처가 로컬 오프셋 파일이면 옛 PDB가 그 파일의 주소를 모두 그대로 내야 한다.
 - **쓰는 규칙.** 옮겨 찾기 엔진은 `symbols.txt`의 이름마다 `ported`, `absent`(옛 PDB에도 없음), `ambiguous`, `notfound`를 낸다. `symbols-meta.txt`(`이름<TAB>req|opt`, 모드의 `SYMBOL_HOOK` 넷째 칸이 글자 그대로 `true`일 때만 `opt`)에서 필수인 이름 가운데 옛 PDB에 있는 것이 하나라도 `ported`가 아니면 그 모듈은 아무것도 쓰지 않는다. 쓸 때는 `ported`만 RVA를 넣고 나머지는 빈 값이다. 이미지 머리 안이나 밖의 RVA, 옛 빌드에서는 따로였는데 새 빌드에서 한 주소에 모인 이름도 빈 값이 된다.
 - **곁 파일 `.ported`.** `key=value` 줄이다: `engine`, `host`, `source`(파일 버전과 키), `sourceKind`(`local`, `shipped`), `sources`(옮겨 찾기를 시작한 후보, `.portfail`과 같은 꼴), `date`, `lastProbe`, 그리고 이름마다 `name=<결과>\t<RVA 16진>\t<근거>\t<이름>`. 곁 파일을 먼저 쓰고 오프셋 파일을 통째로 나중에 쓴다. 곁 파일이 있는 오프셋은 임시다.
 - **진짜로 바꾸기.** 임시 오프셋이 있으면 시작할 때 6시간에 한 번까지 진짜 PDB를 다시 찾는다. 찾으면 평소처럼 풀어 오프셋을 덮어쓰고, `host.log`에 `port diff: N same, M differ: <이름>`을 남긴 뒤 곁 파일, `.portfail`, `.quarantined`를 지운다. 못 찾으면 `lastProbe`만 고친다.
 - **낡은 임시 오프셋.** 시작할 때마다 곁 파일을 다시 본다. 곁 파일이 읽히지 않거나, `engine`이 지금 호스트의 엔진 버전과 다르거나, `source`의 키가 지금 `port-sources.txt`에서 `deny`이면 그 오프셋은 믿지 않는다. 오프셋 파일을 먼저 지우고(지워진 것을 확인한 뒤에만) 곁 파일을 지운 다음, 그 모듈은 처음부터 다시 진짜 PDB를 찾고 없으면 다시 옮겨 찾는다. 엔진을 고치면 엔진 버전을 올려, 앞선 엔진이 옮긴 오프셋을 이렇게 다시 만들게 한다.
-- **실패 기억 `.portfail`.** 옮겨 찾지 못하면 `engine`, `host`, `sources`(후보 키와 `deny` 키), `at`, `why`를 남긴다. 엔진·호스트 버전·후보가 같으면 24시간 동안 다시 받지 않는다(Bloom의 30분 재시도). 이유는 `pdbMissing`이다. 곁 파일도 이 `sources`를 적어 둔다.
+- **실패 기억 `.portfail`.** 옮겨 찾지 못하면 `engine`, `host`, `sources`(후보 키와 `deny` 키), `at`, `why`를 남긴다. 엔진·호스트 버전·후보가 같으면 24시간 동안 다시 받지 않는다(Bloom의 30분 재시도). 이유는 `pdbMissing`이다. 곁 파일도 이 `sources`를 적어 둔다. 출처에 대한 판정(404, 해시·서명·버전·키 불일치, 로컬 오프셋 파일과 어긋남, 필수 이름을 옮기지 못함)만 기억한다. 받은 파일을 읽지 못함, dbghelp나 엔진의 실패, 오프셋 쓰기 실패 같은 이 PC의 일시적인 문제는 기억하지 않고 `download`로 끝나 다음 시작에 다시 시도한다. 오프셋 쓰기에 실패하면 먼저 쓴 곁 파일도 지운다.
 - **런타임이 거부할 때.** `symbols-meta.txt`의 `opt`는 어느 한 훅 표에서라도 선택이면 붙으므로, 다른 표에서는 필수인 이름이 임시 오프셋에서 비어 있을 수 있다. 런타임이 임시 오프셋으로 `initFailed`, `symbols`를 내면(넣을 때나 이어받은 런타임이 `starting`에서 그렇게 끝날 때) 호스트는 11로 끝내지 않는다. 쓰고 있던 임시 오프셋마다 곁 파일의 `sources`로 `.portfail`을 쓰고 오프셋과 곁 파일을 지운 뒤(지운 키는 가드에서도 뺀다) 14, `pdbMissing`으로 끝난다. Bloom이 30분마다 다시 띄우고, 진짜 PDB가 나오면 그것으로 풀린다.
 - **충돌 가드 `ported-guard.json`.** `{ "v": 1, "keys": ["taskbar.dll_<GUID+age>"], "armedAt": "…" }`. 임시 오프셋으로 넣거나 이어받기 전에 켜고, 임시 오프셋이 모두 진짜로 바뀔 때까지 둔다. 켜져 있는 동안 explorer가 한 번이라도 충돌하면(4절 "지키기"의 판단, 넣은 뒤 지난 시간과 상관없음) 그 키마다 `.quarantined`(이유, 시각, 출처, `engine`)를 쓰고 임시 오프셋과 곁 파일을 지운 뒤 14, `portCrashed`로 끝난다. 곁 파일은 오프셋 파일이 지워진 것을 확인한 뒤에만 지운다. 오프셋 파일을 지우지 못한 키는 가드에 남고, 시작할 때 `.quarantined` 옆에 남은 오프셋은 쓰지 않고 지운다. 앞선 호스트가 explorer와 함께 죽어 남긴 `loaded`에서 충돌 이벤트를 찾아도 같다. 격리된 빌드는 진짜 PDB가 나올 때까지 같은 엔진으로는 다시 옮겨 찾지 않는다. `.quarantined`의 `engine`이 지금 엔진과 다르면 그 기록을 지우고 새 엔진으로 옮겨 찾는다. 새 결과도 임시 오프셋이므로 쓸 때 가드가 다시 켜진다. `engine`이 없는 기록은 모든 엔진을 막는다.
 

@@ -131,7 +131,8 @@ bool BuildPortedOffsets(const std::wstring& module, const CodeView& cv, const st
                         const std::vector<port::OldSymbol>& oldSymbols, const std::vector<port::Result>& results,
                         OffsetsFile& out, std::vector<PortedName>& names, std::vector<std::wstring>& missing);
 // Sidecar first, then the offsets file, each written whole; order (when given) gets
-// the paths in the order written. False when either write failed.
+// the paths in the order written. False when either write failed; then the sidecar
+// just written is deleted again.
 bool WritePortedFiles(const std::wstring& offsetsPath, const std::string& offsets, const std::wstring& sidecarPath,
                       const std::string& sidecar, std::vector<std::wstring>* order = nullptr);
 // "N same, M differ: a, b" between ported entries and the real ones.
@@ -178,6 +179,13 @@ std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::
 // (a record that names none holds for every engine).
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);
 
+// --- port-tmp ---
+// port-tmp\<pid>: each process downloads into its own folder, so two hosts or a
+// --resolve-symbols on one data folder never delete each other's files.
+std::wstring PortTmpDir(const std::wstring& dataDir);
+// Deletes what is in port-tmp but a folder whose process still runs.
+void CleanStalePortTmp(const std::wstring& dataDir);
+
 // --- verifying a downloaded old DLL ---
 // Embedded Authenticode, or a catalog signature this PC knows.
 bool SignatureValid(const std::wstring& path, std::wstring& how);
@@ -186,10 +194,12 @@ bool FileSha256(const std::wstring& path, std::wstring& hex);
 // --- one module ---
 enum class PortStatus {
     Written,      // offsets and sidecar written
-    Unported,     // tried; a required name did not port, or no usable source
+    Unported,     // a verdict on the sources: a 404, a hash, signature, version or key
+                  // mismatch, a local file that disagrees, required names not ported
     Skipped,      // a recent .portfail for the same engine and sources
     Quarantined,  // this build crashed explorer with ported offsets before
-    Failed,       // a download failed (not a 404): no conclusion, nothing remembered
+    Failed,       // no conclusion, nothing remembered: a download failed (not a 404) or
+                  // a local step did (reading a file, dbghelp, the engine, writing)
     Stopped,      // progress asked to stop
 };
 struct PortRequest {
