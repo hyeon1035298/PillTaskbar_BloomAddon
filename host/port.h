@@ -41,10 +41,22 @@ struct Result {
     std::wstring evidence;
 };
 
+// The NEW build the caller means: the one its offsets will be labelled with. Run fails
+// when the file it loads is another build. A zero field is not checked; the RSDS GUID and
+// age only when hasPdbId is set.
+struct Identity {
+    uint32_t timeDateStamp = 0;
+    uint32_t sizeOfImage = 0;
+    bool hasPdbId = false;
+    uint8_t pdbGuid[16] = {};
+    uint32_t pdbAge = 0;
+};
+
 struct Input {
     std::wstring oldDll, newDll;
     std::vector<OldSymbol> oldSymbols;
     std::vector<Want> wanted;
+    Identity expectNew;  // nothing is checked by default
 };
 
 struct Stats {
@@ -53,8 +65,8 @@ struct Stats {
     uint64_t analyzeMs = 0, engineMs = 0;
 };
 
-// One Result per wanted name, in order. False only on an input error (an unreadable PE),
-// with error set.
+// One Result per wanted name, in order. False only on an input error (an unreadable PE, a
+// NEW build other than in.expectNew), with error set.
 bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& error);
 
 // Every public of a PDB through System32's dbghelp, with the host's options and
