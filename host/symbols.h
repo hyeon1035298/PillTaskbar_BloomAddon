@@ -57,6 +57,18 @@ bool ReadFileVersion(const std::wstring& path, FileVersion& out);
 // msdia (and so Windhawk and the mod's strings) gives.
 std::wstring FixPtr64(std::wstring name);
 
+// Every public of the PDB at pdbPath for the module file at path, through System32's
+// dbghelp, in enumeration order: publics only, undecorated as msdia does (FixPtr64).
+// The host's offsets and the porter's OLD names (port::ResolveAll) both come from this
+// one walk, so the two name a symbol alike. onPublic gets each name and RVA (an address
+// below the image base or more than 4 GB past it is skipped) and returns false to end
+// the walk, which sets *stopped. False, with error set, when dbghelp, the module or the
+// matching PDB did not load. dbghelp is not thread safe: the host calls this from its
+// main thread, and the porter's worker only while the main thread waits for it.
+using PublicFn = std::function<bool(std::wstring& name, DWORD rva)>;
+bool EnumPublics(const std::wstring& path, const CodeView& cv, const std::wstring& pdbPath,
+                 const PublicFn& onPublic, std::wstring& error, size_t* count = nullptr, bool* stopped = nullptr);
+
 // One offsets file: "1#<module>#<stamp>-<size>#<name>#<rva>#...". A name with no RVA
 // was looked for and is not in the module.
 struct OffsetsFile {
