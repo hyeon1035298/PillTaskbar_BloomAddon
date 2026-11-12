@@ -2,10 +2,11 @@
 //
 // Offline harness for the symbol porter (host/port.h), dev only.
 //   port-check <oldDll> <oldPdb> <newDll> <symbols.txt> [--meta symbols-meta.txt] [--all] [--json out.json]
-//              [--expect-new <TimeDateStamp hex> <SizeOfImage hex>]
+//              [--expect-new <TimeDateStamp hex> <SizeOfImage hex>] [--stop-after <ms>]
 //     ports the names in symbols.txt (or, with --all, every public of the OLD PDB) from
 //     the OLD build to the NEW one and prints one line per name. --expect-new passes the
-//     NEW build the run must find (port::Input::expectNew).
+//     NEW build the run must find (port::Input::expectNew); --stop-after sets the cancel
+//     flag from another thread after that many milliseconds.
 //   port-check --dump <dll> <pdb> <out.json>
 //     every public of a PDB as port::ResolveAll names it ({name: [rva, ...]}, the host's
 //     address first), for comparing with other tools.
@@ -14,8 +15,10 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -92,6 +95,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring meta, json;
     bool all = false;
     port::Identity expect;
+    long stopAfter = -1;
     if (argc == 5 && std::wstring(argv[1]) == L"--dump") return Dump(argv[2], argv[3], argv[4]);
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -101,11 +105,12 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--expect-new" && i + 2 < argc) {
             expect.timeDateStamp = (uint32_t)wcstoul(argv[++i], nullptr, 16);
             expect.sizeOfImage = (uint32_t)wcstoul(argv[++i], nullptr, 16);
-        } else pos.push_back(a);
+        } else if (a == L"--stop-after" && i + 1 < argc) stopAfter = wcstol(argv[++i], nullptr, 10);
+        else pos.push_back(a);
     }
     if (pos.size() != 4) {
         Out("usage: port-check <oldDll> <oldPdb> <newDll> <symbols.txt> [--meta symbols-meta.txt] [--all] [--json out.json]\n"
-            "                  [--expect-new <TimeDateStamp hex> <SizeOfImage hex>]\n"
+            "                  [--expect-new <TimeDateStamp hex> <SizeOfImage hex>] [--stop-after <ms>]\n"
             "       port-check --dump <dll> <pdb> <out.json>\n");
         return 2;
     }
@@ -113,9 +118,17 @@ int wmain(int argc, wchar_t** argv) {
     in.oldDll = pos[0];
     in.newDll = pos[2];
     in.expectNew = expect;
+    static std::atomic<bool> cancel{false};  // outlives wmain for the detached timer
+    if (stopAfter >= 0) {
+        in.cancel = &cancel;
+        std::thread([stopAfter] {
+            Sleep((DWORD)stopAfter);
+            cancel = true;
+        }).detach();
+    }
     std::wstring err;
     auto t0 = GetTickCount64();
-    if (!port::ResolveAll(pos[1], pos[0], in.oldSymbols, err)) {
+    if (!port::ResolveAll(pos[1], pos[0], in.oldSymbols, err, in.cancel)) {
         Out("error: " + host::Narrow(err) + "\n");
         return 1;
     }

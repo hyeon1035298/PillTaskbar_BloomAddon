@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -57,6 +58,8 @@ struct Input {
     std::vector<OldSymbol> oldSymbols;
     std::vector<Want> wanted;
     Identity expectNew;  // nothing is checked by default
+    // Set from another thread to stop Run early; it then fails with "stopped".
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 struct Stats {
@@ -66,13 +69,15 @@ struct Stats {
 };
 
 // One Result per wanted name, in order. False only on an input error (an unreadable PE, a
-// NEW build other than in.expectNew), with error set.
+// NEW build other than in.expectNew) or a stop, with error set.
 bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& error);
 
 // Every public of a PDB through System32's dbghelp, with the host's options and
 // undecoration (symbols.cpp Resolve), in enumeration order. A name the PDB has at several
 // addresses comes once per distinct address, the host's address (the first) first.
+// cancel stops the walk; ResolveAll then fails with "stopped".
 bool ResolveAll(const std::wstring& pdbPath, const std::wstring& dllPath,
-                std::vector<OldSymbol>& out, std::wstring& error);
+                std::vector<OldSymbol>& out, std::wstring& error,
+                const std::atomic<bool>* cancel = nullptr);
 
 }  // namespace port
