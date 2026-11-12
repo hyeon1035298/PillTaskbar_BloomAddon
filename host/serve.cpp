@@ -13,6 +13,7 @@
 #include "eventlog.h"
 #include "inject.h"
 #include "panel.h"
+#include "ported.h"
 #include "state.h"
 #include "symbols.h"
 #include "taskbar.h"
@@ -36,18 +37,6 @@ constexpr DWORD kWindhawkPollMs = 5000;
 constexpr int kContinue = -100;
 // How long the runtime in ShellHost gets to bring the mod up.
 constexpr DWORD kPanelStartMs = 15000;
-
-const wchar_t* ReasonFor(int code) {
-    switch (code) {
-        case addon::kExitCrashes: return L"crashes";
-        case addon::kExitNoSymbols: return L"noSymbols";
-        case addon::kExitWindhawk: return L"windhawk";
-        case addon::kExitBlocked: return L"blocked";
-        case addon::kExitDownload: return L"download";
-        case addon::kExitRestart: return L"restart";
-        default: return L"error";
-    }
-}
 
 // Checks that pid is a running Bloom.exe, and the same file as --bloom when given.
 bool OpenBloom(DWORD pid, const std::wstring& exe, Handle& out, std::wstring& why) {
@@ -118,8 +107,13 @@ private:
     int Finish(int code, const std::wstring& reason = {});
     // code: the exit code when nothing else decides it (safe mode asked wins).
     int Shutdown(int code = addon::kExitOk);
-    void CountLeftoverLoaded();
+    // True when it quarantined ported offsets (an explorer crash the last host missed).
+    bool CountLeftoverLoaded();
     int Symbols(const std::vector<std::wstring>& explorerModules, bool forDryRun);
+    // After an explorer crash: quarantines the ported offsets the guard holds.
+    bool QuarantineOnCrash();
+    // phase running, with reason "degraded" while the runtime names unhooked modules.
+    void ShowDegraded(const RuntimeState& rs);
     int StartExplorer(const Taskbar& t);
     int Inject();
     int WaitRuntimeReady();
@@ -149,6 +143,7 @@ private:
 
     Explorer ex_;
     bool haveExplorer_ = false;
+    SymbolReport symbols_;            // the last PrepareSymbols
     bool delayNext_ = false;          // the last explorer crashed: wait after the new taskbar
     ULONGLONG injectNotBefore_ = 0;
     DWORD settlingPid_ = 0;           // the explorer whose new taskbar is not ready yet
@@ -319,7 +314,7 @@ int Host::Finish(int code, const std::wstring& reason) {
     StopPanel();
     HostState& s = state_.state();
     if (code == addon::kExitCrashes) s.safeMode = true;
-    std::wstring why = reason.empty() && code != addon::kExitOk ? std::wstring(ReasonFor(code)) : reason;
+    std::wstring why = reason.empty() && code != addon::kExitOk ? std::wstring(ExitReason(code)) : reason;
     bool failed = code != addon::kExitOk && !(code == addon::kExitCrashes && safeModeAsked_);
     state_.SetPhase(failed ? L"failed" : L"stopped", why);
     Log(L"exit %d%ls%ls", code, why.empty() ? L"" : L", ", why.c_str());
@@ -350,18 +345,46 @@ int Host::Shutdown(int code) {
 }
 
 // A host that died with explorer leaves "loaded" behind; count that crash now.
-void Host::CountLeftoverLoaded() {
+bool Host::CountLeftoverLoaded() {
     HostState& s = state_.state();
-    if (!s.loaded) return;
+    if (!s.loaded) return false;
     LoadedRecord l = *s.loaded;
-    if (ProcessAlive(l.pid, l.created)) return;  // still there: the attach path decides
+    if (ProcessAlive(l.pid, l.created)) return false;  // still there: the attach path decides
     AppCrash c;
-    if (FindAppCrashEvent(l.pid, l.created, l.at, NowTicks(), c) && CrashCounts(l.at, c.time, FaultInAddon(c))) {
-        Log(L"explorer %lu crashed after the last injection (found in the event log)", l.pid);
-        if (RecordCrash(s, c.time, NowTicks())) s.safeMode = true;
+    bool quarantined = false;
+    if (FindAppCrashEvent(l.pid, l.created, l.at, NowTicks(), c)) {
+        quarantined = QuarantineOnCrash();
+        if (CrashCounts(l.at, c.time, FaultInAddon(c))) {
+            Log(L"explorer %lu crashed after the last injection (found in the event log)", l.pid);
+            if (RecordCrash(s, c.time, NowTicks())) s.safeMode = true;
+        }
     }
     s.loaded.reset();
     state_.Save();
+    return quarantined;
+}
+
+// Ported offsets are on probation until the real PDB replaces them: one explorer
+// crash while they are in, however long after injecting, takes them out.
+bool Host::QuarantineOnCrash() {
+    PortGuard g;
+    if (!ReadGuard(dataDir_, g)) return false;
+    std::vector<std::wstring> keys =
+        QuarantineGuarded(dataDir_, L"explorer crashed while ported offsets were in use", NowTicks());
+    for (auto& k : keys) Log(L"explorer crashed with ported offsets in; quarantined %ls", k.c_str());
+    return !keys.empty();
+}
+
+void Host::ShowDegraded(const RuntimeState& rs) {
+    std::wstring want = rs.degraded.empty() ? L"" : L"degraded";
+    HostState& s = state_.state();
+    if (s.phase == L"running" && s.reason == want) return;
+    if (!rs.degraded.empty()) {
+        std::wstring list;
+        for (auto& d : rs.degraded) list += (list.empty() ? L"" : L", ") + d;
+        Log(L"running without %ls: required symbols missing there", list.c_str());
+    }
+    state_.SetPhase(L"running", want);
 }
 
 int Host::Symbols(const std::vector<std::wstring>& explorerModules, bool forDryRun) {
@@ -373,6 +396,7 @@ int Host::Symbols(const std::vector<std::wstring>& explorerModules, bool forDryR
     o.noWindhawkCache = args_.noWindhawkCache;
     Throttle t;
     bool phaseSet = false;
+    symbols_ = SymbolReport{};
     o.progress = [&](uint64_t done, uint64_t total) {
         if (!forDryRun) {
             HostState& s = state_.state();
@@ -392,7 +416,7 @@ int Host::Symbols(const std::vector<std::wstring>& explorerModules, bool forDryR
         ProcessCommands();
         return forDryRun || !StopPending();
     };
-    return PrepareSymbols(o);
+    return PrepareSymbols(o, &symbols_);
 }
 
 int Host::StartExplorer(const Taskbar& t) {
@@ -409,7 +433,21 @@ int Host::StartExplorer(const Taskbar& t) {
     }
     int r = Symbols(mods, false);
     if (r == kSymbolsStopped) return kContinue;  // the main loop sees the stop
-    if (r != addon::kExitOk) return r;
+    HostState& hs = state_.state();
+    if (r != addon::kExitOk) {
+        hs.symbolsSource.clear();
+        hs.portedFrom.clear();
+        return symbols_.reason.empty() ? r : Finish(r, symbols_.reason);
+    }
+    std::vector<std::wstring> ported = symbols_.PortedKeys();
+    hs.symbolsSource = ported.empty() ? L"pdb" : L"ported";
+    hs.portedFrom = symbols_.PortedFrom();
+    // Armed before ported offsets reach explorer, and kept until none are left.
+    if (!SetGuard(dataDir_, ported, NowTicks()) && !ported.empty()) {
+        Log(L"could not write %ls; not using ported offsets", kPortedGuardFile);
+        return addon::kExitError;
+    }
+    if (!ported.empty()) Log(L"ported offsets in use (from %ls); crash guard armed", hs.portedFrom.c_str());
 
     if (RuntimeLoadedIn(t.pid)) {
         RuntimeState rs;
@@ -427,7 +465,7 @@ int Host::StartExplorer(const Taskbar& t) {
                 rs.state.c_str());
             haveExplorer_ = true;
             if (rs.state == L"starting") return WaitRuntimeReady();
-            state_.SetPhase(L"running");
+            ShowDegraded(rs);
             KeepAutoHideForIsland(dataDir_);
             return kContinue;
         }
@@ -498,7 +536,7 @@ int Host::WaitRuntimeReady() {
             last = rs.state;
             if (rs.state == L"running" || rs.state == L"off" || rs.state == L"reloading") {
                 ex_.mapping.Reset();
-                state_.SetPhase(L"running");
+                ShowDegraded(rs);
                 KeepAutoHideForIsland(dataDir_);
                 return kContinue;
             }
@@ -546,6 +584,7 @@ int Host::OnExplorerExit() {
     s.loaded.reset();
     pendingCrash_ = {};
     bool counts = ours && crash && CrashCounts(ex_.injectedAt, diedAt, found && FaultInAddon(c));
+    bool quarantined = ours && crash && QuarantineOnCrash();
     if (ours && !found && !counts) pendingCrash_ = {ex_.taskbar.pid, ex_.created, ex_.injectedAt};
     ex_ = Explorer{};
     haveExplorer_ = false;
@@ -558,6 +597,7 @@ int Host::OnExplorerExit() {
         }
         delayNext_ = true;
     }
+    if (quarantined) return Finish(addon::kExitDownload, L"portCrashed");
     state_.SetPhase(L"waiting");
     return kContinue;
 }
@@ -571,14 +611,16 @@ int Host::RecheckPendingCrash() {
     AppCrash c;
     if (!FindAppCrashEvent(p.pid, p.created, p.injectedAt, NowTicks(), c)) return kContinue;
     Log(L"explorer %lu did crash (event log)", p.pid);
-    if (!CrashCounts(p.injectedAt, c.time, FaultInAddon(c))) return kContinue;
-    if (RecordCrash(state_.state(), c.time, NowTicks())) {
-        Log(L"explorer crashed twice within 10 minutes; safe mode on");
-        return Finish(addon::kExitCrashes);
+    bool quarantined = QuarantineOnCrash();
+    if (CrashCounts(p.injectedAt, c.time, FaultInAddon(c))) {
+        if (RecordCrash(state_.state(), c.time, NowTicks())) {
+            Log(L"explorer crashed twice within 10 minutes; safe mode on");
+            return Finish(addon::kExitCrashes);
+        }
+        state_.Save();
+        delayNext_ = true;
     }
-    state_.Save();
-    delayNext_ = true;
-    return kContinue;
+    return quarantined ? Finish(addon::kExitDownload, L"portCrashed") : kContinue;
 }
 
 // Logs where a crash event puts the fault and says whether that is in the add-on's own
@@ -742,16 +784,19 @@ int Host::Run() {
     state_.Load();
     HostState& s = state_.state();
     s.reason.clear();
+    s.symbolsSource.clear();
+    s.portedFrom.clear();
     if (args_.resetSafeMode) {
         s.safeMode = false;
         s.crashes.clear();
         Log(L"safe mode and crash list cleared");
     }
-    CountLeftoverLoaded();
+    bool portCrashed = CountLeftoverLoaded();
     if (s.safeMode) {
         Log(L"safe mode is on; not injecting");
         return Finish(addon::kExitCrashes);
     }
+    if (portCrashed) return Finish(addon::kExitDownload, L"portCrashed");
     state_.SetPhase(L"starting");
 
     std::wstring why;
@@ -847,6 +892,11 @@ int Host::Run() {
         // with the same mod on: take the runtime out before both hook the same code.
         if (haveExplorer_ && ex_.runtimeIn && GetTickCount64() - windhawkCheckedAt_ >= kWindhawkPollMs) {
             windhawkCheckedAt_ = GetTickCount64();
+            // A module the mod hooks later (once explorer loads it) can come up short too.
+            RuntimeState rs;
+            if (state_.state().phase == L"running" && state_.ReadRuntime(rs) && rs.pid == ex_.taskbar.pid &&
+                rs.state == L"running")
+                ShowDegraded(rs);
             WindhawkConflict wh = CheckWindhawkRegistry();
             if (wh.any()) {
                 Log(L"Windhawk: %ls; unloading", wh.detail.c_str());
@@ -918,7 +968,10 @@ int Host::DryRun() {
 
     ULONGLONG t0 = GetTickCount64();
     int r = Symbols(mods, true);
-    Print(Format(L"symbols: exit %d in %llu ms", r, GetTickCount64() - t0));
+    Print(Format(L"symbols: exit %d in %llu ms%ls%ls", r, GetTickCount64() - t0,
+                 symbols_.reason.empty() ? L"" : L", ", symbols_.reason.c_str()));
+    for (auto& m : symbols_.modules)
+        if (m.ported) Print(L"  " + m.module + L": ported from " + m.portedFrom + L"; a real start arms the guard");
 
     bool loaded = RuntimeLoadedIn(t.pid);
     RuntimeState rs;

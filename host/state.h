@@ -29,8 +29,15 @@ struct HostState {
     bool safeMode = false;
     std::optional<LoadedRecord> loaded;
     std::vector<uint64_t> crashes;  // FILETIME of each counted crash
+    // Where the offsets in use came from: "pdb", "ported" (any module), or empty
+    // before symbols are ready. Both are written only when set.
+    std::wstring symbolsSource;
+    std::wstring portedFrom;  // file versions ported from, comma separated
     uint64_t at = 0;
 };
+
+// host-state reason for an exit code when nothing more precise is known.
+const wchar_t* ExitReason(int code);
 
 std::string SerializeHostState(const HostState& s);
 bool ParseHostState(const std::string& utf8, HostState& out);
@@ -40,6 +47,9 @@ struct RuntimeState {
     DWORD pid = 0;
     std::wstring state;
     std::wstring reason;
+    // While running: modules whose required symbols were missing, so the mod left
+    // them unhooked (lower-case file names).
+    std::vector<std::wstring> degraded;
     uint64_t at = 0;
 };
 bool ParseRuntimeState(const std::string& utf8, RuntimeState& out);

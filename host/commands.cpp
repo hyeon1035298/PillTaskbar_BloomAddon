@@ -62,8 +62,9 @@ int RunResolveSymbols(const Args& a) {
         return addon::kExitError;
     }
     OpenLog(dataDir);
-    Log(L"start: --resolve-symbols%ls%ls", a.noDownload ? L" --no-download" : L"",
-        a.noWindhawkCache ? L" --no-windhawk-cache" : L"");
+    Log(L"start: --resolve-symbols%ls%ls%ls%ls", a.noDownload ? L" --no-download" : L"",
+        a.noWindhawkCache ? L" --no-windhawk-cache" : L"", a.simulate404.empty() ? L"" : L" --simulate-404 ",
+        a.simulate404.c_str());
     // A running host owns host-state.json; only report progress there when none is.
     StateFile state;
     state.Init(dataDir, HostRunning());
@@ -79,6 +80,7 @@ int RunResolveSymbols(const Args& a) {
     o.noDownload = a.noDownload;
     o.noWindhawkCache = a.noWindhawkCache;
     o.dumpDir = a.dumpDir;
+    o.simulate404 = a.simulate404;
     ULONGLONG lastWrite = 0, lastPrint = 0;
     o.progress = [&](uint64_t done, uint64_t total) {
         ULONGLONG now = GetTickCount64();
@@ -96,11 +98,20 @@ int RunResolveSymbols(const Args& a) {
         return true;
     };
     ULONGLONG t0 = GetTickCount64();
-    int r = PrepareSymbols(o);
+    SymbolReport rep;
+    int r = PrepareSymbols(o, &rep);
     Log(L"symbols: exit %d in %llu ms", r, GetTickCount64() - t0);
-    state.SetPhase(r == addon::kExitOk ? L"stopped" : L"failed",
-                   r == addon::kExitOk ? L"" : (r == addon::kExitDownload ? L"download"
-                                                : r == addon::kExitNoSymbols ? L"noSymbols" : L"error"));
+    for (auto& m : rep.modules)
+        Print(Format(L"%ls: %ls", m.module.c_str(),
+                     m.exit != addon::kExitOk ? Format(L"exit %d", m.exit).c_str()
+                     : m.ported               ? (L"ported from " + m.portedFrom).c_str()
+                                              : L"ok"));
+    std::wstring reason = r == addon::kExitOk ? L"" : !rep.reason.empty() ? rep.reason : ExitReason(r);
+    Print(Format(L"symbols: exit %d%ls%ls", r, reason.empty() ? L"" : L", ", reason.c_str()));
+    // Not a running host: no explorer uses these offsets yet, so the guard stays as it is.
+    state.state().symbolsSource = r == addon::kExitOk ? (rep.PortedKeys().empty() ? L"pdb" : L"ported") : L"";
+    state.state().portedFrom = r == addon::kExitOk ? rep.PortedFrom() : L"";
+    state.SetPhase(r == addon::kExitOk ? L"stopped" : L"failed", reason);
     return r;
 }
 

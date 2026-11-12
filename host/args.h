@@ -21,6 +21,7 @@ struct Args {
     std::wstring bloomLocal;  // --bloom-local
     std::wstring mod;         // --mod file name; empty: runtime only (--mod none)
     std::wstring dumpDir;     // --dump
+    std::wstring simulate404; // --simulate-404 <module>, --resolve-symbols only (a test)
     bool resetSafeMode = false;
     bool log = false;
     bool noDownload = false;

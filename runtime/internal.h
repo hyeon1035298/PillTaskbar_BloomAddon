@@ -39,8 +39,11 @@ bool ReadFileBytes(const std::wstring& path, std::string& out, bool* missing = n
 // Writes through a temporary file in the same folder and renames it into place.
 bool ReplaceFile(const std::wstring& path, std::string_view bytes);
 
-// runtime-state.json for Bloom and the host.
+// runtime-state.json for Bloom and the host. While running it also lists the
+// modules a HookSymbols call left unhooked (hooks::Degraded). Any thread.
 void WriteState(PCWSTR state, PCWSTR reason = L"");
+// Writes the last state again if it is "running" (a module came up short later).
+void RewriteRunningState();
 
 namespace log {
 void Open(const std::wstring& path);
@@ -99,6 +102,9 @@ bool RemoveAll();
 void AddTrampolines(std::vector<CodeRange>& out);
 // A required symbol was missing in this mod load (runtime-state reason "symbols").
 extern std::atomic<bool> g_symbolsFailed;
+// The modules (lower-case file names) where a required symbol was missing in this mod
+// load. A mod that goes on running without them shows "degraded" in runtime-state.
+std::vector<std::wstring> Degraded();
 }  // namespace hooks
 
 namespace threads {
