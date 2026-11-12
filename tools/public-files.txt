@@ -22,6 +22,7 @@ tools/symbol-list.py         builds symbols.txt from the mod
 tools/check-public.py        pre-commit check for personal data
 tools/check-release.py       checks an add-on release the way Bloom installs it
 tools/public-files.txt       this list
+tools/xaml-tap-test/**       XAML Diagnostics test for runtime/include/taskbar_xaml.h, in its own windows
 .github/workflows/build.yml  CI build and release zip
 .gitignore                   keeps private output out
 .gitattributes               line endings
