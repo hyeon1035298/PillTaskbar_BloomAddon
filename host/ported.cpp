@@ -631,7 +631,7 @@ private:
     // or a Microsoft signature.
     PortStatus GetOldDll(Candidate& c, std::wstring& path, std::wstring& why);
     PortStatus GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wstring& why);
-    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest);
+    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, std::wstring& why);
     PortStatus TryOne(Candidate& c, PortReport& rep, std::wstring& why);
     void RememberFailure(const std::wstring& why);
 
@@ -642,7 +642,13 @@ private:
     std::map<std::wstring, std::wstring> fetched_;  // old DLL key -> verified path
 };
 
-PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest) {
+// why is set only when downloads are off.
+PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
+                         std::wstring& why) {
+    if (req_.noDownload) {
+        why = file + L"/" + key + L": not cached and downloads are off";
+        return PortStatus::Failed;
+    }
     CreateDirs(DirName(dest));
     uint64_t bytes = 0;
     uint64_t before = req_.downloaded ? *req_.downloaded : 0;
@@ -664,9 +670,10 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
     }
     std::wstring file = Lower(req_.module.name);
     path = JoinPath(JoinPath(tmp_, file + L"_" + c.key), file);
-    PortStatus st = Fetch(file, c.key, path);
+    PortStatus st = Fetch(file, c.key, path, why);
     if (st != PortStatus::Written) {
-        why = c.key + (st == PortStatus::Unported ? L": the old DLL is not on the symbol server" : L": download failed");
+        if (why.empty())
+            why = c.key + (st == PortStatus::Unported ? L": the old DLL is not on the symbol server" : L": download failed");
         return st;
     }
     CodeView cv;
@@ -713,8 +720,8 @@ PortStatus Porter::GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wst
         return PortStatus::Written;
     }
     path = JoinPath(JoinPath(tmp_, oldCv.pdbName + L"_" + id), oldCv.pdbName);
-    PortStatus st = Fetch(oldCv.pdbName, id, path);
-    if (st != PortStatus::Written)
+    PortStatus st = Fetch(oldCv.pdbName, id, path, why);
+    if (st != PortStatus::Written && why.empty())
         why = id + (st == PortStatus::Unported ? L": the old PDB is not on the symbol server" : L": download failed");
     return st;
 }
