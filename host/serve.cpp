@@ -427,6 +427,10 @@ int Host::Symbols(const std::vector<std::wstring>& explorerModules, bool forDryR
         } else if (t.Due(1000)) {
             Print(Format(L"  downloading: %llu / %llu bytes", done, total));
         }
+        return o.idle();
+    };
+    // Downloads call progress between reads; porting runs on a worker and calls this.
+    o.idle = [&] {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         ProcessCommands();

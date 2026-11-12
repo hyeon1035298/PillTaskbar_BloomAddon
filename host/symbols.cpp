@@ -262,8 +262,9 @@ bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names) 
 namespace {
 
 // System32's dbghelp only: an app-local or PATH copy could be any version, and the
-// name rules above were checked against this one. It is not thread safe, and the
-// host calls it from its main thread only.
+// name rules above were checked against this one. It is not thread safe: the host
+// calls it from its main thread, and the porter's worker (port::ResolveAll) only
+// while the main thread waits for it.
 class DbgHelp {
 public:
     bool Load() {
@@ -739,6 +740,7 @@ int Preparer::Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep)
     req.noDownload = opt_.noDownload;
     req.noWindhawkCache = opt_.noWindhawkCache;
     req.progress = opt_.progress;
+    req.idle = opt_.idle;
     req.downloaded = &downloaded;
     PortReport pr;
     PortStatus st = PortModule(req, pr);

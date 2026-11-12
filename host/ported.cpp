@@ -10,7 +10,9 @@
 // clang-format on
 
 #include <algorithm>
+#include <atomic>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -728,6 +730,59 @@ bool FileSha256(const std::wstring& path, std::wstring& hex) {
 
 namespace {
 
+// How long a stopped port waits for its worker before leaving it to end on its own.
+constexpr DWORD kWorkerStopWaitMs = 5000;
+std::atomic<bool> g_workerLeftRunning{false};
+
+// One piece of work for the worker thread. It holds everything the worker touches:
+// the caller's own state is never shared, so a worker left running after a stop
+// cannot reach freed memory.
+struct WorkerJob {
+    std::function<void(const std::atomic<bool>& cancel)> work;
+    std::atomic<bool> cancel{false};
+};
+
+DWORD WINAPI WorkerMain(void* arg) {
+    std::shared_ptr<WorkerJob> job = std::move(*(std::shared_ptr<WorkerJob>*)arg);
+    delete (std::shared_ptr<WorkerJob>*)arg;
+    job->work(job->cancel);
+    return 0;
+}
+
+}  // namespace
+
+bool RunOnWorker(std::function<void(const std::atomic<bool>& cancel)> work, const IdleFn& idle) {
+    auto job = std::make_shared<WorkerJob>();
+    job->work = std::move(work);
+    auto* arg = new std::shared_ptr<WorkerJob>(job);
+    Handle thread(CreateThread(nullptr, 0, WorkerMain, arg, 0, nullptr));
+    if (!thread) {  // no thread to be had: do it here, as before
+        delete arg;
+        job->work(job->cancel);
+        return true;
+    }
+    HANDLE h = thread.get();
+    while (true) {
+        DWORD r = idle ? MsgWaitForMultipleObjects(1, &h, FALSE, 100, QS_ALLINPUT) : WaitForSingleObject(h, INFINITE);
+        if (r == WAIT_OBJECT_0) return true;
+        if (r == WAIT_FAILED) Sleep(50);  // should not happen, but never spin
+        if (idle && !idle()) break;
+    }
+    // Stop asked for. This is the one place the engine's cancel flag is set: the work
+    // hands &cancel to port::Input once the engine takes one.
+    job->cancel = true;
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < kWorkerStopWaitMs) {
+        if (MsgWaitForMultipleObjects(1, &h, FALSE, 100, QS_ALLINPUT) == WAIT_OBJECT_0) return false;
+        idle();  // keeps the window answering; the stop stands whatever it says
+    }
+    Log(L"the porting worker did not end within %lu ms after the stop; leaving it", kWorkerStopWaitMs);
+    g_workerLeftRunning = true;
+    return false;
+}
+
+namespace {
+
 class Porter {
 public:
     explicit Porter(const PortRequest& r)
@@ -801,22 +856,43 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
         why = c.key + L": the downloaded DLL is not that build";
         return PortStatus::Unported;
     }
-    std::wstring how;
-    if (!c.sha256.empty()) {
-        std::wstring sha;
-        if (!FileSha256(path, sha)) {
-            why = c.key + L": could not read the downloaded DLL";
-            return PortStatus::Failed;
-        }
-        if (sha != c.sha256) {
-            why = c.key + L": the downloaded DLL does not have the SHA-256 port-sources.txt gives";
-            return PortStatus::Unported;
-        }
-        how = L"SHA-256 from port-sources.txt";
-    } else if (!SignatureValid(path, how)) {
-        why = c.key + L": the downloaded DLL has " + how;
+    // Hashing or a catalog lookup can take a while: on the worker.
+    struct Check {
+        std::wstring path, sha256;  // in
+        bool read = false, ok = false;
+        std::wstring how;
+    };
+    auto chk = std::make_shared<Check>();
+    chk->path = path;
+    chk->sha256 = c.sha256;
+    bool done = RunOnWorker(
+        [chk](const std::atomic<bool>&) {
+            if (chk->sha256.empty()) {
+                chk->read = true;
+                chk->ok = SignatureValid(chk->path, chk->how);
+                return;
+            }
+            std::wstring sha;
+            chk->read = FileSha256(chk->path, sha);
+            chk->ok = chk->read && sha == chk->sha256;
+            chk->how = L"SHA-256 from port-sources.txt";
+        },
+        req_.idle);
+    if (!done) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
+    }
+    if (!chk->read) {
+        why = c.key + L": could not read the downloaded DLL";
+        return PortStatus::Failed;
+    }
+    if (!chk->ok) {
+        why = c.key + (c.sha256.empty() ? L": the downloaded DLL has " + chk->how
+                                        : std::wstring(L": the downloaded DLL does not have the SHA-256 ") +
+                                              kPortSources + L" gives");
         return PortStatus::Unported;
     }
+    std::wstring how = chk->how;
     FileVersion v;
     if (!ReadFileVersion(path, v) || (c.version.valid && v.Value() != c.version.Value())) {
         why = c.key + L": the downloaded DLL's version is not the listed one";
@@ -868,13 +944,31 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     st = GetOldPdb(oldCv, oldPdb, why);
     if (st != PortStatus::Written) return st;
 
-    port::Input in;
-    in.oldDll = oldDll;
-    in.newDll = req_.module.path;
-    std::wstring error;
-    if (!port::ResolveAll(oldPdb, oldDll, in.oldSymbols, error)) {
+    // Reading the old PDB and the engine take seconds: on the worker, which gets its
+    // own copy of everything it reads. The main thread does not touch e until the
+    // worker is done.
+    struct Engine {
+        std::wstring oldPdb;
+        port::Input in;
+        std::vector<port::Result> results;
+        port::Stats stats;
+        std::wstring error;
+        bool ok = false;
+    };
+    auto e = std::make_shared<Engine>();
+    e->oldPdb = oldPdb;
+    e->in.oldDll = oldDll;
+    e->in.newDll = req_.module.path;
+    if (!RunOnWorker([e](const std::atomic<bool>&) {
+            e->ok = port::ResolveAll(e->oldPdb, e->in.oldDll, e->in.oldSymbols, e->error);
+        }, req_.idle)) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
+    }
+    port::Input& in = e->in;
+    if (!e->ok) {
         // dbghelp or the files on this PC: no verdict on the build.
-        why = c.key + L": " + error;
+        why = c.key + L": " + e->error;
         return PortStatus::Failed;
     }
     // A local offsets file is only a hint which build the PC had: the old PDB must
@@ -900,12 +994,19 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     }
     for (size_t i = 0; i < req_.names.size(); i++) in.wanted.push_back({req_.names[i], required_[i]});
 
-    std::vector<port::Result> results;
-    port::Stats stats;
-    if (!port::Run(in, results, stats, error)) {
-        why = c.key + L": the engine failed: " + error;
+    if (!RunOnWorker([e](const std::atomic<bool>& cancel) {
+            (void)cancel;  // for the engine's cancel flag in port::Input, once it has one
+            e->ok = port::Run(e->in, e->results, e->stats, e->error);
+        }, req_.idle)) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
+    }
+    if (!e->ok) {
+        why = c.key + L": the engine failed: " + e->error;
         return PortStatus::Failed;
     }
+    const std::vector<port::Result>& results = e->results;
+    const port::Stats& stats = e->stats;
     OffsetsFile out;
     std::vector<PortedName> names;
     std::vector<std::wstring> missing;
@@ -1039,6 +1140,10 @@ PortStatus Porter::Run(PortReport& rep) {
 PortStatus PortModule(const PortRequest& req, PortReport& report) {
     Porter p(req);
     return p.Run(report);
+}
+
+bool PortWorkerLeftRunning() {
+    return g_workerLeftRunning;
 }
 
 }  // namespace host
