@@ -552,11 +552,15 @@ struct PdbLookup {
     bool ours = false;  // in the host's own folder: deleted once used
 };
 
+bool Simulated404(const SymbolOptions& opt, const SymbolModule& m) {
+    return !opt.simulate404.empty() && EqualsNoCase(opt.simulate404, m.name);
+}
+
 // Own cache, then Windhawk's (read only), then the symbol server.
 PdbLookup FindPdb(const SymbolOptions& opt, const SymbolModule& m, const CodeView& cv, uint64_t& downloaded) {
     PdbLookup r;
     std::wstring id = PdbId(cv);
-    if (!opt.simulate404.empty() && EqualsNoCase(opt.simulate404, m.name)) {
+    if (Simulated404(opt, m)) {
         Log(L"%ls: %ls/%ls treated as not published (--simulate-404)", m.name.c_str(), cv.pdbName.c_str(),
             id.c_str());
         r.result = Download::NotFound;
@@ -747,7 +751,8 @@ int Preparer::ProbePorted(const SymbolModule& m, const CodeView& cv, const std::
         Log(L"%ls: the real PDB is still %ls; keeping the ported offsets", m.name.c_str(),
             pdb.result == Download::NotFound ? L"not published" : L"out of reach");
     }
-    if (known) {
+    // A simulated 404 says nothing about the server: the next start asks again.
+    if (known && !Simulated404(opt_, m)) {
         sc.lastProbe = now;
         if (!WriteFileAtomic(sidecarPath, FormatSidecar(sc)))
             Log(L"%ls: could not update its sidecar", m.name.c_str());
@@ -764,6 +769,7 @@ int Preparer::Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep)
     req.names = names_;
     req.noDownload = opt_.noDownload;
     req.noWindhawkCache = opt_.noWindhawkCache;
+    req.simulated = Simulated404(opt_, m);
     req.progress = opt_.progress;
     req.idle = opt_.idle;
     req.downloaded = &downloaded;

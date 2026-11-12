@@ -468,6 +468,8 @@ void TestSidecar() {
           L"sidecar: probe every 6 h");
     s.lastProbe = 0;
     Check(ProbeDue(s, s.date), L"sidecar: never probed is due");
+    Check(ParseSidecar(FormatSidecar(s), r) && r.lastProbe == 0 && ProbeDue(r, s.date),
+          L"sidecar: lastProbe 0 (a simulated 404) reads back as due");
 }
 
 void TestWriteRule() {
@@ -763,8 +765,8 @@ void TestPrepare() {
     std::string text;
     Sidecar after;
     Check(r == addon::kExitOk && rep.modules[0].ported && ReadFileBytes(JoinPath(off, key + kPortedExt), text) &&
-              ParseSidecar(text, after) && after.lastProbe > sc.lastProbe,
-          L"prepare: a due probe that finds no PDB keeps the port and notes the time");
+              ParseSidecar(text, after) && after.lastProbe == sc.lastProbe,
+          L"prepare: a due probe under --simulate-404 keeps the port and is not noted as a probe");
 
     // Ported offsets the host no longer trusts are dropped and the module ported again
     // (here: no source, so pdbMissing).

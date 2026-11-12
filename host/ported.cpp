@@ -1040,7 +1040,8 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     sc.sourceKey = c.key;
     sc.sourceKind = c.local ? L"local" : L"shipped";
     sc.sources = identity_;
-    sc.date = sc.lastProbe = NowTicks();
+    sc.date = NowTicks();
+    sc.lastProbe = req_.simulated ? 0 : sc.date;
     sc.names = names;
     std::wstring offPath = JoinPath(offsetsDir_, OffsetsFileName(req_.module.name, req_.cv));
     if (!WritePortedFiles(offPath, FormatOffsets(out), JoinPath(offsetsDir_, key_ + kPortedExt), FormatSidecar(sc))) {

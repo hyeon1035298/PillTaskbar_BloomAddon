@@ -170,7 +170,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 - `--reset-safe-mode`: Bloom의 [다시 켜기]. 시작할 때 `safeMode`와 `crashes`를 비운다.
 - `--log`: 런타임의 `Wh_Log`를 처음부터 켠다.
 - `--mod none`: 런타임만 넣는다(주입 시험용). `--mod <파일>`: 같은 폴더의 다른 모드 DLL(충돌 시험용).
-- `--resolve-symbols`: 기호만 준비하고 끝난다. `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다. `--simulate-404 <모듈>`(시험용)은 그 모듈의 PDB를 캐시도 서버도 보지 않고 "공개 안 됨"으로 다뤄 옮겨 찾기를 끝까지 돌린다. `--serve`와는 함께 쓸 수 없다.
+- `--resolve-symbols`: 기호만 준비하고 끝난다. `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다. `--simulate-404 <모듈>`(시험용)은 그 모듈의 PDB를 캐시도 서버도 보지 않고 "공개 안 됨"으로 다뤄 옮겨 찾기를 끝까지 돌린다. 이때 쓰는 곁 파일은 `lastProbe`를 0(`1601-01-01T00:00:00Z`)으로 적으므로 다음 보통 실행이 곧바로 진짜 PDB를 찾는다. 시늉한 404는 탐색으로 치지 않아 `lastProbe`를 고치지 않는다. `--serve`와는 함께 쓸 수 없다.
 
 ## 3. 종료 코드
 

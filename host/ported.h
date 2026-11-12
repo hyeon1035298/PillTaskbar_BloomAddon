@@ -211,6 +211,9 @@ struct PortRequest {
     std::vector<std::wstring> names;  // symbols.txt
     bool noDownload = false;  // caches only: a file that is not cached ends the try as Failed
     bool noWindhawkCache = false;
+    // --simulate-404 named this module: its PDB may well be published, so the sidecar
+    // gets lastProbe 0 and the next start asks for it at once.
+    bool simulated = false;
     ProgressFn progress;
     // The checks of a downloaded DLL, reading the old PDB and the engine run on a
     // worker thread; idle keeps the calling thread serving meanwhile.
