@@ -86,9 +86,15 @@ build_mod() {
 }
 
 build_host() {
-    # dbghelp is not linked: the host loads the System32 copy at run time.
+    # dbghelp is not linked: the host loads the System32 copy at run time. Zydis is for
+    # the symbol porter (host/port_engine.cpp), which needs only its decoder: the host's
+    # own object has a section per function, so the link drops the formatter (~370 KB).
+    local zy="$root/third_party/zydis" zobj
+    zobj="$(c_obj "$zy/Zydis.c" zydis_host -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD \
+        -ffunction-sections -fdata-sections)"
     "$cxx" "${cxxflags[@]}" -Wall -Wextra -municode -mwindows "${static[@]}" "${strip[@]}" \
-        -I"$root/common" -I"$gen" "$root"/host/*.cpp -o "$out/${name}Host.exe" \
+        -I"$root/common" -I"$gen" -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD \
+        "$root"/host/*.cpp -x none "$zobj" -Wl,--gc-sections -o "$out/${name}Host.exe" \
         -lwinhttp -lwevtapi -lpsapi -ladvapi32 -lshell32 -luser32
     echo "built $out/${name}Host.exe"
 }
