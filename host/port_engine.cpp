@@ -898,11 +898,13 @@ bool HasTemplateMarks(const std::wstring& n) {
 }
 
 // A vftable name without its own decoration: "const C::`vftable'{for `I'}" -> "C" (and "I").
+// The name always starts with "const "; a later one belongs to a template argument
+// ("class std::vector<int> const &").
 bool VftableClass(const std::wstring& n, std::wstring& cls, std::wstring& rest) {
     size_t p = n.find(L"::`vftable'");
     if (p == std::wstring::npos) return false;
-    size_t s = n.rfind(L"const ", p);
-    cls = n.substr(s == std::wstring::npos ? 0 : s + 6, p - (s == std::wstring::npos ? 0 : s + 6));
+    size_t s = n.compare(0, 6, L"const ") == 0 ? 6 : 0;
+    cls = n.substr(s, p - s);
     rest = n.substr(p + 11);
     return true;
 }
