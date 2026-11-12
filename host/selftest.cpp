@@ -618,6 +618,38 @@ void TestPortFailAndGuard() {
     RemoveTree(data);
 }
 
+// Porting work runs on a worker while the calling thread keeps serving.
+void TestWorker() {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    DWORD self = GetCurrentThreadId();
+    auto other = std::make_shared<std::atomic<bool>>(false);
+    int idles = 0;
+    bool ok = RunOnWorker(
+        [done, other, self](const std::atomic<bool>&) {
+            Sleep(350);
+            *other = GetCurrentThreadId() != self;
+            *done = true;
+        },
+        [&] {
+            idles++;
+            return true;
+        });
+    Check(ok && *done && *other && idles >= 2, L"worker: runs off this thread while idle is called");
+
+    auto sawCancel = std::make_shared<std::atomic<bool>>(false);
+    ULONGLONG t0 = GetTickCount64();
+    ok = RunOnWorker(
+        [sawCancel](const std::atomic<bool>& cancel) {
+            for (int i = 0; i < 300 && !cancel; i++) Sleep(10);
+            *sawCancel = cancel.load();
+        },
+        [] { return false; });
+    Check(!ok && *sawCancel && GetTickCount64() - t0 < 2500 && !PortWorkerLeftRunning(),
+          L"worker: a stop sets the cancel flag and waits for the worker to end");
+    ok = RunOnWorker([done](const std::atomic<bool>&) { *done = false; }, nullptr);
+    Check(ok && !*done, L"worker: without idle the caller just waits");
+}
+
 // PrepareSymbols end to end without the network: modules that are missing, one whose
 // PDB is not cached with downloads off, and one with --simulate-404.
 void TestPrepare() {
@@ -812,6 +844,7 @@ int RunSelfTest() {
     TestSidecar();
     TestWriteRule();
     TestPortFailAndGuard();
+    TestWorker();
     TestPrepare();
     Print(Format(L"self-test: %d checks, %d failed", g_checks, g_failures));
     return g_failures;

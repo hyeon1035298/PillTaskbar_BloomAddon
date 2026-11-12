@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -211,6 +212,9 @@ struct PortRequest {
     bool noDownload = false;  // caches only: a file that is not cached ends the try as Failed
     bool noWindhawkCache = false;
     ProgressFn progress;
+    // The checks of a downloaded DLL, reading the old PDB and the engine run on a
+    // worker thread; idle keeps the calling thread serving meanwhile.
+    IdleFn idle;
     uint64_t* downloaded = nullptr;  // running byte count for progress
 };
 struct PortReport {
@@ -218,5 +222,15 @@ struct PortReport {
     std::wstring detail;  // for the log
 };
 PortStatus PortModule(const PortRequest& req, PortReport& report);
+// Runs work on a worker thread while this thread calls idle about every 100 ms (the
+// host's messages, forwarded commands, Stop), or just waits without one. False when
+// idle asked to stop: work's cancel flag is set, the worker gets a few seconds to
+// end, and is otherwise left running (PortWorkerLeftRunning). work must own all it
+// touches.
+bool RunOnWorker(std::function<void(const std::atomic<bool>& cancel)> work, const IdleFn& idle);
+// True once a port was stopped while its worker still ran. The worker owns what it
+// touches, but the process should then end with ExitProcess, which ends the worker
+// first, rather than run static destructors under it.
+bool PortWorkerLeftRunning();
 
 }  // namespace host
