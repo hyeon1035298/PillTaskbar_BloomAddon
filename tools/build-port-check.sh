@@ -25,6 +25,6 @@ fi
 "$cxx" "${flags[@]}" -std=c++23 -Wall -Wextra -municode -static -s \
     -I"$root/host" -I"$root/common" -I"$gen" -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD \
     "$root/tools/port-check.cpp" "$root/host/pe.cpp" "$root/host/port_pdb.cpp" "$root/host/port_engine.cpp" \
-    "$root/host/symbols.cpp" "$root/host/util.cpp" -x none "$zobj" \
-    -o "$out/port-check.exe" -lwinhttp
+    "$root/host/symbols.cpp" "$root/host/ported.cpp" "$root/host/json.cpp" "$root/host/util.cpp" \
+    -x none "$zobj" -o "$out/port-check.exe" -lwinhttp -lwintrust -lcrypt32 -lbcrypt
 echo "built $out/port-check.exe"
