@@ -272,6 +272,7 @@ std::string FormatSidecar(const Sidecar& s) {
     t += L"host=" + s.hostVersion + L"\n";
     t += L"source=" + s.sourceVersion + L" " + s.sourceKey + L"\n";
     t += L"sourceKind=" + s.sourceKind + L"\n";
+    t += L"sources=" + s.sources + L"\n";
     t += L"date=" + IsoTime(s.date) + L"\n";
     t += L"lastProbe=" + IsoTime(s.lastProbe) + L"\n";
     // name=<outcome>\t<rva hex or empty>\t<evidence>\t<symbol>: symbols carry '=' and
@@ -300,6 +301,8 @@ bool ParseSidecar(const std::string& utf8, Sidecar& out) {
             }
         } else if (k == L"sourceKind") {
             s.sourceKind = v;
+        } else if (k == L"sources") {
+            s.sources = v;
         } else if (k == L"date") {
             ParseIsoTime(v, s.date);
         } else if (k == L"lastProbe") {
@@ -554,6 +557,30 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
 
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key) {
     return FileExists(JoinPath(offsetsDir, key + kQuarantinedExt));
+}
+
+std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::vector<std::wstring>& keys,
+                                        const std::wstring& why, uint64_t now) {
+    std::vector<std::wstring> gone;
+    std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
+    for (auto& key : keys) {
+        if (key.find_first_of(L"\\/:") != std::wstring::npos) continue;
+        std::string text;
+        Sidecar sc;
+        // Real offsets (no sidecar) are never touched.
+        if (!ReadFileBytes(JoinPath(offsetsDir, key + kPortedExt), text) || !ParseSidecar(text, sc)) continue;
+        PortFail f{port::kEngineVersion, addon::kVersion, sc.sources, now, why};
+        WriteFileAtomic(JoinPath(offsetsDir, key + kPortFailExt), FormatPortFail(f));
+        if (DropPorted(offsetsDir, key)) gone.push_back(key);
+    }
+    PortGuard g;
+    if (ReadGuard(dataDir, g)) {
+        std::vector<std::wstring> left;
+        for (auto& k : g.keys)
+            if (std::find(gone.begin(), gone.end(), k) == gone.end()) left.push_back(k);
+        if (left.size() != g.keys.size()) SetGuard(dataDir, left, now);
+    }
+    return gone;
 }
 
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine) {
@@ -842,6 +869,7 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     sc.sourceVersion = c.version.Text();
     sc.sourceKey = c.key;
     sc.sourceKind = c.local ? L"local" : L"shipped";
+    sc.sources = identity_;
     sc.date = sc.lastProbe = NowTicks();
     sc.names = names;
     std::wstring offPath = JoinPath(offsetsDir_, OffsetsFileName(req_.module.name, req_.cv));

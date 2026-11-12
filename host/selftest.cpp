@@ -437,6 +437,7 @@ void TestSidecar() {
     s.sourceVersion = L"10.0.26100.9818";
     s.sourceKey = L"617E422B31A000";
     s.sourceKind = L"shipped";
+    s.sources = L"617E422B31A000 769B877B308000 -8DBF8CD1304000";
     ParseIsoTime(L"2026-11-13T10:00:00Z", s.date);
     s.lastProbe = s.date;
     s.names = {{L"public: bool __cdecl X::operator==(int)const ", port::Outcome::Ported, 0x1a2b3c, L"anchor+vtslot"},
@@ -446,6 +447,7 @@ void TestSidecar() {
     Sidecar r;
     Check(ParseSidecar(FormatSidecar(s), r) && r.engine == 1 && r.hostVersion == s.hostVersion &&
               r.sourceVersion == s.sourceVersion && r.sourceKey == s.sourceKey && r.sourceKind == L"shipped" &&
+              r.sources == s.sources &&
               r.date == s.date && r.lastProbe == s.lastProbe && r.names.size() == 4 &&
               r.names[0].name == s.names[0].name && r.names[0].rva == 0x1a2b3c &&
               r.names[0].outcome == port::Outcome::Ported && r.names[1].outcome == port::Outcome::Absent &&
@@ -708,6 +710,29 @@ void TestPrepare() {
     Check(r == addon::kExitOk && rep.modules[0].ported && FileExists(JoinPath(off, key + L".txt")),
           L"prepare: this engine's ported offsets from an allowed build stay");
     DropPorted(off, key);
+
+    // The runtime would not start on ported offsets: they go and a .portfail keeps the
+    // build from being ported again, so the next start is 14 pdbMissing.
+    DeleteFileW(JoinPath(off, key + kPortFailExt).c_str());
+    WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt),
+                     FormatSidecar(other));  // sources "": no candidates, as the porter would say here
+    SetGuard(data, {key}, NowTicks());
+    auto gone = RetractPorted(data, {key, L"real.dll_K"}, L"symbols missing (test)", NowTicks());
+    PortGuard guard;
+    PortFail pf;
+    text.clear();
+    Check(gone.size() == 1 && gone[0] == key && !FileExists(JoinPath(off, key + L".txt")) &&
+              !FileExists(JoinPath(off, key + kPortedExt)) && !ReadGuard(data, guard) &&
+              ReadFileBytes(JoinPath(off, key + kPortFailExt), text) && ParsePortFail(text, pf) &&
+              pf.why == L"symbols missing (test)",
+          L"retract: the ported offsets go, a .portfail stays, the guard is off");
+    r = PrepareSymbols(o, &rep);
+    text.clear();
+    Check(r == addon::kExitDownload && rep.reason == L"pdbMissing" &&
+              ReadFileBytes(JoinPath(off, key + kPortFailExt), text) && ParsePortFail(text, pf) &&
+              pf.why == L"symbols missing (test)",
+          L"retract: the next start waits for the PDB without porting again");
+    DeleteFileW(JoinPath(off, key + kPortFailExt).c_str());
 
     // Ported offsets a quarantine could not delete (the sidecar went) are never used.
     WriteText(JoinPath(off, key + L".txt"), FormatOffsets(f));
