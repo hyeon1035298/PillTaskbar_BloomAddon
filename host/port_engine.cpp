@@ -1104,6 +1104,7 @@ private:
     void Collisions();
     void Thunks();
     bool OwnSlotProof(uint32_t a, uint32_t y) const;
+    bool CalleeContradicts(const Func& fo, const Func& fn) const;
     const std::vector<uint32_t>& RefBy(uint32_t x) const;
     bool StillFolded(uint32_t a, uint32_t y) const;
     bool OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) const;
@@ -1285,6 +1286,21 @@ void Acceptor::Vftables() {
         }
 }
 
+// No contradiction for a same body: each direct call or jump out of it goes, in NEW, to
+// the one candidate its OLD target has. An overload whose signature changed can keep its
+// masked body while what it calls moves to another function.
+bool Acceptor::CalleeContradicts(const Func& fo, const Func& fn) const {
+    if (fo.refs.size() != fn.refs.size()) return true;
+    for (size_t i = 0; i < fo.refs.size(); i++) {
+        const Ref& r = fo.refs[i];
+        if ((r.kind != kCall && r.kind != kJmp) || r.tgt == kNoTarget || r.tgt == fo.start) continue;
+        uint32_t c;
+        uint8_t t;
+        if (eng_.Single(r.tgt, c, t) && c != fn.refs[i].tgt) return true;
+    }
+    return false;
+}
+
 bool Acceptor::OwnSlotProof(uint32_t a, uint32_t y) const {
     auto it = names_.find(a);
     if (it == names_.end()) return false;
@@ -1426,6 +1442,11 @@ void Acceptor::Functions() {
             for (auto& r : fo.refs) tainted = tainted || eng_.conflicted.count(r.tgt) || eng_.shared.count(r.tgt);
             if (tainted) {
                 vd.evidence = L"same body, but it refers to a contested target (" + kinds + L")";
+                verdicts_[a] = vd;
+                continue;
+            }
+            if (CalleeContradicts(fo, *fn)) {
+                vd.evidence = L"same body, but a call goes elsewhere than its target maps (" + kinds + L")";
                 verdicts_[a] = vd;
                 continue;
             }
