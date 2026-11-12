@@ -687,7 +687,7 @@ void TestPrepare() {
               rep.modules[1].exit == addon::kExitDownload && rep.reason.empty(),
           L"prepare: every module is tried, the worst result wins");
 
-    // Downloads off: a listed source build is not cached, so porting asks the network
+    // Downloads off: a listed source build is never cached, so porting asks the network
     // for nothing and concludes nothing (no .portfail).
     o.modules = {k32};
     o.simulate404 = L"kernel32.dll";
@@ -700,7 +700,7 @@ void TestPrepare() {
         r = PrepareSymbols(o, &rep);
         Check(r == addon::kExitDownload && rep.reason.empty() && !FileExists(JoinPath(off, key + kPortFailExt)) &&
                   !FileExists(JoinPath(off, key + L".txt")),
-              L"prepare: --no-download ports from caches only");
+              L"prepare: --no-download downloads nothing, so it ports nothing");
 
         // A local build whose version probe fails is skipped; the listed one is still
         // tried, and the skipped one is never remembered as a failure.
