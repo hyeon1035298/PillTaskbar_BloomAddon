@@ -999,6 +999,16 @@ private:
     std::unordered_set<uint32_t> newSlotTargets_;            // NEW functions in accepted tables
     // OLD slot function -> (NEW slot function, OLD table) for every slot of an accepted table.
     std::unordered_multimap<uint32_t, std::pair<uint32_t, uint32_t>> slotIndex_;
+    // OLD slot address -> (OLD table, slot) for every slot of an accepted table that kept
+    // its length.
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> slotAt_;
+    // OLD tables by the class their name gives.
+    std::unordered_map<std::wstring, std::vector<uint32_t>> tablesOf_;
+    // Names that have an adjustor or vtordisp thunk, as the name without it.
+    std::unordered_set<std::wstring> thunked_;
+    // OLD target -> the OLD functions that refer to it, built on first use.
+    mutable std::unordered_map<uint32_t, std::vector<uint32_t>> refBy_;
+    mutable bool refByBuilt_ = false;
 
     bool AnyName(uint32_t a, bool (*pred)(const std::wstring&)) const {
         auto it = names_.find(a);
@@ -1017,6 +1027,9 @@ private:
     void NeverPortedNames();
     void Collisions();
     bool OwnSlotProof(uint32_t a, uint32_t y) const;
+    const std::vector<uint32_t>& RefBy(uint32_t x) const;
+    bool StillFolded(uint32_t a, uint32_t y) const;
+    bool OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) const;
     struct TableSig {
         std::unordered_map<H128, uint32_t, H128Hash> targets, shapes;
     };
@@ -1028,6 +1041,10 @@ private:
 public:
     // a at slot k of an accepted table of the name's own class, y at slot k of its NEW table.
     bool NameSlotProof(const std::wstring& name, uint32_t a, uint32_t y) const;
+    // R9: one name of several on the OLD address a goes to y only with this proof.
+    bool FoldedProof(const std::wstring& name, uint32_t a, uint32_t y) const {
+        return old_.pe.IsExec(a) && old_.At(a) && (StillFolded(a, y) || OwnFoldedSlot(name, a, y));
+    }
 };
 
 bool Acceptor::TemplateName(uint32_t a) const {
@@ -1159,8 +1176,26 @@ void Acceptor::Vftables() {
         // shrank belongs to a changed interface, where one slot can hold a renamed method.
         const auto &so = old_.VtSlots(vs[0]), &sn = new_.VtSlots(y);
         if (so.size() == sn.size())
-            for (size_t k = 0; k < so.size(); k++) slotIndex_.emplace(so[k], std::make_pair(sn[k], vs[0]));
+            for (size_t k = 0; k < so.size(); k++) {
+                slotIndex_.emplace(so[k], std::make_pair(sn[k], vs[0]));
+                slotAt_[vs[0] + 8 * (uint32_t)k] = {vs[0], (uint32_t)k};
+            }
     }
+    for (auto& [v, ns] : names_)
+        for (auto& n : ns) {
+            std::wstring cls, rest;
+            if (VftableClass(n, cls, rest)) tablesOf_[cls].push_back(v);
+            if (n.compare(0, 8, L"[thunk]:") == 0) {
+                // "[thunk]:<head>`adjustor{8}' (args)" -> "<head>(args)"
+                std::wstring t = n.substr(8);
+                for (const wchar_t* mark : {L"`adjustor{", L"`vtordisp{", L"`vtordispex{"}) {
+                    size_t p = t.find(mark);
+                    size_t e = p == std::wstring::npos ? p : t.find(L"}' ", p);
+                    if (e != std::wstring::npos) t.erase(p, e + 3 - p);
+                }
+                thunked_.insert(t);
+            }
+        }
 }
 
 bool Acceptor::OwnSlotProof(uint32_t a, uint32_t y) const {
@@ -1185,6 +1220,75 @@ bool Acceptor::NameSlotProof(const std::wstring& name, uint32_t a, uint32_t y) c
         }
     }
     return false;
+}
+
+const std::vector<uint32_t>& Acceptor::RefBy(uint32_t x) const {
+    if (!refByBuilt_) {
+        refByBuilt_ = true;
+        for (auto& f : old_.funcs)
+            for (auto& r : f.refs)
+                if (r.tgt != kNoTarget) {
+                    auto& v = refBy_[r.tgt];
+                    if (v.empty() || v.back() != f.start) v.push_back(f.start);
+                }
+    }
+    static const std::vector<uint32_t> none;
+    auto it = refBy_.find(x);
+    return it == refBy_.end() ? none : it->second;
+}
+
+// R9 (a): every use of a that the binary shows goes to y in NEW. Code that refers to a
+// is an anchor whose NEW body refers to y there, every relocated pointer to a is a slot
+// of an accepted table that kept its length and holds y there, and a is not exported.
+// Then each name of the set that anything uses is still at y.
+bool Acceptor::StillFolded(uint32_t a, uint32_t y) const {
+    for (auto& e : old_.pe.exports)
+        if (e.rva == a) return false;
+    size_t uses = 0;
+    for (uint32_t t : RefBy(a)) {
+        auto an = eng_.anchors.find(t);
+        if (an == eng_.anchors.end()) return false;
+        const Func* fo = old_.At(t);
+        const Func* fn = new_.At(an->second);
+        if (!fo || !fn || fo->refs.size() != fn->refs.size()) return false;
+        for (size_t i = 0; i < fo->refs.size(); i++) {
+            if (fo->refs[i].tgt != a) continue;
+            if (fn->refs[i].tgt != y) return false;
+            uses++;
+        }
+    }
+    auto p = old_.ptrAt.find(a);
+    if (p != old_.ptrAt.end())
+        for (uint32_t slot : p->second) {
+            auto s = slotAt_.find(slot);
+            if (s == slotAt_.end() || new_.VtSlots(vtAccepted_.at(s->second.first))[s->second.second] != y) return false;
+            uses++;
+        }
+    return uses > 0;
+}
+
+// R9 (b): one name of the set by its own slot. A virtual C::f that is defined (it is in
+// the set) and has no adjustor or vtordisp thunk sits directly in a slot of one of C's
+// tables. When a fills exactly one slot over all of C's tables, that slot is C::f's
+// whatever the other names are, and it proves y when its table has no other name, is
+// accepted, kept its length and holds y there. A class in an anonymous namespace may
+// share its name with another one, so it never qualifies.
+bool Acceptor::OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) const {
+    std::wstring cls = FunctionClass(name);
+    auto tabs = tablesOf_.find(cls);
+    if (cls.empty() || cls.find(L'`') != std::wstring::npos || name.find(L"virtual ") == std::wstring::npos ||
+        tabs == tablesOf_.end() || thunked_.count(name))
+        return false;
+    uint32_t hits = 0, hv = 0, hk = 0;
+    for (uint32_t v : tabs->second) {
+        const auto& so = old_.VtSlots(v);
+        for (uint32_t k = 0; k < so.size(); k++)
+            if (so[k] == a) hits++, hv = v, hk = k;
+    }
+    auto to = vtAccepted_.find(hv);
+    if (hits != 1 || names_.at(hv).size() != 1 || to == vtAccepted_.end()) return false;
+    const auto& sn = new_.VtSlots(to->second);
+    return sn.size() == old_.VtSlots(hv).size() && sn[hk] == y;
 }
 
 // R1-R6 and R9 for functions.
@@ -1440,10 +1544,11 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
             r.rva = vd->outcome == Outcome::Ported ? vd->rva : 0;
             r.evidence = vd->evidence;
             // R9: names folded onto one OLD address (identical COMDATs) can come apart in
-            // NEW, and nothing in the code says which name a caller meant. Only a slot of
-            // the name's own proven vftable picks one.
+            // NEW, and a use of the address does not say which name it meant. Evidence
+            // that a sibling of the set gave proves nothing for this name; only the
+            // whole set staying at one address, or a slot no sibling can own, does.
             if (r.outcome == Outcome::Ported && names[it->second].size() > 1 &&
-                !(ob->pe.IsExec(it->second) && acc.NameSlotProof(w.name, it->second, vd->rva))) {
+                !acc.FoldedProof(w.name, it->second, vd->rva)) {
                 r.outcome = Outcome::Ambiguous;
                 r.rva = 0;
                 r.evidence = L"R9 several names share the OLD address (" + vd->evidence + L")";
