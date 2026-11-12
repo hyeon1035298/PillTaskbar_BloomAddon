@@ -665,6 +665,41 @@ void TestPrepare() {
     Check(r == addon::kExitOk && rep.modules[0].ported && ReadFileBytes(JoinPath(off, key + kPortedExt), text) &&
               ParseSidecar(text, after) && after.lastProbe > sc.lastProbe,
           L"prepare: a due probe that finds no PDB keeps the port and notes the time");
+
+    // Ported offsets the host no longer trusts are dropped and the module ported again
+    // (here: no source, so pdbMissing).
+    auto stale = [&](const std::string& sidecar, const wchar_t* what) {
+        WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt), sidecar);
+        int res = PrepareSymbols(o, &rep);
+        Check(res == addon::kExitDownload && rep.reason == L"pdbMissing" && !rep.modules[0].ported &&
+                  !FileExists(JoinPath(off, key + L".txt")) && !FileExists(JoinPath(off, key + kPortedExt)),
+              what);
+    };
+    Sidecar other = sc;
+    other.lastProbe = NowTicks();
+    other.engine = port::kEngineVersion + 1;
+    stale(FormatSidecar(other), L"prepare: another engine's ported offsets are ported again");
+    stale("not a sidecar\n", L"prepare: ported offsets with a broken sidecar are ported again");
+    other.engine = port::kEngineVersion;
+    WriteText(JoinPath(exe, kPortSources), "deny kernel32.dll 00000001200000\n");
+    stale(FormatSidecar(other), L"prepare: ported offsets from a now denied build are ported again");
+    DeleteFileW(JoinPath(exe, kPortSources).c_str());
+    WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt),
+                     FormatSidecar(other));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitOk && rep.modules[0].ported && FileExists(JoinPath(off, key + L".txt")),
+          L"prepare: this engine's ported offsets from an allowed build stay");
+    DropPorted(off, key);
+
+    // A quarantine holds only for the engine that wrote it.
+    WriteText(JoinPath(off, key + kQuarantinedExt), Narrow(Format(L"reason=test\nengine=%d\n", port::kEngineVersion)));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"portCrashed", L"prepare: this engine's quarantine holds");
+    WriteText(JoinPath(off, key + kQuarantinedExt),
+              Narrow(Format(L"reason=test\nengine=%d\n", port::kEngineVersion + 1)));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"pdbMissing" && !IsQuarantined(off, key),
+          L"prepare: another engine's quarantine does not block porting");
     RemoveTree(data);
 }
 

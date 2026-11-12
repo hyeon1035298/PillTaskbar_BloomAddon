@@ -64,6 +64,10 @@ struct PortSources {
     std::vector<std::pair<std::wstring, std::wstring>> deny;  // module lower, key upper
 };
 bool ParsePortSources(const std::string& utf8, PortSources& out);
+// exeDir's port-sources.txt; no file is an empty list. False (and out empty) when the
+// file does not parse.
+bool ReadPortSources(const std::wstring& exeDir, PortSources& out);
+bool SourceDenied(const PortSources& src, const std::wstring& module, const std::wstring& key);
 
 // One older build of the module the port may start from.
 struct Candidate {
@@ -106,6 +110,15 @@ std::string FormatSidecar(const Sidecar& s);
 bool ParseSidecar(const std::string& utf8, Sidecar& out);
 bool ProbeDue(const Sidecar& s, uint64_t now);
 const wchar_t* OutcomeName(port::Outcome o);
+// Why the ported offsets offsets\<key>.txt may no longer be used, or empty when they
+// may: their sidecar does not parse, another engine version ported them, or their
+// source build is now denied in port-sources.txt.
+std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
+                         const PortSources& src);
+// Deletes offsets\<key>.txt and then its sidecar; the sidecar stays when the offsets
+// file could not be deleted, so what is left never passes for real offsets. True when
+// the offsets file is gone.
+bool DropPorted(const std::wstring& offsetsDir, const std::wstring& key);
 
 // --- the module-write rule ---
 // From the engine's results (one per wanted name, in order) builds the offsets file:
@@ -152,6 +165,9 @@ bool SetGuard(const std::wstring& dataDir, const std::vector<std::wstring>& keys
 // sidecar deleted. Then disarms. Returns the keys.
 std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const std::wstring& reason, uint64_t now);
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key);
+// A quarantine holds against porting again only for the engine version that wrote it
+// (a record that names none holds for every engine).
+bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);
 
 // --- verifying a downloaded old DLL ---
 // Embedded Authenticode, or a catalog signature this PC knows.

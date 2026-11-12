@@ -589,7 +589,10 @@ class Preparer {
 public:
     Preparer(const SymbolOptions& opt, const std::vector<std::wstring>& names)
         : opt_(opt), names_(names), wanted_(names.begin(), names.end()),
-          offsetsDir_(JoinPath(opt.dataDir, addon::kOffsetsDir)) {}
+          offsetsDir_(JoinPath(opt.dataDir, addon::kOffsetsDir)) {
+        // Only its deny lines matter here; the porter reports a broken file.
+        ReadPortSources(DirName(opt.symbolList), sources_);
+    }
 
     // kExitOk or this module's failure; kSymbolsStopped to stop.
     int Module(const SymbolModule& m, ModuleReport& rep);
@@ -609,6 +612,7 @@ private:
     const std::vector<std::wstring>& names_;
     std::unordered_set<std::wstring> wanted_;
     std::wstring offsetsDir_;
+    PortSources sources_;
 };
 
 int Preparer::Module(const SymbolModule& m, ModuleReport& rep) {
@@ -628,11 +632,21 @@ int Preparer::Module(const SymbolModule& m, ModuleReport& rep) {
     OffsetsFile old;
     if (opt_.dumpDir.empty() && ReadFileBytes(offPath, existing) && ParseOffsets(existing, old) &&
         OffsetsMatch(old, m.name, cv, names_)) {
-        if (!FileExists(JoinPath(offsetsDir_, rep.key + kPortedExt))) {
-            Log(L"%ls: offsets for %ls already there", m.name.c_str(), PdbId(cv).c_str());
-            return addon::kExitOk;
+        std::wstring stale = PortedStale(offsetsDir_, rep.key, m.name, sources_);
+        if (stale.empty()) {
+            if (!FileExists(JoinPath(offsetsDir_, rep.key + kPortedExt))) {
+                Log(L"%ls: offsets for %ls already there", m.name.c_str(), PdbId(cv).c_str());
+                return addon::kExitOk;
+            }
+            return ProbePorted(m, cv, offPath, old, rep);
         }
-        return ProbePorted(m, cv, offPath, old, rep);
+        // Ported offsets the host no longer trusts go, and the module is resolved or
+        // ported again as if they had never been written.
+        Log(L"%ls: dropping the ported offsets for %ls: %ls", m.name.c_str(), PdbId(cv).c_str(), stale.c_str());
+        if (!DropPorted(offsetsDir_, rep.key)) {
+            Log(L"%ls: could not delete them (%lu)", m.name.c_str(), GetLastError());
+            return addon::kExitDownload;
+        }
     }
 
     PdbLookup pdb = FindPdb(opt_, m, cv, downloaded);
