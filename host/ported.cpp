@@ -16,6 +16,7 @@
 
 #include "addon_protocol.h"
 #include "json.h"
+#include "taskbar.h"
 
 namespace host {
 
@@ -112,6 +113,12 @@ void DeleteTree(const std::wstring& dir) {
         FindClose(h);
     }
     RemoveDirectoryW(dir.c_str());
+}
+
+bool Readable(const std::wstring& path) {
+    Handle f(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, 0, nullptr));
+    return (bool)f;
 }
 
 }  // namespace
@@ -428,7 +435,10 @@ bool WritePortedFiles(const std::wstring& offsetsPath, const std::string& offset
     // The sidecar first: offsets without it would pass for real ones.
     if (!WriteFileAtomic(sidecarPath, sidecar)) return false;
     if (order) order->push_back(sidecarPath);
-    if (!WriteFileAtomic(offsetsPath, offsets)) return false;
+    if (!WriteFileAtomic(offsetsPath, offsets)) {
+        DeleteFileW(sidecarPath.c_str());
+        return false;
+    }
     if (order) order->push_back(offsetsPath);
     return true;
 }
@@ -593,6 +603,34 @@ bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, i
     return true;
 }
 
+// --- port-tmp ---
+
+std::wstring PortTmpDir(const std::wstring& dataDir) {
+    return JoinPath(JoinPath(dataDir, kPortTmpDir), std::to_wstring(GetCurrentProcessId()));
+}
+
+void CleanStalePortTmp(const std::wstring& dataDir) {
+    std::wstring root = JoinPath(dataDir, kPortTmpDir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(root, L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        std::wstring p = JoinPath(root, n);
+        bool pidDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                      !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && n.size() <= 10 &&
+                      std::all_of(n.begin(), n.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
+        if (pidDir && ProcessAlive((DWORD)wcstoul(n.c_str(), nullptr, 10), 0)) continue;
+        // A dead process's folder, or what a host before per-process folders left.
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            DeleteTree(p);
+        else
+            DeleteFileW(p.c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 // --- verifying a downloaded old DLL ---
 
 namespace {
@@ -693,9 +731,12 @@ namespace {
 class Porter {
 public:
     explicit Porter(const PortRequest& r)
-        : req_(r), offsetsDir_(JoinPath(r.dataDir, addon::kOffsetsDir)), tmp_(JoinPath(r.dataDir, kPortTmpDir)),
+        : req_(r), offsetsDir_(JoinPath(r.dataDir, addon::kOffsetsDir)), tmp_(PortTmpDir(r.dataDir)),
           key_(ModuleKey(r.module.name, r.cv)) {}
-    ~Porter() { DeleteTree(tmp_); }
+    ~Porter() {
+        DeleteTree(tmp_);
+        RemoveDirectoryW(DirName(tmp_).c_str());  // port-tmp itself, once empty
+    }
 
     PortStatus Run(PortReport& rep);
 
@@ -751,13 +792,23 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
     }
     CodeView cv;
     if (!ReadCodeView(path, cv) || BinaryKey(cv.timeDateStamp, cv.sizeOfImage) != c.key) {
+        // A file just downloaded can be unreadable for local reasons (a scanner
+        // holding it): no verdict on the build.
+        if (!Readable(path)) {
+            why = c.key + L": could not read the downloaded DLL";
+            return PortStatus::Failed;
+        }
         why = c.key + L": the downloaded DLL is not that build";
         return PortStatus::Unported;
     }
     std::wstring how;
     if (!c.sha256.empty()) {
         std::wstring sha;
-        if (!FileSha256(path, sha) || sha != c.sha256) {
+        if (!FileSha256(path, sha)) {
+            why = c.key + L": could not read the downloaded DLL";
+            return PortStatus::Failed;
+        }
+        if (sha != c.sha256) {
             why = c.key + L": the downloaded DLL does not have the SHA-256 port-sources.txt gives";
             return PortStatus::Unported;
         }
@@ -810,7 +861,10 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     PortStatus st = GetOldDll(c, oldDll, why);
     if (st != PortStatus::Written) return st;
     CodeView oldCv;
-    ReadCodeView(oldDll, oldCv);
+    if (!ReadCodeView(oldDll, oldCv)) {  // read and checked moments ago
+        why = c.key + L": could not read the downloaded DLL again";
+        return PortStatus::Failed;
+    }
     st = GetOldPdb(oldCv, oldPdb, why);
     if (st != PortStatus::Written) return st;
 
@@ -819,8 +873,9 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     in.newDll = req_.module.path;
     std::wstring error;
     if (!port::ResolveAll(oldPdb, oldDll, in.oldSymbols, error)) {
+        // dbghelp or the files on this PC: no verdict on the build.
         why = c.key + L": " + error;
-        return PortStatus::Unported;
+        return PortStatus::Failed;
     }
     // A local offsets file is only a hint which build the PC had: the old PDB must
     // give every address it holds.
@@ -829,7 +884,11 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
         OffsetsFile f;
         std::unordered_map<std::wstring, uint32_t> old;
         for (auto& s : in.oldSymbols) old.emplace(s.name, s.rva);
-        bool same = ReadFileBytes(c.localFile, text) && ParseOffsets(text, f);
+        if (!ReadFileBytes(c.localFile, text)) {
+            why = c.key + L": could not read the local offsets file";
+            return PortStatus::Failed;
+        }
+        bool same = ParseOffsets(text, f);
         for (auto& [name, rva] : f.entries) {
             auto it = old.find(name);
             if (rva ? (it == old.end() || it->second != *rva) : it != old.end()) same = false;
@@ -845,7 +904,7 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     port::Stats stats;
     if (!port::Run(in, results, stats, error)) {
         why = c.key + L": the engine failed: " + error;
-        return PortStatus::Unported;
+        return PortStatus::Failed;
     }
     OffsetsFile out;
     std::vector<PortedName> names;
@@ -874,8 +933,9 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     sc.names = names;
     std::wstring offPath = JoinPath(offsetsDir_, OffsetsFileName(req_.module.name, req_.cv));
     if (!WritePortedFiles(offPath, FormatOffsets(out), JoinPath(offsetsDir_, key_ + kPortedExt), FormatSidecar(sc))) {
+        // WritePortedFiles took its sidecar back; a full or locked disk is no verdict.
         why = L"could not write the ported offsets";
-        return PortStatus::Unported;
+        return PortStatus::Failed;
     }
     DeleteFileW(JoinPath(offsetsDir_, key_ + kPortFailExt).c_str());
     rep.sourceVersion = sc.sourceVersion;
@@ -920,6 +980,7 @@ PortStatus Porter::Run(PortReport& rep) {
                      IsoTime(fail.at + kPortFailRetry);
         return PortStatus::Skipped;
     }
+    CleanStalePortTmp(req_.dataDir);
     DeleteTree(tmp_);
     if (!CreateDirs(tmp_)) {
         rep.detail = L"could not create " + std::wstring(kPortTmpDir);

@@ -525,10 +525,26 @@ void TestWriteRule() {
           L"write order: sidecar, then offsets");
     order.clear();
     std::wstring off2 = JoinPath(JoinPath(dir, L"missing-folder"), L"m_L.txt"), side2 = JoinPath(dir, L"m_L.ported");
-    Check(!WritePortedFiles(off2, "offsets", side2, "sidecar", &order) && order.size() == 1 && FileExists(side2) &&
+    Check(!WritePortedFiles(off2, "offsets", side2, "sidecar", &order) && order.size() == 1 && !FileExists(side2) &&
               !FileExists(off2),
-          L"write order: a failed offsets write leaves only the harmless sidecar");
+          L"write order: a failed offsets write takes its sidecar back");
     RemoveTree(dir);
+
+    // port-tmp: one folder per process; another running process's folder stays.
+    std::wstring data = TestDir(L"porttmp");
+    std::wstring root = JoinPath(data, kPortTmpDir);
+    Check(PortTmpDir(data) == JoinPath(root, std::to_wstring(GetCurrentProcessId())), L"port-tmp: per process");
+    std::wstring live = JoinPath(root, std::to_wstring(GetCurrentProcessId()));
+    std::wstring dead = JoinPath(root, L"4294967292");  // a pid no process has
+    std::wstring before = JoinPath(root, L"taskbar.dll_617E422B31A000");  // the layout before
+    WriteText(JoinPath(live, L"a.dll"), "x");
+    WriteText(JoinPath(dead, L"m_K\\a.dll.part"), "x");
+    WriteText(JoinPath(before, L"taskbar.dll"), "x");
+    CleanStalePortTmp(data);
+    auto gone = [](const std::wstring& p) { return GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES; };
+    Check(FileExists(JoinPath(live, L"a.dll")) && gone(dead) && gone(before),
+          L"port-tmp: a dead process's folder and old leftovers go, a running one's stays");
+    RemoveTree(data);
 
     OffsetsFile ported, real;
     ported.entries = {{L"a", 1}, {L"b", 2}, {L"c", std::nullopt}};
