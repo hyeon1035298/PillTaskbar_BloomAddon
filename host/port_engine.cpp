@@ -32,6 +32,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <cwchar>
 #include <map>
 #include <memory>
 #include <set>
@@ -80,6 +81,11 @@ uint64_t Hash64(const void* data, size_t n, uint64_t seed) {
     for (size_t k = 0; i + k < n; k++) tail |= (uint64_t)p[i + k] << (8 * k);
     return Mix(h ^ tail ^ 0xA5A5A5A5ull);
 }
+
+bool Stopped(const std::atomic<bool>* cancel) { return cancel && cancel->load(std::memory_order_relaxed); }
+
+// Checked every so many functions in the long loops.
+constexpr uint32_t kStopEvery = 512;
 
 H128 Hash128(const void* data, size_t n) { return {Hash64(data, n, 0x243F6A8885A308D3ull), Hash64(data, n, 0x13198A2E03707344ull)}; }
 
@@ -133,7 +139,8 @@ public:
     std::unordered_set<uint32_t> callTargets;  // targets of direct calls
     std::unordered_set<uint32_t> unchainedBegins;
 
-    bool Load(const std::wstring& path, std::wstring& error);
+    // expect: the build the caller means (port::Identity), checked before the analysis.
+    bool Load(const std::wstring& path, std::wstring& error, const Identity* expect, const std::atomic<bool>* cancel);
     const Func* At(uint32_t start) const {
         auto it = index.find(start);
         return it == index.end() ? nullptr : &funcs[it->second];
@@ -351,11 +358,27 @@ void Build::ReadRtti() {
     }
 }
 
-bool Build::Load(const std::wstring& path, std::wstring& error) {
+bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* expect,
+                 const std::atomic<bool>* cancel) {
     if (!pe.Load(path, error)) return false;
     if (pe.machine != IMAGE_FILE_MACHINE_AMD64) {
         error = L"not an x64 module";
         return false;
+    }
+    if (expect) {
+        wchar_t buf[200];
+        if ((expect->timeDateStamp && expect->timeDateStamp != pe.timeDateStamp) ||
+            (expect->sizeOfImage && expect->sizeOfImage != pe.sizeOfImage)) {
+            swprintf(buf, 200, L"the NEW module is another build (%08X %X, expected %08X %X)", pe.timeDateStamp,
+                     pe.sizeOfImage, expect->timeDateStamp, expect->sizeOfImage);
+            error = buf;
+            return false;
+        }
+        if (expect->hasPdbId &&
+            (!pe.hasCodeView || memcmp(pe.guid, expect->pdbGuid, 16) != 0 || pe.age != expect->pdbAge)) {
+            error = L"the NEW module is another build (its RSDS GUID or age differs)";
+            return false;
+        }
     }
     if (!ZYAN_SUCCESS(ZydisDecoderInit(&dec_, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
         error = L"Zydis did not start";
@@ -380,7 +403,12 @@ bool Build::Load(const std::wstring& path, std::wstring& error) {
             if (!chained_.count(v)) starts.insert(v);
         }
     }
+    uint32_t done = 0;
     for (auto& [b, e] : primary) {
+        if (++done % kStopEvery == 0 && Stopped(cancel)) {
+            error = L"stopped";
+            return false;
+        }
         if (!pe.IsExec(b) || !pe.Bytes(b, e - b)) continue;
         Func f;
         f.start = b;
@@ -402,6 +430,10 @@ bool Build::Load(const std::wstring& path, std::wstring& error) {
     std::unordered_set<uint32_t> have;
     for (auto& f : funcs) have.insert(f.start);
     for (uint32_t s : starts) {
+        if (++done % kStopEvery == 0 && Stopped(cancel)) {
+            error = L"stopped";
+            return false;
+        }
         if (have.count(s)) continue;
         auto it = std::upper_bound(srt.begin(), srt.end(), s);
         uint64_t end = it != srt.end() ? *it : (uint64_t)s + 64;
@@ -527,6 +559,25 @@ private:
 
 enum Tag : uint8_t { kTagAnchor = 1, kTagRefs = 2, kTagVtslot = 4, kTagReferrer = 8 };
 enum SrcKind : uint64_t { kSrcA = 1, kSrcV = 2, kSrcR = 3 };
+
+// The independent roots a pair's evidence grew from: a seed anchor, or a table matched by
+// RTTI or by slot content. Only "one or several" matters, so a set keeps its two
+// smallest ids; two such sets merge to two exactly when the full sets do.
+struct Roots {
+    uint64_t id[2] = {};
+    uint8_t n = 0;
+    void Add(uint64_t r) {
+        if ((n > 0 && id[0] == r) || (n > 1 && id[1] == r)) return;
+        if (n < 2) id[n++] = r;
+        else if (r < id[1]) id[1] = r;
+        else return;
+        if (n == 2 && id[0] > id[1]) std::swap(id[0], id[1]);
+    }
+    void Add(const Roots& o) {
+        for (uint8_t i = 0; i < o.n; i++) Add(o.id[i]);
+    }
+    size_t size() const { return n; }
+};
 uint64_t Src(SrcKind k, uint32_t id) { return (uint64_t)k << 32 | id; }
 uint64_t Key(uint32_t x, uint32_t y) { return (uint64_t)x << 32 | y; }
 
@@ -559,16 +610,21 @@ struct VtMapping {
 
 class Engine {
 public:
-    Engine(const Build& o, const Build& n, const std::vector<uint32_t>& vtNamed) : old_(o), new_(n) {
+    Engine(const Build& o, const Build& n, const std::vector<uint32_t>& vtNamed, const std::atomic<bool>* cancel)
+        : old_(o), new_(n), cancel_(cancel) {
         std::set<uint32_t> v(vtNamed.begin(), vtNamed.end());
         for (auto& [a, c] : old_.vtCol) v.insert(a);
         vtCands_.assign(v.begin(), v.end());
     }
 
     void Run();
+    bool stopped = false;  // Run ended early on the cancel flag; nothing it holds counts
 
     std::unordered_map<uint32_t, Cands> ev;
+    // Per pair: the sources a contradiction bans, and the roots its evidence grew from. A
+    // derived pair inherits the roots of what produced it.
     std::unordered_map<uint64_t, std::vector<uint64_t>> prov;
+    std::unordered_map<uint64_t, Roots> roots;
     std::unordered_map<uint32_t, uint32_t> anchors;
     std::unordered_map<uint32_t, VtMapping> vtMap;
     std::unordered_set<uint32_t> seeds, shared, finalBad, conflicted;
@@ -584,6 +640,11 @@ public:
         simCache_[k] = r;
         return r;
     }
+    Roots RootsOf(uint32_t x, uint32_t y) const {
+        static const Roots none;
+        auto it = roots.find(Key(x, y));
+        return it == roots.end() ? none : it->second;
+    }
     bool Single(uint32_t x, uint32_t& y, uint8_t& tags) const {
         auto it = ev.find(x);
         if (it == ev.end() || it->second.ys.size() != 1) return false;
@@ -598,6 +659,7 @@ public:
 private:
     const Build& old_;
     const Build& new_;
+    const std::atomic<bool>* cancel_;
     std::vector<uint32_t> vtCands_;
     std::unordered_set<uint32_t> banAnchor_, banVt_, banRef_;
     Similarity sim_;
@@ -622,6 +684,7 @@ private:
         ev[x].Add(y) |= tag;
         InsertSorted(prov[Key(x, y)], src);
     }
+    void AddRoots(uint32_t x, uint32_t y, const Roots& src) { roots[Key(x, y)].Add(src); }
 };
 
 bool Engine::ByRtti(uint32_t v, uint32_t& to) const {
@@ -673,8 +736,14 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) 
         if (Single(so[k], y, t)) known.emplace_back(k, y);
     }
     if (known.size() < 2) return false;
+    // Every NEW table that agrees with each known slot inside its own length. One of the
+    // OLD length is a candidate. One of another length is a rival: the real table may
+    // have grown or shrunk while a base or derived class's table kept the length and the
+    // shared slots, and the known slots cannot tell the two apart. Any table longer than
+    // the first known slot holds its target there, so its pointers find them all.
     auto [k0, y0] = known[0];
     std::set<uint32_t> cands;
+    bool rival = false;
     auto it = new_.ptrAt.find(y0);
     if (it != new_.ptrAt.end())
         for (uint32_t q : it->second) {
@@ -682,12 +751,20 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) 
             uint32_t p = q - 8 * k0;
             if (!new_.VtStart(p)) continue;
             const auto& sn = new_.VtSlots(p);
-            if (sn.size() != so.size()) continue;
+            if (sn.size() <= k0) continue;  // q sits in a later table
             bool all = true;
-            for (auto& [k, y] : known) all = all && sn[k] == y;
-            if (all) cands.insert(p);
+            for (auto& [k, y] : known) {
+                if (k >= sn.size()) break;
+                if (sn[k] != y) {
+                    all = false;
+                    break;
+                }
+            }
+            if (!all) continue;
+            if (sn.size() == so.size()) cands.insert(p);
+            else rival = true;
         }
-    if (cands.size() != 1) return false;
+    if (cands.size() != 1 || rival) return false;
     to = *cands.begin();
     if (knownOut)
         for (auto& [k, y] : known) knownOut->push_back(so[k]);
@@ -723,6 +800,7 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         if (!banAnchor_.count(o)) anchors[o] = n;
     ev.clear();
     prov.clear();
+    roots.clear();
     vtMap.clear();
     d2Known.clear();
     std::unordered_set<uint32_t> doneAnchor, doneVt;
@@ -733,6 +811,10 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         return s;
     };
     for (int rounds = 1;; rounds++) {
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
+        }
         auto before = std::make_tuple(anchors.size(), total(), vtMap.size());
         std::vector<std::pair<uint32_t, uint32_t>> fresh;
         for (auto& [o, n] : anchors)
@@ -740,11 +822,19 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         std::sort(fresh.begin(), fresh.end());
         for (auto& [o, n] : fresh) {
             Add(o, n, kTagAnchor, Src(kSrcA, o));
+            // A seed is a root of its own; a derived anchor passes on the roots it grew from.
+            if (seedMap.count(o)) roots[Key(o, n)].Add(Src(kSrcA, o));
+            const Roots from = RootsOf(o, n);
             RefPairs(*old_.At(o), *new_.At(n), pairs);
             for (auto& [x, y] : pairs) {
                 if (x == kNoTarget || y == kNoTarget) continue;
                 Add(x, y, kTagRefs, Src(kSrcA, o));
+                AddRoots(x, y, from);
             }
+        }
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
         }
         for (uint32_t v : vtCands_) {
             if (vtMap.count(v) || banVt_.count(v)) continue;
@@ -781,10 +871,19 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
             std::vector<uint64_t> srcs{Src(kSrcV, v)};
             auto p = prov.find(Key(v, m.to));
             if (p != prov.end()) MergeInto(srcs, p->second);
+            // RTTI and slot content are roots of their own; code references only pass on
+            // the roots of the anchors that hold them.
+            Roots rs = RootsOf(v, m.to);
+            if (m.rtti || m.slots) rs.Add(Src(kSrcV, v));
             for (size_t k = 0; k < so.size(); k++) {
                 ev[so[k]].Add(sn[k]) |= kTagVtslot;
                 MergeInto(prov[Key(so[k], sn[k])], srcs);
+                AddRoots(so[k], sn[k], rs);
             }
+        }
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
         }
         {
             std::vector<std::pair<uint32_t, uint32_t>> singles;
@@ -808,6 +907,8 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
                     auto& dst = prov[Key(t, t2)];
                     auto p = prov.find(Key(x, y));
                     if (p != prov.end()) MergeInto(dst, p->second);
+                    // The referrer adds no root: it only follows what x -> y stands on.
+                    AddRoots(t, t2, RootsOf(x, y));
                 }
             }
         }
@@ -816,7 +917,9 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
             uint32_t y = c.ys[0].first;
             const Func* fo = old_.At(x);
             const Func* fn = new_.At(y);
-            if (fo && fn && fo->tok == fn->tok) anchors[x] = y;
+            // Only a body unique in both builds: one candidate behind a common body (a thunk,
+            // a getter) may be any of its copies.
+            if (fo && fn && fo->tok == fn->tok && old_.TokCount(*fo) == 1 && new_.TokCount(*fn) == 1) anchors[x] = y;
         }
         auto after = std::make_tuple(anchors.size(), total(), vtMap.size());
         if (after == before || rounds > 30) break;
@@ -858,12 +961,17 @@ void Engine::Run() {
         if (m != new_.byTok.end() && m->second.size() == 1 && old_.TokCount(f) == 1) a0[f.start] = m->second[0];
     }
     auto pruned = Prune(a0);
+    if (Stopped(cancel_)) {
+        stopped = true;
+        return;
+    }
     std::unordered_map<uint32_t, uint32_t> seedMap;
     for (auto& [o, n] : pruned)
         if (old_.ShapeCount(*old_.At(o)) == 1 && new_.ShapeCount(*new_.At(n)) == 1) seedMap[o] = n;
     for (auto& [o, n] : seedMap) seeds.insert(o);
     for (int outer = 1;; outer++) {
         Propagate(seedMap);
+        if (stopped) return;
         if (outer > 12) break;
         auto bad = Contradictions();
         finalBad = bad;
@@ -898,11 +1006,13 @@ bool HasTemplateMarks(const std::wstring& n) {
 }
 
 // A vftable name without its own decoration: "const C::`vftable'{for `I'}" -> "C" (and "I").
+// The name always starts with "const "; a later one belongs to a template argument
+// ("class std::vector<int> const &").
 bool VftableClass(const std::wstring& n, std::wstring& cls, std::wstring& rest) {
     size_t p = n.find(L"::`vftable'");
     if (p == std::wstring::npos) return false;
-    size_t s = n.rfind(L"const ", p);
-    cls = n.substr(s == std::wstring::npos ? 0 : s + 6, p - (s == std::wstring::npos ? 0 : s + 6));
+    size_t s = n.compare(0, 6, L"const ") == 0 ? 6 : 0;
+    cls = n.substr(s, p - s);
     rest = n.substr(p + 11);
     return true;
 }
@@ -933,12 +1043,29 @@ std::wstring FunctionClass(const std::wstring& n) {
     return last == std::wstring::npos ? std::wstring() : head.substr(0, last);
 }
 
-// WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...>): one instance of
-// the same code and data per feature, so references cannot tell one feature from another.
+// "Feature_<number>_" in a name: WIL's per-feature globals and helpers
+// (Feature_<n>__descriptor, Feature_<n>__private_cppFeatureState, ...).
+bool PerFeatureName(const std::wstring& n) {
+    for (size_t p = n.find(L"Feature_"); p != std::wstring::npos; p = n.find(L"Feature_", p + 1)) {
+        size_t e = p + 8;
+        while (e < n.size() && n[e] >= L'0' && n[e] <= L'9') e++;
+        if (e > p + 8 && e < n.size() && n[e] == L'_') return true;
+    }
+    return false;
+}
+
+// WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...> and the
+// Feature_<n>_ names): one instance of the same code and data per feature, so references
+// cannot tell one feature from another.
 bool NeverPorted(const std::wstring& n) {
     return n.find(L"wil::details::FeatureImpl<") != std::wstring::npos ||
-           n.find(L"__WilFeatureTraits_") != std::wstring::npos;
+           n.find(L"__WilFeatureTraits_") != std::wstring::npos || PerFeatureName(n);
 }
+
+// MSVC names a lambda's type by a hash of where it sits ("<lambda_3c46...>"), and a
+// rebuild renames it whenever that context changes, even when its code stays the same:
+// the evidence can find the code while the NEW build has no such name.
+bool LambdaName(const std::wstring& n) { return n.find(L"<lambda_") != std::wstring::npos; }
 
 // A data name is "<type> <name>": only the name part says whether the data belongs to a
 // template (a static member of one, or a local static of a template function).
@@ -980,10 +1107,12 @@ int Bits(uint8_t t) { return __builtin_popcount(t); }
 
 class Acceptor {
 public:
-    Acceptor(const Build& o, const Build& n, Engine& e, const std::unordered_map<uint32_t, std::vector<std::wstring>>& names)
-        : old_(o), new_(n), eng_(e), names_(names) {}
+    Acceptor(const Build& o, const Build& n, Engine& e,
+             const std::unordered_map<uint32_t, std::vector<std::wstring>>& names, const std::atomic<bool>* cancel)
+        : old_(o), new_(n), eng_(e), names_(names), cancel_(cancel) {}
 
     void Decide();
+    bool stopped = false;  // Decide ended early on the cancel flag
     const Verdict* Of(uint32_t oldRva) const {
         auto it = verdicts_.find(oldRva);
         return it == verdicts_.end() ? nullptr : &it->second;
@@ -994,6 +1123,7 @@ private:
     const Build& new_;
     Engine& eng_;
     const std::unordered_map<uint32_t, std::vector<std::wstring>>& names_;
+    const std::atomic<bool>* cancel_;
     std::unordered_map<uint32_t, Verdict> verdicts_;
     std::unordered_map<uint32_t, uint32_t> vtAccepted_;     // OLD table -> NEW table
     std::unordered_set<uint32_t> newSlotTargets_;            // NEW functions in accepted tables
@@ -1021,12 +1151,15 @@ private:
         return AnyName(a, [](const std::wstring& n) { return n.find(L"`vftable'") != std::wstring::npos; });
     }
     bool TemplateName(uint32_t a) const;
+    bool R8Roots(uint32_t a, uint32_t y) const;
     void Vftables();
     void Functions();
     void Globals();
     void NeverPortedNames();
     void Collisions();
+    void Thunks();
     bool OwnSlotProof(uint32_t a, uint32_t y) const;
+    bool CalleeContradicts(const Func& fo, const Func& fn) const;
     const std::vector<uint32_t>& RefBy(uint32_t x) const;
     bool StillFolded(uint32_t a, uint32_t y) const;
     bool OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) const;
@@ -1046,6 +1179,16 @@ public:
         return old_.pe.IsExec(a) && old_.At(a) && (StillFolded(a, y) || OwnFoldedSlot(name, a, y));
     }
 };
+
+// R8: references that grew from two independent roots, or a reference in a seed itself.
+bool Acceptor::R8Roots(uint32_t a, uint32_t y) const {
+    if (eng_.RootsOf(a, y).size() >= 2) return true;
+    auto p = eng_.prov.find(Key(a, y));
+    if (p != eng_.prov.end())
+        for (uint64_t src : p->second)
+            if ((src >> 32) == kSrcA && eng_.seeds.count((uint32_t)src)) return true;
+    return false;
+}
 
 bool Acceptor::TemplateName(uint32_t a) const {
     auto it = names_.find(a);
@@ -1198,6 +1341,21 @@ void Acceptor::Vftables() {
         }
 }
 
+// No contradiction for a same body: each direct call or jump out of it goes, in NEW, to
+// the one candidate its OLD target has. An overload whose signature changed can keep its
+// masked body while what it calls moves to another function.
+bool Acceptor::CalleeContradicts(const Func& fo, const Func& fn) const {
+    if (fo.refs.size() != fn.refs.size()) return true;
+    for (size_t i = 0; i < fo.refs.size(); i++) {
+        const Ref& r = fo.refs[i];
+        if ((r.kind != kCall && r.kind != kJmp) || r.tgt == kNoTarget || r.tgt == fo.start) continue;
+        uint32_t c;
+        uint8_t t;
+        if (eng_.Single(r.tgt, c, t) && c != fn.refs[i].tgt) return true;
+    }
+    return false;
+}
+
 bool Acceptor::OwnSlotProof(uint32_t a, uint32_t y) const {
     auto it = names_.find(a);
     if (it == names_.end()) return false;
@@ -1293,7 +1451,12 @@ bool Acceptor::OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) c
 
 // R1-R6 and R9 for functions.
 void Acceptor::Functions() {
+    uint32_t done = 0;
     for (auto& fo : old_.funcs) {
+        if (++done % kStopEvery == 0 && Stopped(cancel_)) {
+            stopped = true;
+            return;
+        }
         uint32_t a = fo.start;
         if (!names_.count(a)) continue;
         Verdict vd;
@@ -1342,13 +1505,20 @@ void Acceptor::Functions() {
                 verdicts_[a] = vd;
                 continue;
             }
+            if (CalleeContradicts(fo, *fn)) {
+                vd.evidence = L"same body, but a call goes elsewhere than its target maps (" + kinds + L")";
+                verdicts_[a] = vd;
+                continue;
+            }
         }
         // Proof: the masked body is identical and unique, and its shape is unique, in both builds.
         bool proof = same && old_.TokCount(fo) == 1 && new_.TokCount(*fn) == 1 && old_.ShapeCount(fo) == 1 &&
                      new_.ShapeCount(*fn) == 1;
-        // R2: two independent kinds of evidence, or the proof. Referrer alone never decides.
-        if (Bits(tags) < 2 && !proof) {
-            vd.evidence = L"R2 one kind of evidence (" + kinds + L")";
+        // R2: two kinds of evidence that grew from two independent roots, or the proof.
+        // Referrer alone never decides.
+        if ((Bits(tags) < 2 || eng_.RootsOf(a, y).size() < 2) && !proof) {
+            vd.evidence = std::wstring(Bits(tags) < 2 ? L"R2 one kind of evidence (" : L"R2 one root of evidence (") +
+                          kinds + L")";
             verdicts_[a] = vd;
             continue;
         }
@@ -1471,6 +1641,8 @@ void Acceptor::Globals() {
                 // R3: references are the only evidence for data, and no structure proves
                 // one instance of a template's data from another.
                 vd.evidence = L"R3 template name, data has no structural proof (refs)";
+            } else if (!R8Roots(a, y)) {
+                vd.evidence = L"R8 one root of evidence (refs)";
             } else {
                 vd.outcome = Outcome::Ported;
                 vd.rva = y;
@@ -1492,17 +1664,52 @@ void Acceptor::Collisions() {
 }
 
 void Acceptor::NeverPortedNames() {
-    for (auto& [a, vd] : verdicts_)
-        if (vd.outcome == Outcome::Ported && AnyName(a, NeverPorted))
-            vd = {Outcome::Ambiguous, 0, L"WIL feature state is never ported"};
+    for (auto& [a, vd] : verdicts_) {
+        if (vd.outcome != Outcome::Ported) continue;
+        if (AnyName(a, NeverPorted)) vd = {Outcome::Ambiguous, 0, L"WIL feature state is never ported"};
+        else if (AnyName(a, LambdaName)) vd = {Outcome::Ambiguous, 0, L"a lambda's name is never ported"};
+    }
+}
+
+// An adjustor or vtordisp thunk ("[thunk]:C::f`adjustor{8}'") only moves this and jumps
+// to C::f: its name is C::f's, so it is ported only with C::f, and the NEW thunk must
+// jump to where C::f went.
+void Acceptor::Thunks() {
+    for (auto& [a, vd] : verdicts_) {
+        if (vd.outcome != Outcome::Ported || !AnyName(a, [](const std::wstring& n) {
+                return n.compare(0, 8, L"[thunk]:") == 0;
+            }))
+            continue;
+        const Func* fo = old_.At(a);
+        const Func* fn = new_.At(vd.rva);
+        if (!fo || !fn) continue;
+        auto onlyJump = [](const Func& f) -> const Ref* {
+            const Ref* j = nullptr;
+            for (auto& r : f.refs)
+                if (r.kind == kJmp) {
+                    if (j) return nullptr;
+                    j = &r;
+                }
+            return j;
+        };
+        const Ref* jo = onlyJump(*fo);
+        const Ref* jn = onlyJump(*fn);
+        if (!jo || jo->tgt == kNoTarget) continue;  // not one tail jump: no target to follow
+        auto t = verdicts_.find(jo->tgt);
+        if (!jn || t == verdicts_.end() || t->second.outcome != Outcome::Ported || t->second.rva != jn->tgt)
+            vd = {Outcome::Ambiguous, 0,
+                  L"a thunk is ported only with the function it jumps to (" + vd.evidence + L")"};
+    }
 }
 
 void Acceptor::Decide() {
     Vftables();
     Functions();
+    if (stopped) return;
     Globals();
     NeverPortedNames();
     Collisions();
+    Thunks();
 }
 
 }  // namespace
@@ -1511,25 +1718,37 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
     auto t0 = std::chrono::steady_clock::now();
     out.clear();
     auto ob = std::make_unique<Build>(), nb = std::make_unique<Build>();
-    if (!ob->Load(in.oldDll, error)) return false;
-    if (!nb->Load(in.newDll, error)) return false;
+    // NEW first: a build other than the one asked for fails before any analysis.
+    if (!nb->Load(in.newDll, error, &in.expectNew, in.cancel)) return false;
+    if (!ob->Load(in.oldDll, error, nullptr, in.cancel)) return false;
     auto t1 = std::chrono::steady_clock::now();
     stats.functionsOld = (uint32_t)ob->funcs.size();
     stats.functionsNew = (uint32_t)nb->funcs.size();
 
-    std::unordered_map<std::wstring, uint32_t> byName;
+    std::unordered_map<std::wstring, uint32_t> byName, firstAt;
     std::unordered_map<uint32_t, std::vector<std::wstring>> names;
     std::vector<uint32_t> vtNamed;
+    // A name the OLD PDB has at more than one address (two instances of one name, such as
+    // classes in different anonymous namespaces): no single OLD function to port.
+    std::unordered_set<std::wstring> several;
+    for (auto& s : in.oldSymbols) {
+        auto [f, fresh] = firstAt.emplace(s.name, s.rva);
+        if (!fresh && f->second != s.rva) several.insert(s.name);
+    }
     for (auto& s : in.oldSymbols) {
         if (s.rva >= ob->pe.sizeOfImage) continue;
         if (!byName.emplace(s.name, s.rva).second) continue;
         names[s.rva].push_back(s.name);
         if (s.name.find(L"`vftable'") != std::wstring::npos) vtNamed.push_back(s.rva);
     }
-    Engine eng(*ob, *nb, vtNamed);
+    Engine eng(*ob, *nb, vtNamed, in.cancel);
     eng.Run();
-    Acceptor acc(*ob, *nb, eng, names);
-    acc.Decide();
+    Acceptor acc(*ob, *nb, eng, names, in.cancel);
+    if (!eng.stopped) acc.Decide();
+    if (eng.stopped || acc.stopped) {
+        error = L"stopped";
+        return false;
+    }
     auto t2 = std::chrono::steady_clock::now();
 
     for (auto& w : in.wanted) {
@@ -1539,6 +1758,9 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
         if (it == byName.end()) {
             r.outcome = Outcome::Absent;
             r.evidence = L"not in the OLD PDB";
+        } else if (several.count(w.name)) {
+            r.outcome = Outcome::Ambiguous;
+            r.evidence = L"several OLD addresses";
         } else if (const Verdict* vd = acc.Of(it->second)) {
             r.outcome = vd->outcome;
             r.rva = vd->outcome == Outcome::Ported ? vd->rva : 0;

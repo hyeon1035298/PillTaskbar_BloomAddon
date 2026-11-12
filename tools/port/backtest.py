@@ -88,8 +88,8 @@ def template_name(n):
     i = n.find("::`vftable'")
     if i < 0:
         return marks(n)
-    s = n.rfind("const ", 0, i)
-    cls = n[s + 6 if s >= 0 else 0:i]
+    # only the leading "const ": a later one belongs to a template argument
+    cls = n[6 if n.startswith("const ") else 0:i]
     rest = n[i + 11:]
     f = rest.find("{for `")
     iface = rest[f + 6:] if f >= 0 else ""
