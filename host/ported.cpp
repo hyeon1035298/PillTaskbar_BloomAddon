@@ -10,7 +10,9 @@
 // clang-format on
 
 #include <algorithm>
+#include <atomic>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -114,6 +116,17 @@ void DeleteTree(const std::wstring& dir) {
     RemoveDirectoryW(dir.c_str());
 }
 
+bool Readable(const std::wstring& path) {
+    Handle f(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, 0, nullptr));
+    return (bool)f;
+}
+
+bool Running(DWORD pid) {
+    Handle p(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
+    return p && WaitForSingleObject(p.get(), 0) == WAIT_TIMEOUT;
+}
+
 }  // namespace
 
 std::wstring ModuleKey(const std::wstring& module, const CodeView& cv) {
@@ -165,6 +178,18 @@ bool ParsePortSources(const std::string& utf8, PortSources& out) {
     }
     out = std::move(s);
     return true;
+}
+
+bool ReadPortSources(const std::wstring& exeDir, PortSources& out) {
+    out = PortSources{};
+    std::string text;
+    if (!ReadFileBytes(JoinPath(exeDir, kPortSources), text)) return true;
+    return ParsePortSources(text, out);
+}
+
+bool SourceDenied(const PortSources& src, const std::wstring& module, const std::wstring& key) {
+    std::wstring mod = Lower(module), k = Upper(key);
+    return std::any_of(src.deny.begin(), src.deny.end(), [&](auto& d) { return d.first == mod && d.second == k; });
 }
 
 std::vector<Candidate> LocalCandidates(const std::wstring& offsetsDir, const std::wstring& module,
@@ -225,9 +250,7 @@ std::vector<Candidate> FilterCandidates(const std::vector<Candidate>& all, const
     for (auto& c : all) {
         if (!c.version.valid || !c.version.SameBranch(newVersion) || c.version.Value() >= newVersion.Value())
             continue;
-        bool denied = std::any_of(src.deny.begin(), src.deny.end(),
-                                  [&](auto& d) { return d.first == mod && d.second == c.key; });
-        if (denied) continue;
+        if (SourceDenied(src, mod, c.key)) continue;
         out.push_back(c);
     }
     std::stable_sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.version.Value() > b.version.Value(); });
@@ -262,6 +285,7 @@ std::string FormatSidecar(const Sidecar& s) {
     t += L"host=" + s.hostVersion + L"\n";
     t += L"source=" + s.sourceVersion + L" " + s.sourceKey + L"\n";
     t += L"sourceKind=" + s.sourceKind + L"\n";
+    t += L"sources=" + s.sources + L"\n";
     t += L"date=" + IsoTime(s.date) + L"\n";
     t += L"lastProbe=" + IsoTime(s.lastProbe) + L"\n";
     // name=<outcome>\t<rva hex or empty>\t<evidence>\t<symbol>: symbols carry '=' and
@@ -290,6 +314,8 @@ bool ParseSidecar(const std::string& utf8, Sidecar& out) {
             }
         } else if (k == L"sourceKind") {
             s.sourceKind = v;
+        } else if (k == L"sources") {
+            s.sources = v;
         } else if (k == L"date") {
             ParseIsoTime(v, s.date);
         } else if (k == L"lastProbe") {
@@ -323,6 +349,32 @@ bool ParseSidecar(const std::string& utf8, Sidecar& out) {
 
 bool ProbeDue(const Sidecar& s, uint64_t now) {
     return s.lastProbe == 0 || now < s.lastProbe || now - s.lastProbe >= kPortProbeInterval;
+}
+
+std::wstring PortedStale(const std::wstring& offsetsDir, const std::wstring& key, const std::wstring& module,
+                         const PortSources& src) {
+    // Left behind when a quarantine could not delete them (real offsets never are:
+    // writing them removes the record).
+    if (IsQuarantined(offsetsDir, key)) return L"they crashed explorer before";
+    std::wstring sidecarPath = JoinPath(offsetsDir, key + kPortedExt);
+    if (!FileExists(sidecarPath)) return {};  // real offsets
+    std::string text;
+    Sidecar sc;
+    if (!ReadFileBytes(sidecarPath, text) || !ParseSidecar(text, sc)) return L"its sidecar does not parse";
+    if (sc.engine != port::kEngineVersion)
+        return Format(L"engine %d ported them, this host has engine %d", sc.engine, port::kEngineVersion);
+    if (SourceDenied(src, module, sc.sourceKey))
+        return L"their source build " + sc.sourceKey + L" is denied in " + kPortSources;
+    return {};
+}
+
+bool DropPorted(const std::wstring& offsetsDir, const std::wstring& key) {
+    // The offsets first: alone, a sidecar only makes the next start look again.
+    std::wstring off = JoinPath(offsetsDir, key + L".txt");
+    if (!DeleteFileW(off.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
+    if (FileExists(off)) return false;
+    DeleteFileW(JoinPath(offsetsDir, key + kPortedExt).c_str());
+    return true;
 }
 
 // --- the module-write rule ---
@@ -389,7 +441,10 @@ bool WritePortedFiles(const std::wstring& offsetsPath, const std::string& offset
     // The sidecar first: offsets without it would pass for real ones.
     if (!WriteFileAtomic(sidecarPath, sidecar)) return false;
     if (order) order->push_back(sidecarPath);
-    if (!WriteFileAtomic(offsetsPath, offsets)) return false;
+    if (!WriteFileAtomic(offsetsPath, offsets)) {
+        DeleteFileW(sidecarPath.c_str());
+        return false;
+    }
     if (order) order->push_back(offsetsPath);
     return true;
 }
@@ -495,6 +550,7 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
     PortGuard g;
     if (!ReadGuard(dataDir, g)) return done;
     std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
+    std::vector<std::wstring> keep;  // offsets that could not be deleted stay guarded
     for (auto& key : g.keys) {
         if (key.find_first_of(L"\\/:") != std::wstring::npos) continue;
         std::wstring sidecarPath = JoinPath(offsetsDir, key + kPortedExt);
@@ -508,16 +564,77 @@ std::vector<std::wstring> QuarantineGuarded(const std::wstring& dataDir, const s
         std::wstring q = L"reason=" + NoTabs(reason) + L"\nat=" + IsoTime(now) + L"\nsource=" + source +
                          Format(L"\nengine=%d\n", port::kEngineVersion);
         WriteFileAtomic(JoinPath(offsetsDir, key + kQuarantinedExt), Narrow(q));
-        DeleteFileW(JoinPath(offsetsDir, key + L".txt").c_str());
-        DeleteFileW(sidecarPath.c_str());
+        if (!DropPorted(offsetsDir, key)) keep.push_back(key);
         done.push_back(key);
     }
-    SetGuard(dataDir, {}, now);
+    SetGuard(dataDir, keep, now);
     return done;
 }
 
 bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key) {
     return FileExists(JoinPath(offsetsDir, key + kQuarantinedExt));
+}
+
+std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::vector<std::wstring>& keys,
+                                        const std::wstring& why, uint64_t now) {
+    std::vector<std::wstring> gone;
+    std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
+    for (auto& key : keys) {
+        if (key.find_first_of(L"\\/:") != std::wstring::npos) continue;
+        std::string text;
+        Sidecar sc;
+        // Real offsets (no sidecar) are never touched.
+        if (!ReadFileBytes(JoinPath(offsetsDir, key + kPortedExt), text) || !ParseSidecar(text, sc)) continue;
+        PortFail f{port::kEngineVersion, addon::kVersion, sc.sources, now, why};
+        WriteFileAtomic(JoinPath(offsetsDir, key + kPortFailExt), FormatPortFail(f));
+        if (DropPorted(offsetsDir, key)) gone.push_back(key);
+    }
+    PortGuard g;
+    if (ReadGuard(dataDir, g)) {
+        std::vector<std::wstring> left;
+        for (auto& k : g.keys)
+            if (std::find(gone.begin(), gone.end(), k) == gone.end()) left.push_back(k);
+        if (left.size() != g.keys.size()) SetGuard(dataDir, left, now);
+    }
+    return gone;
+}
+
+bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine) {
+    std::wstring path = JoinPath(offsetsDir, key + kQuarantinedExt);
+    if (!FileExists(path)) return false;
+    std::string text;
+    if (!ReadFileBytes(path, text)) return true;
+    for (auto& [k, v] : KeyValues(text))
+        if (k == L"engine") return _wtoi(v.c_str()) == engine;
+    return true;
+}
+
+// --- port-tmp ---
+
+std::wstring PortTmpDir(const std::wstring& dataDir) {
+    return JoinPath(JoinPath(dataDir, kPortTmpDir), std::to_wstring(GetCurrentProcessId()));
+}
+
+void CleanStalePortTmp(const std::wstring& dataDir) {
+    std::wstring root = JoinPath(dataDir, kPortTmpDir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(root, L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        std::wstring p = JoinPath(root, n);
+        bool pidDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                      !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && n.size() <= 10 &&
+                      std::all_of(n.begin(), n.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
+        if (pidDir && Running((DWORD)wcstoul(n.c_str(), nullptr, 10))) continue;
+        // A dead process's folder, or what a host before per-process folders left.
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            DeleteTree(p);
+        else
+            DeleteFileW(p.c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }
 
 // --- verifying a downloaded old DLL ---
@@ -617,12 +734,68 @@ bool FileSha256(const std::wstring& path, std::wstring& hex) {
 
 namespace {
 
+// How long a stopped port waits for its worker before leaving it to end on its own.
+constexpr DWORD kWorkerStopWaitMs = 5000;
+std::atomic<bool> g_workerLeftRunning{false};
+
+// One piece of work for the worker thread. It holds everything the worker touches:
+// the caller's own state is never shared, so a worker left running after a stop
+// cannot reach freed memory.
+struct WorkerJob {
+    std::function<void(const std::atomic<bool>& cancel)> work;
+    std::atomic<bool> cancel{false};
+};
+
+DWORD WINAPI WorkerMain(void* arg) {
+    std::shared_ptr<WorkerJob> job = std::move(*(std::shared_ptr<WorkerJob>*)arg);
+    delete (std::shared_ptr<WorkerJob>*)arg;
+    job->work(job->cancel);
+    return 0;
+}
+
+}  // namespace
+
+bool RunOnWorker(std::function<void(const std::atomic<bool>& cancel)> work, const IdleFn& idle) {
+    auto job = std::make_shared<WorkerJob>();
+    job->work = std::move(work);
+    auto* arg = new std::shared_ptr<WorkerJob>(job);
+    Handle thread(CreateThread(nullptr, 0, WorkerMain, arg, 0, nullptr));
+    if (!thread) {  // no thread to be had: do it here, as before
+        delete arg;
+        job->work(job->cancel);
+        return true;
+    }
+    HANDLE h = thread.get();
+    while (true) {
+        DWORD r = idle ? MsgWaitForMultipleObjects(1, &h, FALSE, 100, QS_ALLINPUT) : WaitForSingleObject(h, INFINITE);
+        if (r == WAIT_OBJECT_0) return true;
+        if (r == WAIT_FAILED) Sleep(50);  // should not happen, but never spin
+        if (idle && !idle()) break;
+    }
+    // Stop asked for. This is the one place the engine's cancel flag is set: the work
+    // hands &cancel to port::Input once the engine takes one.
+    job->cancel = true;
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < kWorkerStopWaitMs) {
+        if (MsgWaitForMultipleObjects(1, &h, FALSE, 100, QS_ALLINPUT) == WAIT_OBJECT_0) return false;
+        idle();  // keeps the window answering; the stop stands whatever it says
+    }
+    Log(L"the porting worker did not end within %lu ms after the stop; leaving it", kWorkerStopWaitMs);
+    g_workerLeftRunning = true;
+    return false;
+}
+
+namespace {
+
 class Porter {
 public:
     explicit Porter(const PortRequest& r)
-        : req_(r), offsetsDir_(JoinPath(r.dataDir, addon::kOffsetsDir)), tmp_(JoinPath(r.dataDir, kPortTmpDir)),
+        : req_(r), offsetsDir_(JoinPath(r.dataDir, addon::kOffsetsDir)), tmp_(PortTmpDir(r.dataDir)),
           key_(ModuleKey(r.module.name, r.cv)) {}
-    ~Porter() { DeleteTree(tmp_); }
+    ~Porter() {
+        DeleteTree(tmp_);
+        RemoveDirectoryW(DirName(tmp_).c_str());  // port-tmp itself, once empty
+    }
 
     PortStatus Run(PortReport& rep);
 
@@ -631,7 +804,8 @@ private:
     // or a Microsoft signature.
     PortStatus GetOldDll(Candidate& c, std::wstring& path, std::wstring& why);
     PortStatus GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wstring& why);
-    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, std::wstring& why);
+    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, uint64_t maxBytes,
+                     std::wstring& why);
     PortStatus TryOne(Candidate& c, PortReport& rep, std::wstring& why);
     void RememberFailure(const std::wstring& why);
 
@@ -644,7 +818,7 @@ private:
 
 // why is set only when downloads are off.
 PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
-                         std::wstring& why) {
+                         uint64_t maxBytes, std::wstring& why) {
     if (req_.noDownload) {
         why = file + L"/" + key + L": not cached and downloads are off";
         return PortStatus::Failed;
@@ -652,7 +826,7 @@ PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, cons
     CreateDirs(DirName(dest));
     uint64_t bytes = 0;
     uint64_t before = req_.downloaded ? *req_.downloaded : 0;
-    Download d = DownloadSymbolFile(file, key, dest, before, req_.progress, bytes);
+    Download d = DownloadSymbolFile(file, key, dest, maxBytes, before, req_.progress, bytes);
     if (req_.downloaded) *req_.downloaded += bytes;
     switch (d) {
         case Download::Ok: return PortStatus::Written;
@@ -670,7 +844,12 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
     }
     std::wstring file = Lower(req_.module.name);
     path = JoinPath(JoinPath(tmp_, file + L"_" + c.key), file);
-    PortStatus st = Fetch(file, c.key, path, why);
+    DWORD stamp = 0, size = 0;
+    if (!ParseBinaryKey(c.key, stamp, size)) {
+        why = c.key + L": not a binary key";
+        return PortStatus::Unported;
+    }
+    PortStatus st = Fetch(file, c.key, path, DllDownloadCap(size), why);
     if (st != PortStatus::Written) {
         if (why.empty())
             why = c.key + (st == PortStatus::Unported ? L": the old DLL is not on the symbol server" : L": download failed");
@@ -678,21 +857,52 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
     }
     CodeView cv;
     if (!ReadCodeView(path, cv) || BinaryKey(cv.timeDateStamp, cv.sizeOfImage) != c.key) {
+        // A file just downloaded can be unreadable for local reasons (a scanner
+        // holding it): no verdict on the build.
+        if (!Readable(path)) {
+            why = c.key + L": could not read the downloaded DLL";
+            return PortStatus::Failed;
+        }
         why = c.key + L": the downloaded DLL is not that build";
         return PortStatus::Unported;
     }
-    std::wstring how;
-    if (!c.sha256.empty()) {
-        std::wstring sha;
-        if (!FileSha256(path, sha) || sha != c.sha256) {
-            why = c.key + L": the downloaded DLL does not have the SHA-256 port-sources.txt gives";
-            return PortStatus::Unported;
-        }
-        how = L"SHA-256 from port-sources.txt";
-    } else if (!SignatureValid(path, how)) {
-        why = c.key + L": the downloaded DLL has " + how;
+    // Hashing or a catalog lookup can take a while: on the worker.
+    struct Check {
+        std::wstring path, sha256;  // in
+        bool read = false, ok = false;
+        std::wstring how;
+    };
+    auto chk = std::make_shared<Check>();
+    chk->path = path;
+    chk->sha256 = c.sha256;
+    bool done = RunOnWorker(
+        [chk](const std::atomic<bool>&) {
+            if (chk->sha256.empty()) {
+                chk->read = true;
+                chk->ok = SignatureValid(chk->path, chk->how);
+                return;
+            }
+            std::wstring sha;
+            chk->read = FileSha256(chk->path, sha);
+            chk->ok = chk->read && sha == chk->sha256;
+            chk->how = L"SHA-256 from port-sources.txt";
+        },
+        req_.idle);
+    if (!done) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
+    }
+    if (!chk->read) {
+        why = c.key + L": could not read the downloaded DLL";
+        return PortStatus::Failed;
+    }
+    if (!chk->ok) {
+        why = c.key + (c.sha256.empty() ? L": the downloaded DLL has " + chk->how
+                                        : std::wstring(L": the downloaded DLL does not have the SHA-256 ") +
+                                              kPortSources + L" gives");
         return PortStatus::Unported;
     }
+    std::wstring how = chk->how;
     FileVersion v;
     if (!ReadFileVersion(path, v) || (c.version.valid && v.Value() != c.version.Value())) {
         why = c.key + L": the downloaded DLL's version is not the listed one";
@@ -720,7 +930,7 @@ PortStatus Porter::GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wst
         return PortStatus::Written;
     }
     path = JoinPath(JoinPath(tmp_, oldCv.pdbName + L"_" + id), oldCv.pdbName);
-    PortStatus st = Fetch(oldCv.pdbName, id, path, why);
+    PortStatus st = Fetch(oldCv.pdbName, id, path, kMaxPdbBytes, why);
     if (st != PortStatus::Written && why.empty())
         why = id + (st == PortStatus::Unported ? L": the old PDB is not on the symbol server" : L": download failed");
     return st;
@@ -737,17 +947,39 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     PortStatus st = GetOldDll(c, oldDll, why);
     if (st != PortStatus::Written) return st;
     CodeView oldCv;
-    ReadCodeView(oldDll, oldCv);
+    if (!ReadCodeView(oldDll, oldCv)) {  // read and checked moments ago
+        why = c.key + L": could not read the downloaded DLL again";
+        return PortStatus::Failed;
+    }
     st = GetOldPdb(oldCv, oldPdb, why);
     if (st != PortStatus::Written) return st;
 
-    port::Input in;
-    in.oldDll = oldDll;
-    in.newDll = req_.module.path;
-    std::wstring error;
-    if (!port::ResolveAll(oldPdb, oldDll, in.oldSymbols, error)) {
-        why = c.key + L": " + error;
-        return PortStatus::Unported;
+    // Reading the old PDB and the engine take seconds: on the worker, which gets its
+    // own copy of everything it reads. The main thread does not touch e until the
+    // worker is done.
+    struct Engine {
+        std::wstring oldPdb;
+        port::Input in;
+        std::vector<port::Result> results;
+        port::Stats stats;
+        std::wstring error;
+        bool ok = false;
+    };
+    auto e = std::make_shared<Engine>();
+    e->oldPdb = oldPdb;
+    e->in.oldDll = oldDll;
+    e->in.newDll = req_.module.path;
+    if (!RunOnWorker([e](const std::atomic<bool>&) {
+            e->ok = port::ResolveAll(e->oldPdb, e->in.oldDll, e->in.oldSymbols, e->error);
+        }, req_.idle)) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
+    }
+    port::Input& in = e->in;
+    if (!e->ok) {
+        // dbghelp or the files on this PC: no verdict on the build.
+        why = c.key + L": " + e->error;
+        return PortStatus::Failed;
     }
     // A local offsets file is only a hint which build the PC had: the old PDB must
     // give every address it holds.
@@ -756,7 +988,11 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
         OffsetsFile f;
         std::unordered_map<std::wstring, uint32_t> old;
         for (auto& s : in.oldSymbols) old.emplace(s.name, s.rva);
-        bool same = ReadFileBytes(c.localFile, text) && ParseOffsets(text, f);
+        if (!ReadFileBytes(c.localFile, text)) {
+            why = c.key + L": could not read the local offsets file";
+            return PortStatus::Failed;
+        }
+        bool same = ParseOffsets(text, f);
         for (auto& [name, rva] : f.entries) {
             auto it = old.find(name);
             if (rva ? (it == old.end() || it->second != *rva) : it != old.end()) same = false;
@@ -768,12 +1004,19 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     }
     for (size_t i = 0; i < req_.names.size(); i++) in.wanted.push_back({req_.names[i], required_[i]});
 
-    std::vector<port::Result> results;
-    port::Stats stats;
-    if (!port::Run(in, results, stats, error)) {
-        why = c.key + L": the engine failed: " + error;
-        return PortStatus::Unported;
+    if (!RunOnWorker([e](const std::atomic<bool>& cancel) {
+            (void)cancel;  // for the engine's cancel flag in port::Input, once it has one
+            e->ok = port::Run(e->in, e->results, e->stats, e->error);
+        }, req_.idle)) {
+        why = c.key + L": stopped";
+        return PortStatus::Stopped;
     }
+    if (!e->ok) {
+        why = c.key + L": the engine failed: " + e->error;
+        return PortStatus::Failed;
+    }
+    const std::vector<port::Result>& results = e->results;
+    const port::Stats& stats = e->stats;
     OffsetsFile out;
     std::vector<PortedName> names;
     std::vector<std::wstring> missing;
@@ -796,12 +1039,15 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
     sc.sourceVersion = c.version.Text();
     sc.sourceKey = c.key;
     sc.sourceKind = c.local ? L"local" : L"shipped";
-    sc.date = sc.lastProbe = NowTicks();
+    sc.sources = identity_;
+    sc.date = NowTicks();
+    sc.lastProbe = req_.simulated ? 0 : sc.date;
     sc.names = names;
     std::wstring offPath = JoinPath(offsetsDir_, OffsetsFileName(req_.module.name, req_.cv));
     if (!WritePortedFiles(offPath, FormatOffsets(out), JoinPath(offsetsDir_, key_ + kPortedExt), FormatSidecar(sc))) {
+        // WritePortedFiles took its sidecar back; a full or locked disk is no verdict.
         why = L"could not write the ported offsets";
-        return PortStatus::Unported;
+        return PortStatus::Failed;
     }
     DeleteFileW(JoinPath(offsetsDir_, key_ + kPortFailExt).c_str());
     rep.sourceVersion = sc.sourceVersion;
@@ -812,9 +1058,14 @@ PortStatus Porter::TryOne(Candidate& c, PortReport& rep, std::wstring& why) {
 
 PortStatus Porter::Run(PortReport& rep) {
     const std::wstring& mod = req_.module.name;
-    if (IsQuarantined(offsetsDir_, key_)) {
+    if (QuarantineBlocks(offsetsDir_, key_, port::kEngineVersion)) {
         rep.detail = L"ported offsets of this build crashed explorer before; waiting for the real PDB";
         return PortStatus::Quarantined;
+    }
+    if (IsQuarantined(offsetsDir_, key_)) {
+        // Another engine's port crashed; this one starts on probation under the guard.
+        Log(L"%ls: the quarantine is another engine's; porting with engine %d", mod.c_str(), port::kEngineVersion);
+        DeleteFileW(JoinPath(offsetsDir_, key_ + kQuarantinedExt).c_str());
     }
     FileVersion newVersion;
     if (!ReadFileVersion(req_.module.path, newVersion)) {
@@ -825,11 +1076,7 @@ PortStatus Porter::Run(PortReport& rep) {
     required_ = ParseSymbolsMeta(ReadFileBytes(JoinPath(req_.exeDir, kSymbolsMeta), text) ? text : std::string(),
                                  req_.names);
     PortSources src;
-    text.clear();
-    if (ReadFileBytes(JoinPath(req_.exeDir, kPortSources), text) && !ParsePortSources(text, src)) {
-        Log(L"%ls is broken; using local sources only", kPortSources);
-        src = PortSources{};
-    }
+    if (!ReadPortSources(req_.exeDir, src)) Log(L"%ls is broken; using local sources only", kPortSources);
     std::vector<Candidate> all = MergeCandidates(LocalCandidates(offsetsDir_, mod, req_.cv), src, mod);
     // What this attempt would start from, known before any download: a failed one is
     // not repeated for a day unless this changes.
@@ -845,6 +1092,7 @@ PortStatus Porter::Run(PortReport& rep) {
                      IsoTime(fail.at + kPortFailRetry);
         return PortStatus::Skipped;
     }
+    CleanStalePortTmp(req_.dataDir);
     DeleteTree(tmp_);
     if (!CreateDirs(tmp_)) {
         rep.detail = L"could not create " + std::wstring(kPortTmpDir);
@@ -855,20 +1103,24 @@ PortStatus Porter::Run(PortReport& rep) {
 
     // A local file of a build the list does not know: its version is in its DLL.
     size_t probes = 0;
-    std::wstring why;
+    std::wstring why, probeFailed;
     for (auto& c : all) {
-        if (c.version.valid || probes >= kMaxVersionProbes) continue;
-        bool denied = std::any_of(src.deny.begin(), src.deny.end(),
-                                  [&](auto& d) { return d.first == Lower(mod) && d.second == c.key; });
-        if (denied) continue;
+        if (c.version.valid || probes >= kMaxVersionProbes || SourceDenied(src, mod, c.key)) continue;
         probes++;
         std::wstring path, w;
         PortStatus st = GetOldDll(c, path, w);
-        if (st == PortStatus::Stopped || st == PortStatus::Failed) {
+        if (st == PortStatus::Stopped) {
             rep.detail = w;
             return st;
         }
-        if (st != PortStatus::Written) Log(L"%ls: %ls", mod.c_str(), w.c_str());
+        // One build out of reach is no reason not to try the others; it stays of
+        // unknown version, so the filter drops it.
+        if (st == PortStatus::Failed) {
+            Log(L"%ls: %ls; skipping that build", mod.c_str(), w.c_str());
+            probeFailed = w;
+        } else if (st != PortStatus::Written) {
+            Log(L"%ls: %ls", mod.c_str(), w.c_str());
+        }
     }
     std::vector<Candidate> picked = FilterCandidates(all, src, mod, newVersion, kMaxPortSources);
     if (picked.empty()) {
@@ -884,6 +1136,11 @@ PortStatus Porter::Run(PortReport& rep) {
         Log(L"%ls: %ls", mod.c_str(), w.c_str());
         why = w;
     }
+    // A skipped build was never judged: nothing is remembered, the next start tries again.
+    if (!probeFailed.empty()) {
+        rep.detail = L"not ported; " + probeFailed;
+        return PortStatus::Failed;
+    }
     RememberFailure(why);
     rep.detail = L"not ported: " + why;
     return PortStatus::Unported;
@@ -894,6 +1151,10 @@ PortStatus Porter::Run(PortReport& rep) {
 PortStatus PortModule(const PortRequest& req, PortReport& report) {
     Porter p(req);
     return p.Run(report);
+}
+
+bool PortWorkerLeftRunning() {
+    return g_workerLeftRunning;
 }
 
 }  // namespace host

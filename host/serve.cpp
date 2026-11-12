@@ -112,6 +112,8 @@ private:
     int Symbols(const std::vector<std::wstring>& explorerModules, bool forDryRun);
     // After an explorer crash: quarantines the ported offsets the guard holds.
     bool QuarantineOnCrash();
+    // initFailed for symbols while ported offsets are in: 14 pdbMissing, not 11.
+    int PortedSymbolsFailed();
     // phase running, with reason "degraded" while the runtime names unhooked modules.
     void ShowDegraded(const RuntimeState& rs);
     int StartExplorer(const Taskbar& t);
@@ -375,6 +377,20 @@ bool Host::QuarantineOnCrash() {
     return !keys.empty();
 }
 
+// The runtime would not start on ported offsets: a required name came out empty (one
+// optional in another hook table, or one the old build lacked). Unlike real offsets
+// that is no final noSymbols: the ported offsets go, the build waits a day before it
+// is ported again, and Bloom retries until the real PDB is out.
+int Host::PortedSymbolsFailed() {
+    for (auto& k : RetractPorted(dataDir_, symbols_.PortedKeys(),
+                                 L"the runtime found required symbols missing in the ported offsets", NowTicks()))
+        Log(L"the runtime found required symbols missing in the ported offsets %ls; dropped them", k.c_str());
+    HostState& hs = state_.state();
+    hs.symbolsSource.clear();
+    hs.portedFrom.clear();
+    return Finish(addon::kExitDownload, L"pdbMissing");
+}
+
 void Host::ShowDegraded(const RuntimeState& rs) {
     std::wstring want = rs.degraded.empty() ? L"" : L"degraded";
     HostState& s = state_.state();
@@ -411,6 +427,10 @@ int Host::Symbols(const std::vector<std::wstring>& explorerModules, bool forDryR
         } else if (t.Due(1000)) {
             Print(Format(L"  downloading: %llu / %llu bytes", done, total));
         }
+        return o.idle();
+    };
+    // Downloads call progress between reads; porting runs on a worker and calls this.
+    o.idle = [&] {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         ProcessCommands();
@@ -543,6 +563,7 @@ int Host::WaitRuntimeReady() {
             if (rs.state == L"initFailed") {
                 UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
                 if (!ex_.runtimeIn) state_.state().loaded.reset();
+                if (rs.reason == L"symbols" && !symbols_.PortedKeys().empty()) return PortedSymbolsFailed();
                 return rs.reason == L"symbols" ? addon::kExitNoSymbols : addon::kExitError;
             }
             if (rs.state == L"refused") {

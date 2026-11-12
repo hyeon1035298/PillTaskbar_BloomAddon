@@ -9,6 +9,7 @@
 #include "addon_protocol.h"
 #include "args.h"
 #include "commands.h"
+#include "ported.h"
 #include "util.h"
 
 using namespace host;
@@ -22,6 +23,7 @@ const wchar_t kUsage[] =
     L"  " ADDON_NAME L"Host --stop\n"
     L"  " ADDON_NAME L"Host --safe-mode [--bloom-local <dir>]\n"
     L"  " ADDON_NAME L"Host --resolve-symbols --bloom-local <dir> [--no-download] [--no-windhawk-cache] [--dump <dir>]\n"
+    L"                  [--simulate-404 <module>]\n"
     L"  " ADDON_NAME L"Host --self-test";
 
 }  // namespace
@@ -39,12 +41,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
     // --serve's stdout may be a pipe Bloom never reads, so only the check modes print.
     if (a.command != Command::Serve) EnablePrint();
+    int code = addon::kExitError;
     switch (a.command) {
-        case Command::Serve: return RunServe(a);
-        case Command::Stop: return RunStop(a);
-        case Command::SafeMode: return RunSafeMode(a);
-        case Command::ResolveSymbols: return RunResolveSymbols(a);
-        case Command::SelfTest: return RunSelfTest();
-        default: return addon::kExitError;
+        case Command::Serve: code = RunServe(a); break;
+        case Command::Stop: code = RunStop(a); break;
+        case Command::SafeMode: code = RunSafeMode(a); break;
+        case Command::ResolveSymbols: code = RunResolveSymbols(a); break;
+        case Command::SelfTest: code = RunSelfTest(); break;
+        default: break;
     }
+    // A port stopped while its worker still ran: ExitProcess ends that thread before
+    // anything else, so no static destructor runs under it.
+    if (PortWorkerLeftRunning()) ExitProcess((UINT)code);
+    return code;
 }

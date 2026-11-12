@@ -34,6 +34,8 @@ std::wstring PdbId(const CodeView& cv);
 // The symbol server's key for the image itself: TimeDateStamp as 8 hex digits, then
 // SizeOfImage in hex, both upper case.
 std::wstring BinaryKey(DWORD timeDateStamp, DWORD sizeOfImage);
+// The two halves of a BinaryKey; false when it is not one.
+bool ParseBinaryKey(const std::wstring& key, DWORD& timeDateStamp, DWORD& sizeOfImage);
 
 // VS_FIXEDFILEINFO's file version, e.g. 10.0.26100.9818.
 struct FileVersion {
@@ -83,16 +85,31 @@ bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names);
 
 // Returns false to stop (the host was asked to stop).
 using ProgressFn = std::function<bool(uint64_t done, uint64_t total)>;
+// Called on the main thread about every 100 ms while a long step (porting) runs on a
+// worker: pumps messages and takes forwarded commands. Returns false to stop.
+using IdleFn = std::function<bool()>;
 
 // --- symbol server ---
 // NotFound is the server's 404: the file is not published (yet). Everything else that
 // is not a whole file is Failed.
 enum class Download { Ok, NotFound, Failed, Stopped };
 Download DownloadForStatus(DWORD httpStatus);
+// What one download may be. The PDBs of the add-ons' modules measured 10 to 50 MB
+// (taskbar, Taskbar.View, SystemTray, twinui.pcshell, builds 8655 to 9818), so 512 MB
+// leaves ten times the room. An old DLL's file measured 0.98 to 1.02 of its
+// SizeOfImage (the signature lies past the image): a quarter more plus 1 MB.
+constexpr uint64_t kMaxPdbBytes = 512ull << 20;
+inline uint64_t DllDownloadCap(DWORD sizeOfImage) {
+    return (uint64_t)sizeOfImage + sizeOfImage / 4 + (1ull << 20);
+}
+// However the bytes trickle in, one file ends here (Failed).
+constexpr uint64_t kDownloadDeadlineMs = 30 * 60 * 1000;
 // Gets <file>/<key>/<file> from msdl.microsoft.com into dest (through dest.part).
-// bytes: what this call received; progress sees doneBefore + bytes.
+// bytes: what this call received; progress sees doneBefore + bytes. A Content-Length
+// above maxBytes is refused before anything is written, a body that grows past it
+// or outlasts kDownloadDeadlineMs is cut off; both are Failed.
 Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
-                            uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes);
+                            uint64_t maxBytes, uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes);
 // Windhawk's symbol store, which the host only ever reads.
 std::wstring WindhawkSymbolsDir();
 
@@ -107,6 +124,7 @@ struct SymbolOptions {
     // published (no cache, no download), so porting can be tried on a published build.
     std::wstring simulate404;
     ProgressFn progress;
+    IdleFn idle;  // none: the main thread just waits for the worker
 };
 
 // What PrepareSymbols found, per module and overall.

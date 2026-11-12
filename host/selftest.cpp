@@ -342,6 +342,14 @@ void TestDownloadMapping() {
           L"symbols: worst exit order");
     Check(BinaryKey(1635664427, 3252224) == L"617E422B31A000" && BinaryKey(0x0ABC, 0x1000) == L"00000ABC1000",
           L"symbols: msdl binary key");
+    DWORD stamp = 0, size = 0;
+    Check(ParseBinaryKey(L"E8E4B3D1308000", stamp, size) && stamp == 0xE8E4B3D1 && size == 0x308000 &&
+              !ParseBinaryKey(L"E8E4B3D1", stamp, size) && !ParseBinaryKey(L"E8E4B3D13080x0", stamp, size),
+          L"symbols: msdl binary key parsed back");
+    // taskbar.dll 9549: SizeOfImage 0x308000, the file 3216656 bytes.
+    Check(DllDownloadCap(0x308000) > 3216656 && DllDownloadCap(0x308000) < 6 * 1024 * 1024 &&
+              kMaxPdbBytes >= 10 * 50ull * 1024 * 1024 && kDownloadDeadlineMs >= 10 * 60 * 1000,
+          L"symbols: download caps leave room for the files measured");
     FileVersion a, b, c;
     Check(ParseFileVersion(L"10.0.26100.9818", a) && ParseFileVersion(L"10.0.26100.9974", b) &&
               ParseFileVersion(L"10.0.26300.7000", c) && a.Text() == L"10.0.26100.9818",
@@ -437,6 +445,7 @@ void TestSidecar() {
     s.sourceVersion = L"10.0.26100.9818";
     s.sourceKey = L"617E422B31A000";
     s.sourceKind = L"shipped";
+    s.sources = L"617E422B31A000 769B877B308000 -8DBF8CD1304000";
     ParseIsoTime(L"2026-11-13T10:00:00Z", s.date);
     s.lastProbe = s.date;
     s.names = {{L"public: bool __cdecl X::operator==(int)const ", port::Outcome::Ported, 0x1a2b3c, L"anchor+vtslot"},
@@ -446,6 +455,7 @@ void TestSidecar() {
     Sidecar r;
     Check(ParseSidecar(FormatSidecar(s), r) && r.engine == 1 && r.hostVersion == s.hostVersion &&
               r.sourceVersion == s.sourceVersion && r.sourceKey == s.sourceKey && r.sourceKind == L"shipped" &&
+              r.sources == s.sources &&
               r.date == s.date && r.lastProbe == s.lastProbe && r.names.size() == 4 &&
               r.names[0].name == s.names[0].name && r.names[0].rva == 0x1a2b3c &&
               r.names[0].outcome == port::Outcome::Ported && r.names[1].outcome == port::Outcome::Absent &&
@@ -458,6 +468,8 @@ void TestSidecar() {
           L"sidecar: probe every 6 h");
     s.lastProbe = 0;
     Check(ProbeDue(s, s.date), L"sidecar: never probed is due");
+    Check(ParseSidecar(FormatSidecar(s), r) && r.lastProbe == 0 && ProbeDue(r, s.date),
+          L"sidecar: lastProbe 0 (a simulated 404) reads back as due");
 }
 
 void TestWriteRule() {
@@ -523,10 +535,26 @@ void TestWriteRule() {
           L"write order: sidecar, then offsets");
     order.clear();
     std::wstring off2 = JoinPath(JoinPath(dir, L"missing-folder"), L"m_L.txt"), side2 = JoinPath(dir, L"m_L.ported");
-    Check(!WritePortedFiles(off2, "offsets", side2, "sidecar", &order) && order.size() == 1 && FileExists(side2) &&
+    Check(!WritePortedFiles(off2, "offsets", side2, "sidecar", &order) && order.size() == 1 && !FileExists(side2) &&
               !FileExists(off2),
-          L"write order: a failed offsets write leaves only the harmless sidecar");
+          L"write order: a failed offsets write takes its sidecar back");
     RemoveTree(dir);
+
+    // port-tmp: one folder per process; another running process's folder stays.
+    std::wstring data = TestDir(L"porttmp");
+    std::wstring root = JoinPath(data, kPortTmpDir);
+    Check(PortTmpDir(data) == JoinPath(root, std::to_wstring(GetCurrentProcessId())), L"port-tmp: per process");
+    std::wstring live = JoinPath(root, std::to_wstring(GetCurrentProcessId()));
+    std::wstring dead = JoinPath(root, L"4294967292");  // a pid no process has
+    std::wstring before = JoinPath(root, L"taskbar.dll_617E422B31A000");  // the layout before
+    WriteText(JoinPath(live, L"a.dll"), "x");
+    WriteText(JoinPath(dead, L"m_K\\a.dll.part"), "x");
+    WriteText(JoinPath(before, L"taskbar.dll"), "x");
+    CleanStalePortTmp(data);
+    auto gone = [](const std::wstring& p) { return GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES; };
+    Check(FileExists(JoinPath(live, L"a.dll")) && gone(dead) && gone(before),
+          L"port-tmp: a dead process's folder and old leftovers go, a running one's stays");
+    RemoveTree(data);
 
     OffsetsFile ported, real;
     ported.entries = {{L"a", 1}, {L"b", 2}, {L"c", std::nullopt}};
@@ -577,9 +605,59 @@ void TestPortFailAndGuard() {
               text.find("source=10.0.26100.9818 617E422B31A000") != std::string::npos,
           L"guard: the quarantine says why and from what");
     Check(QuarantineGuarded(data, L"again", t0).empty(), L"guard: nothing armed, nothing quarantined");
+    // An offsets file that cannot be deleted keeps its sidecar and the guard.
+    WriteText(JoinPath(off, L"taskbar.dll_K3.txt"), "ported");
+    WriteText(JoinPath(off, L"taskbar.dll_K3.ported"), "engine=1\n");
+    SetGuard(data, {L"taskbar.dll_K3"}, t0);
+    {
+        Handle lock(CreateFileW(JoinPath(off, L"taskbar.dll_K3.txt").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, 0, nullptr));
+        q = QuarantineGuarded(data, L"explorer crashed", t0);
+        Check(lock && q.size() == 1 && IsQuarantined(off, L"taskbar.dll_K3") &&
+                  FileExists(JoinPath(off, L"taskbar.dll_K3.txt")) &&
+                  FileExists(JoinPath(off, L"taskbar.dll_K3.ported")) && ReadGuard(data, g) && g.keys.size() == 1 &&
+                  g.keys[0] == L"taskbar.dll_K3",
+              L"guard: offsets that cannot be deleted keep their sidecar and stay guarded");
+    }
+    q = QuarantineGuarded(data, L"explorer crashed", t0);
+    Check(q.size() == 1 && !FileExists(JoinPath(off, L"taskbar.dll_K3.txt")) &&
+              !FileExists(JoinPath(off, L"taskbar.dll_K3.ported")) && !ReadGuard(data, g),
+          L"guard: the next look deletes them and disarms");
     SetGuard(data, {L"x"}, t0);
     Check(SetGuard(data, {}, t0) && !ReadGuard(data, g), L"guard: an empty list disarms");
     RemoveTree(data);
+}
+
+// Porting work runs on a worker while the calling thread keeps serving.
+void TestWorker() {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    DWORD self = GetCurrentThreadId();
+    auto other = std::make_shared<std::atomic<bool>>(false);
+    int idles = 0;
+    bool ok = RunOnWorker(
+        [done, other, self](const std::atomic<bool>&) {
+            Sleep(350);
+            *other = GetCurrentThreadId() != self;
+            *done = true;
+        },
+        [&] {
+            idles++;
+            return true;
+        });
+    Check(ok && *done && *other && idles >= 2, L"worker: runs off this thread while idle is called");
+
+    auto sawCancel = std::make_shared<std::atomic<bool>>(false);
+    ULONGLONG t0 = GetTickCount64();
+    ok = RunOnWorker(
+        [sawCancel](const std::atomic<bool>& cancel) {
+            for (int i = 0; i < 300 && !cancel; i++) Sleep(10);
+            *sawCancel = cancel.load();
+        },
+        [] { return false; });
+    Check(!ok && *sawCancel && GetTickCount64() - t0 < 2500 && !PortWorkerLeftRunning(),
+          L"worker: a stop sets the cancel flag and waits for the worker to end");
+    ok = RunOnWorker([done](const std::atomic<bool>&) { *done = false; }, nullptr);
+    Check(ok && !*done, L"worker: without idle the caller just waits");
 }
 
 // PrepareSymbols end to end without the network: modules that are missing, one whose
@@ -609,7 +687,7 @@ void TestPrepare() {
               rep.modules[1].exit == addon::kExitDownload && rep.reason.empty(),
           L"prepare: every module is tried, the worst result wins");
 
-    // Downloads off: a listed source build is not cached, so porting asks the network
+    // Downloads off: a listed source build is never cached, so porting asks the network
     // for nothing and concludes nothing (no .portfail).
     o.modules = {k32};
     o.simulate404 = L"kernel32.dll";
@@ -622,8 +700,32 @@ void TestPrepare() {
         r = PrepareSymbols(o, &rep);
         Check(r == addon::kExitDownload && rep.reason.empty() && !FileExists(JoinPath(off, key + kPortFailExt)) &&
                   !FileExists(JoinPath(off, key + L".txt")),
-              L"prepare: --no-download ports from caches only");
+              L"prepare: --no-download downloads nothing, so it ports nothing");
+
+        // A local build whose version probe fails is skipped; the listed one is still
+        // tried, and the skipped one is never remembered as a failure.
+        std::wstring local = JoinPath(off, L"kernel32.dll_LOCAL1.txt");
+        WriteText(local, "1#kernel32.dll#1-4096#name one#");  // msdl key 000000011000
+        WriteText(JoinPath(exe, kPortSources), Narrow(L"kernel32.dll " + kv.Text() + L" 00000002200000\n"));
+        PortRequest req;
+        req.dataDir = data;
+        req.exeDir = exe;
+        req.module = k32;
+        req.cv = cv;
+        req.names = {L"name one", L"name two"};
+        req.noDownload = true;
+        req.noWindhawkCache = true;
+        PortReport pr;
+        PortStatus st = PortModule(req, pr);
+        Check(st == PortStatus::Failed && pr.detail.find(L"00000002200000") != std::wstring::npos &&
+                  !FileExists(JoinPath(off, key + kPortFailExt)),
+              L"port: a failed version probe skips that build, the listed one is still tried");
         DeleteFileW(JoinPath(exe, kPortSources).c_str());
+        st = PortModule(req, pr);
+        Check(st == PortStatus::Failed && pr.detail.find(L"000000011000") != std::wstring::npos &&
+                  !FileExists(JoinPath(off, key + kPortFailExt)),
+              L"port: a build skipped for a failed probe is not remembered");
+        DeleteFileW(local.c_str());
     } else {
         Check(false, L"prepare: kernel32.dll has a file version to list an older build by");
     }
@@ -663,8 +765,73 @@ void TestPrepare() {
     std::string text;
     Sidecar after;
     Check(r == addon::kExitOk && rep.modules[0].ported && ReadFileBytes(JoinPath(off, key + kPortedExt), text) &&
-              ParseSidecar(text, after) && after.lastProbe > sc.lastProbe,
-          L"prepare: a due probe that finds no PDB keeps the port and notes the time");
+              ParseSidecar(text, after) && IsoTime(after.lastProbe) == IsoTime(sc.lastProbe),
+          L"prepare: a due probe under --simulate-404 keeps the port and is not noted as a probe");
+
+    // Ported offsets the host no longer trusts are dropped and the module ported again
+    // (here: no source, so pdbMissing).
+    auto stale = [&](const std::string& sidecar, const wchar_t* what) {
+        WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt), sidecar);
+        int res = PrepareSymbols(o, &rep);
+        Check(res == addon::kExitDownload && rep.reason == L"pdbMissing" && !rep.modules[0].ported &&
+                  !FileExists(JoinPath(off, key + L".txt")) && !FileExists(JoinPath(off, key + kPortedExt)),
+              what);
+    };
+    Sidecar other = sc;
+    other.lastProbe = NowTicks();
+    other.engine = port::kEngineVersion + 1;
+    stale(FormatSidecar(other), L"prepare: another engine's ported offsets are ported again");
+    stale("not a sidecar\n", L"prepare: ported offsets with a broken sidecar are ported again");
+    other.engine = port::kEngineVersion;
+    WriteText(JoinPath(exe, kPortSources), "deny kernel32.dll 00000001200000\n");
+    stale(FormatSidecar(other), L"prepare: ported offsets from a now denied build are ported again");
+    DeleteFileW(JoinPath(exe, kPortSources).c_str());
+    WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt),
+                     FormatSidecar(other));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitOk && rep.modules[0].ported && FileExists(JoinPath(off, key + L".txt")),
+          L"prepare: this engine's ported offsets from an allowed build stay");
+    DropPorted(off, key);
+
+    // The runtime would not start on ported offsets: they go and a .portfail keeps the
+    // build from being ported again, so the next start is 14 pdbMissing.
+    DeleteFileW(JoinPath(off, key + kPortFailExt).c_str());
+    WritePortedFiles(JoinPath(off, key + L".txt"), FormatOffsets(f), JoinPath(off, key + kPortedExt),
+                     FormatSidecar(other));  // sources "": no candidates, as the porter would say here
+    SetGuard(data, {key}, NowTicks());
+    auto gone = RetractPorted(data, {key, L"real.dll_K"}, L"symbols missing (test)", NowTicks());
+    PortGuard guard;
+    PortFail pf;
+    text.clear();
+    Check(gone.size() == 1 && gone[0] == key && !FileExists(JoinPath(off, key + L".txt")) &&
+              !FileExists(JoinPath(off, key + kPortedExt)) && !ReadGuard(data, guard) &&
+              ReadFileBytes(JoinPath(off, key + kPortFailExt), text) && ParsePortFail(text, pf) &&
+              pf.why == L"symbols missing (test)",
+          L"retract: the ported offsets go, a .portfail stays, the guard is off");
+    r = PrepareSymbols(o, &rep);
+    text.clear();
+    Check(r == addon::kExitDownload && rep.reason == L"pdbMissing" &&
+              ReadFileBytes(JoinPath(off, key + kPortFailExt), text) && ParsePortFail(text, pf) &&
+              pf.why == L"symbols missing (test)",
+          L"retract: the next start waits for the PDB without porting again");
+    DeleteFileW(JoinPath(off, key + kPortFailExt).c_str());
+
+    // Ported offsets a quarantine could not delete (the sidecar went) are never used.
+    WriteText(JoinPath(off, key + L".txt"), FormatOffsets(f));
+    WriteText(JoinPath(off, key + kQuarantinedExt), "reason=test\n");
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"portCrashed" && !FileExists(JoinPath(off, key + L".txt")),
+          L"prepare: offsets beside a quarantine are dropped");
+
+    // A quarantine holds only for the engine that wrote it.
+    WriteText(JoinPath(off, key + kQuarantinedExt), Narrow(Format(L"reason=test\nengine=%d\n", port::kEngineVersion)));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"portCrashed", L"prepare: this engine's quarantine holds");
+    WriteText(JoinPath(off, key + kQuarantinedExt),
+              Narrow(Format(L"reason=test\nengine=%d\n", port::kEngineVersion + 1)));
+    r = PrepareSymbols(o, &rep);
+    Check(r == addon::kExitDownload && rep.reason == L"pdbMissing" && !IsQuarantined(off, key),
+          L"prepare: another engine's quarantine does not block porting");
     RemoveTree(data);
 }
 
@@ -687,6 +854,7 @@ int RunSelfTest() {
     TestSidecar();
     TestWriteRule();
     TestPortFailAndGuard();
+    TestWorker();
     TestPrepare();
     Print(Format(L"self-test: %d checks, %d failed", g_checks, g_failures));
     return g_failures;
