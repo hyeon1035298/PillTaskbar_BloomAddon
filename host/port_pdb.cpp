@@ -8,8 +8,9 @@
 
 #include <dbghelp.h>
 
+#include <algorithm>
 #include <cstring>
-#include <unordered_set>
+#include <unordered_map>
 
 #include "port.h"
 #include "symbols.h"
@@ -54,7 +55,7 @@ struct EnumContext {
     DbgHelp* dbg;
     ULONG64 base;
     std::vector<OldSymbol>* out;
-    std::unordered_set<std::wstring> seen;
+    std::unordered_map<std::wstring, std::vector<uint32_t>> seen;  // addresses given per name
 };
 
 BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
@@ -67,8 +68,13 @@ BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
         name = host::FixPtr64(out);
     }
     if (si->Address < ctx->base || si->Address - ctx->base > 0xFFFFFFFFull) return TRUE;
-    // First address wins, in enumeration order, as the host resolves a name.
-    if (ctx->seen.insert(name).second) ctx->out->push_back({std::move(name), (uint32_t)(si->Address - ctx->base)});
+    // Each distinct address of a name once, in enumeration order: the first is the one the
+    // host resolves, and a second one tells the engine the name is not one function.
+    uint32_t rva = (uint32_t)(si->Address - ctx->base);
+    auto& at = ctx->seen[name];
+    if (std::find(at.begin(), at.end(), rva) != at.end()) return TRUE;
+    at.push_back(rva);
+    ctx->out->push_back({std::move(name), rva});
     return TRUE;
 }
 

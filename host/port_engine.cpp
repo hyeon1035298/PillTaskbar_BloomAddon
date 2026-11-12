@@ -1663,9 +1663,16 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
     stats.functionsOld = (uint32_t)ob->funcs.size();
     stats.functionsNew = (uint32_t)nb->funcs.size();
 
-    std::unordered_map<std::wstring, uint32_t> byName;
+    std::unordered_map<std::wstring, uint32_t> byName, firstAt;
     std::unordered_map<uint32_t, std::vector<std::wstring>> names;
     std::vector<uint32_t> vtNamed;
+    // A name the OLD PDB has at more than one address (two instances of one name, such as
+    // classes in different anonymous namespaces): no single OLD function to port.
+    std::unordered_set<std::wstring> several;
+    for (auto& s : in.oldSymbols) {
+        auto [f, fresh] = firstAt.emplace(s.name, s.rva);
+        if (!fresh && f->second != s.rva) several.insert(s.name);
+    }
     for (auto& s : in.oldSymbols) {
         if (s.rva >= ob->pe.sizeOfImage) continue;
         if (!byName.emplace(s.name, s.rva).second) continue;
@@ -1685,6 +1692,9 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
         if (it == byName.end()) {
             r.outcome = Outcome::Absent;
             r.evidence = L"not in the OLD PDB";
+        } else if (several.count(w.name)) {
+            r.outcome = Outcome::Ambiguous;
+            r.evidence = L"several OLD addresses";
         } else if (const Verdict* vd = acc.Of(it->second)) {
             r.outcome = vd->outcome;
             r.rva = vd->outcome == Outcome::Ported ? vd->rva : 0;

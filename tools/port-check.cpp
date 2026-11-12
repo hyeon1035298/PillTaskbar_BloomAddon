@@ -5,7 +5,8 @@
 //     ports the names in symbols.txt (or, with --all, every public of the OLD PDB) from
 //     the OLD build to the NEW one and prints one line per name.
 //   port-check --dump <dll> <pdb> <out.json>
-//     every public of a PDB as port::ResolveAll names it, for comparing with other tools.
+//     every public of a PDB as port::ResolveAll names it ({name: [rva, ...]}, the host's
+//     address first), for comparing with other tools.
 // symbols-meta.txt lines are "name<TAB>module<TAB>req|opt" (or "name<TAB>req|opt"); a
 // line for another module is ignored.
 
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "pe.h"
 #include "port.h"
@@ -63,9 +65,15 @@ int Dump(const std::wstring& dll, const std::wstring& pdb, const std::wstring& o
         Out("error: " + host::Narrow(err) + "\n");
         return 1;
     }
+    std::vector<std::wstring> order;
+    std::unordered_map<std::wstring, std::string> rvas;
+    for (auto& s : syms) {
+        auto [it, fresh] = rvas.emplace(s.name, std::to_string(s.rva));
+        if (fresh) order.push_back(s.name);
+        else it->second += ", " + std::to_string(s.rva);
+    }
     std::string j = "{\"names\": {";
-    for (size_t i = 0; i < syms.size(); i++)
-        j += (i ? ", " : "") + Json(syms[i].name) + ": " + std::to_string(syms[i].rva);
+    for (size_t i = 0; i < order.size(); i++) j += (i ? ", " : "") + Json(order[i]) + ": [" + rvas[order[i]] + "]";
     j += "}}\n";
     if (!host::WriteFileAtomic(outPath, j)) {
         Out("error: cannot write the output\n");
@@ -106,7 +114,10 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t pdbMs = GetTickCount64() - t0;
     std::vector<std::wstring> names;
     if (all) {
-        for (auto& s : in.oldSymbols) names.push_back(s.name);
+        // A name with several OLD addresses comes once per address from ResolveAll.
+        std::unordered_set<std::wstring> seen;
+        for (auto& s : in.oldSymbols)
+            if (seen.insert(s.name).second) names.push_back(s.name);
     } else if (!host::ReadSymbolList(pos[3], names)) {
         Out("error: cannot read the symbol list\n");
         return 1;

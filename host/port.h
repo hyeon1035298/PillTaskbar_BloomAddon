@@ -58,8 +58,8 @@ struct Stats {
 bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& error);
 
 // Every public of a PDB through System32's dbghelp, with the host's options and
-// undecoration (symbols.cpp Resolve), in enumeration order; a name keeps its first address,
-// as the host resolves it.
+// undecoration (symbols.cpp Resolve), in enumeration order. A name the PDB has at several
+// addresses comes once per distinct address, the host's address (the first) first.
 bool ResolveAll(const std::wstring& pdbPath, const std::wstring& dllPath,
                 std::vector<OldSymbol>& out, std::wstring& error);
 
