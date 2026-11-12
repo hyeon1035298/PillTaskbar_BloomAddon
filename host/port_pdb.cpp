@@ -8,8 +8,9 @@
 
 #include <dbghelp.h>
 
+#include <algorithm>
 #include <cstring>
-#include <unordered_set>
+#include <unordered_map>
 
 #include "port.h"
 #include "symbols.h"
@@ -54,11 +55,17 @@ struct EnumContext {
     DbgHelp* dbg;
     ULONG64 base;
     std::vector<OldSymbol>* out;
-    std::unordered_set<std::wstring> seen;
+    const std::atomic<bool>* cancel;
+    bool stopped = false;
+    std::unordered_map<std::wstring, std::vector<uint32_t>> seen;  // addresses given per name
 };
 
 BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
     auto* ctx = (EnumContext*)ctxPtr;
+    if (ctx->cancel && ctx->cancel->load(std::memory_order_relaxed)) {
+        ctx->stopped = true;
+        return FALSE;
+    }
     std::wstring name(si->Name, si->NameLen);
     if (!name.empty() && name[0] == L'?') {
         // The same flags and fix-up as symbols.cpp OnSymbol.
@@ -67,15 +74,20 @@ BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
         name = host::FixPtr64(out);
     }
     if (si->Address < ctx->base || si->Address - ctx->base > 0xFFFFFFFFull) return TRUE;
-    // First address wins, in enumeration order, as the host resolves a name.
-    if (ctx->seen.insert(name).second) ctx->out->push_back({std::move(name), (uint32_t)(si->Address - ctx->base)});
+    // Each distinct address of a name once, in enumeration order: the first is the one the
+    // host resolves, and a second one tells the engine the name is not one function.
+    uint32_t rva = (uint32_t)(si->Address - ctx->base);
+    auto& at = ctx->seen[name];
+    if (std::find(at.begin(), at.end(), rva) != at.end()) return TRUE;
+    at.push_back(rva);
+    ctx->out->push_back({std::move(name), rva});
     return TRUE;
 }
 
 }  // namespace
 
 bool ResolveAll(const std::wstring& pdbPath, const std::wstring& dllPath, std::vector<OldSymbol>& out,
-                std::wstring& error) {
+                std::wstring& error, const std::atomic<bool>* cancel) {
     out.clear();
     host::CodeView cv;
     if (!host::ReadCodeView(dllPath, cv)) {
@@ -102,14 +114,18 @@ bool ResolveAll(const std::wstring& pdbPath, const std::wstring& dllPath, std::v
     const ULONG64 base = 0x180000000ull;
     bool ok = false;
     if (d.loadModule(proc, nullptr, dllPath.c_str(), nullptr, base, cv.sizeOfImage, nullptr, 0)) {
-        EnumContext ctx{&d, base, &out, {}};
+        EnumContext ctx{&d, base, &out, cancel, false, {}};
         d.enumSymbols(proc, base, L"*", OnSymbol, &ctx);
         IMAGEHLP_MODULEW64 mi{};
         mi.SizeOfStruct = sizeof(mi);
         bool infoOk = d.moduleInfo(proc, base, &mi);
         ok = infoOk && mi.SymType == SymPdb && memcmp(&mi.PdbSig70, &cv.guid, sizeof(GUID)) == 0 &&
              mi.PdbAge == cv.age;
-        if (!ok) {
+        if (ctx.stopped) {
+            error = L"stopped";
+            ok = false;
+            out.clear();
+        } else if (!ok) {
             error = host::Format(L"dbghelp did not load the matching PDB (type %d)", infoOk ? (int)mi.SymType : -1);
             out.clear();
         }
