@@ -1059,6 +1059,7 @@ private:
     void Globals();
     void NeverPortedNames();
     void Collisions();
+    void Thunks();
     bool OwnSlotProof(uint32_t a, uint32_t y) const;
     const std::vector<uint32_t>& RefBy(uint32_t x) const;
     bool StillFolded(uint32_t a, uint32_t y) const;
@@ -1532,12 +1533,44 @@ void Acceptor::NeverPortedNames() {
     }
 }
 
+// An adjustor or vtordisp thunk ("[thunk]:C::f`adjustor{8}'") only moves this and jumps
+// to C::f: its name is C::f's, so it is ported only with C::f, and the NEW thunk must
+// jump to where C::f went.
+void Acceptor::Thunks() {
+    for (auto& [a, vd] : verdicts_) {
+        if (vd.outcome != Outcome::Ported || !AnyName(a, [](const std::wstring& n) {
+                return n.compare(0, 8, L"[thunk]:") == 0;
+            }))
+            continue;
+        const Func* fo = old_.At(a);
+        const Func* fn = new_.At(vd.rva);
+        if (!fo || !fn) continue;
+        auto onlyJump = [](const Func& f) -> const Ref* {
+            const Ref* j = nullptr;
+            for (auto& r : f.refs)
+                if (r.kind == kJmp) {
+                    if (j) return nullptr;
+                    j = &r;
+                }
+            return j;
+        };
+        const Ref* jo = onlyJump(*fo);
+        const Ref* jn = onlyJump(*fn);
+        if (!jo || jo->tgt == kNoTarget) continue;  // not one tail jump: no target to follow
+        auto t = verdicts_.find(jo->tgt);
+        if (!jn || t == verdicts_.end() || t->second.outcome != Outcome::Ported || t->second.rva != jn->tgt)
+            vd = {Outcome::Ambiguous, 0,
+                  L"a thunk is ported only with the function it jumps to (" + vd.evidence + L")"};
+    }
+}
+
 void Acceptor::Decide() {
     Vftables();
     Functions();
     Globals();
     NeverPortedNames();
     Collisions();
+    Thunks();
 }
 
 }  // namespace
