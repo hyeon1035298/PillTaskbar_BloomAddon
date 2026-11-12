@@ -31,7 +31,7 @@
 
 `<local>`은 Bloom의 `Paths.Local`(보통 `%LOCALAPPDATA%\Bloom`), `<data>`는 `Paths.Data`(보통 `%APPDATA%\Bloom`)다. 개발 복사본(`--data`)은 호스트를 띄우지 않는다.
 
-배포 폴더에 든 것: `addon.json`, `PillTaskbarHost.exe`, `PillTaskbarRuntime.dll`, `PillTaskbar.dll`, `symbols.txt`, `THIRD_PARTY.md`, 릴리스 zip에는 `LICENSE`, `SOURCE.txt`도. Bloom은 `addon.json`의 `files`에 적힌 SHA-256을 확인하며 실행용 복사본을 만들고, 호스트를 그 복사본에서 띄운다. explorer가 DLL을 물고 있어도 Bloom 업데이트가 막히지 않게 하려는 것이다.
+배포 폴더에 든 것: `addon.json`, `PillTaskbarHost.exe`, `PillTaskbarRuntime.dll`, `PillTaskbar.dll`, `symbols.txt`, `symbols-meta.txt`, `port-sources.txt`(아래 "옮겨 찾은 오프셋"), `THIRD_PARTY.md`, 릴리스 zip에는 `LICENSE`, `SOURCE.txt`도. Bloom은 `addon.json`의 `files`에 적힌 SHA-256을 확인하며 실행용 복사본을 만들고, 호스트를 그 복사본에서 띄운다. explorer가 DLL을 물고 있어도 Bloom 업데이트가 막히지 않게 하려는 것이다.
 
 데이터 폴더 안:
 
@@ -43,7 +43,10 @@
 | `runtime-panel-state.json` | ShellHost 안 런타임 | 호스트 | ShellHost 안 상태(4절 "ShellHost"). 모양은 `runtime-state.json`과 같다 |
 | `prefs.json` | 모드, Bloom | 모드, Bloom | 모드가 쓰는 설정(아래 `prefs.json`) |
 | `offsets\<모듈 소문자>_<GUID+age>.txt` | 호스트 | 런타임 | 기호 오프셋 |
+| `offsets\<같은 이름>.ported`, `.portfail`, `.quarantined` | 호스트 | 호스트 | 옮겨 찾은 오프셋의 표시, 실패 기록, 격리(아래 "옮겨 찾은 오프셋") |
+| `ported-guard.json` | 호스트 | 호스트 | 옮겨 찾은 오프셋을 쓰는 동안의 충돌 가드 |
 | `symbols\<PDB>\<GUID+age>\<PDB>` | 호스트 | 호스트 | 받은 PDB(오프셋을 만든 뒤 지움) |
+| `port-tmp\` | 호스트 | 호스트 | 옮겨 찾기에 받은 옛 DLL과 PDB(끝나면 폴더째 지움) |
 | `host.log`, `runtime.log`, `runtime-panel.log` | 각자 | 사람 | 기록. 1 MB를 넘으면 처음부터 다시 씀 |
 
 JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바꿔 통째로 바꾼다.
@@ -103,7 +106,8 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 ```
 
 - `phase`: `starting`, `symbols`(기호 준비, `progress`는 받은 바이트와 전체 바이트), `waiting`(작업표시줄을 기다리거나 충돌 뒤 쉬는 중), `injecting`, `running`, `stopping`, `stopped`, `failed`.
-- `reason`(`failed`나 종료 때): `windhawk`, `noSymbols`, `download`, `blocked`, `crashes`, `unloadTimeout`, `error`.
+- `reason`(`failed`나 종료 때): `windhawk`, `noSymbols`, `download`, `pdbMissing`, `portCrashed`, `blocked`, `crashes`, `unloadTimeout`, `error`. `pdbMissing`과 `portCrashed`는 코드 14의 자세한 이유다(3절). `running`일 때는 비어 있거나 `degraded`다. `degraded`는 런타임이 필수 기호가 빠진 모듈을 훅하지 않은 채 돌고 있다는 뜻이다(`runtime-state.json`의 `degraded`).
+- `symbolsSource`(선택): 기호가 준비되면 `pdb`(모두 PDB에서 풂) 또는 `ported`(하나라도 옮겨 찾은 오프셋). `portedFrom`(선택): 옮겨 온 옛 빌드의 파일 버전, 여럿이면 쉼표로 잇는다. 둘 다 값이 있을 때만 쓴다.
 - `loaded`: 넣기 직전에 먼저 쓰는 explorer 기록(pid, 프로세스 생성 시각 FILETIME, 시각). 내린 뒤에는 `null`.
 - `crashes`: 센 explorer 충돌 시각들(셈 규칙은 아래 "지키기"). 10분보다 오래된 것은 지운다.
 - `safeMode`: 참이면 호스트는 넣지 않고 코드 10으로 끝난다. `--reset-safe-mode`로 띄우면 `crashes`와 함께 비운다.
@@ -115,6 +119,7 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 ```
 
 - `pid`는 explorer pid다. 호스트의 `loaded.pid`와 같을 때만 지금 explorer의 상태다.
+- `degraded`(선택, `running`일 때만): 필수 기호가 없어 `HookSymbols`가 실패했는데 모드가 그 모듈 없이 계속 도는 모듈 파일 이름(소문자) 목록. 예: `"degraded": ["taskbar.view.dll"]`. 모듈을 나중에 훅하다 생기면 런타임이 `running`을 다시 쓰고, 호스트는 5초 안에 `host-state`의 `reason`을 `degraded`로 바꾼다.
 - `state`: `starting`, `running`, `reloading`(설정 변경으로 모드 DLL을 다시 올리는 중), `initFailed`, `off`(모드가 설정 변경에 FALSE를 돌려줘 내려 둠), `refused`, `stopped`.
 - `reason`: `initFailed`이면 `symbols`(필수 기호 없음이나 오프셋 파일 없음) 또는 `init`. `refused`이면 `windhawk`(Windhawk판 모드가 같은 explorer에 있음), `restart`(앞서 올린 모드 이미지나 다른 `PillTaskbarRuntime.dll`이 explorer에 남아 있음, explorer를 다시 시작해야 함), `protocol`(호스트의 `Config` 크기나 `kProtocol`이 런타임과 다름). `stopped`이면 비어 있거나 `leaked`(내릴 때 모드 DLL을 안전하게 풀 수 없어 explorer에 남겨 둠, 다음 넣기는 `restart`로 거절됨).
 - `refused`와 시작 때의 `initFailed`는 `Unload`가 올 때까지 `Loaded`를 켠 채 그 상태로 남고, 내린 뒤에도 `stopped`로 덮지 않는다. 호스트는 언제 읽어도 이유를 본다.
@@ -130,7 +135,20 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 1#taskbar.dll#<TimeDateStamp 10진>-<SizeOfImage 10진>#<기호>#<RVA 10진>#<기호>##...
 ```
 
-RVA가 빈 기호는 "찾아봤지만 이 모듈에 없음"이다. 파일에 아예 없는 기호는 런타임이 없음으로 다루고 기록에 남긴다. 호스트는 `symbols.txt`(모드 소스의 `LR"(…)"` 기호 문자열을 빌드 때 뽑은 목록, 한 줄에 하나)의 모든 이름을 세 모듈(`taskbar.dll`, `Taskbar.View.dll`, `SystemTray.dll`) 모두에서 찾는다. 어느 기호가 필수인지는 런타임의 `HookSymbols`가 모드의 표를 보고 정한다.
+RVA가 빈 기호는 "찾아봤지만 이 모듈에 없음"이다(옮겨 찾은 표에서는 "옮기지 못함"도 빈 값이다). 파일에 아예 없는 기호는 런타임이 없음으로 다루고 기록에 남긴다. 호스트는 `symbols.txt`(모드 소스의 `LR"(…)"` 기호 문자열을 빌드 때 뽑은 목록, 한 줄에 하나)의 모든 이름을 세 모듈(`taskbar.dll`, `Taskbar.View.dll`, `SystemTray.dll`) 모두에서 찾는다. 어느 기호가 필수인지는 런타임의 `HookSymbols`가 모드의 표를 보고 정한다.
+
+### 옮겨 찾은 오프셋
+
+Microsoft가 새 Windows 빌드의 PDB를 아직 올리지 않았으면 기호 서버가 404로 답한다. 이때만 호스트는 같은 모듈의 옛 공개 빌드에서 기호 위치를 옮겨 찾는다. 시간 초과나 연결 실패는 지금처럼 `download`로 끝난다. 확신하지 못하는 모듈은 쓰지 않고 꺼 둔다.
+
+- **모듈마다.** 호스트는 모든 모듈을 끝까지 시도한다. 공개된 모듈은 바로 오프셋을 쓰고, 종료 코드는 모듈 결과 가운데 가장 나쁜 것이다(1 > 11 > 14 > 0).
+- **출처.** 사용자 데이터 폴더의 옛 `offsets\<모듈>_*.txt`(내용의 stamp-size가 msdl 키다)와 호스트 옆 `port-sources.txt`를 함께 본다. `port-sources.txt`의 줄은 `<모듈> <파일 버전> <msdl 키> [SHA-256]`(모듈마다 새 것부터)과 `deny <모듈> <msdl 키>`다. 빌드가 `tools/port-sources.txt`에서 그 애드온의 `ADDON_SYMBOL_MODULES` 줄만 옮긴다. 새 파일과 같은 갈래(VS_VERSIONINFO의 major.minor.build)이고 그보다 오래되었으며 `deny`가 아닌 빌드를 새 것부터 두 개까지 시도한다. 목록에 없는 로컬 빌드는 버전을 알려고 그 DLL을 먼저 받는다(두 개까지).
+- **받기와 확인.** 옛 DLL은 msdl에서 키로 받아 `port-tmp`에 둔다. stamp와 size가 키와 같아야 하고, `port-sources.txt`가 SHA-256을 주면 그것과 같아야 한다. 주지 않으면 Microsoft 서명(파일에 든 Authenticode나 이 PC가 아는 카탈로그)이 있어야 한다. 옛 PDB는 `symbols`, Windhawk 캐시(읽기만), msdl 순서로 찾는다. 출처가 로컬 오프셋 파일이면 옛 PDB가 그 파일의 주소를 모두 그대로 내야 한다.
+- **쓰는 규칙.** 옮겨 찾기 엔진은 `symbols.txt`의 이름마다 `ported`, `absent`(옛 PDB에도 없음), `ambiguous`, `notfound`를 낸다. `symbols-meta.txt`(`이름<TAB>req|opt`, 모드의 `SYMBOL_HOOK` 넷째 칸이 글자 그대로 `true`일 때만 `opt`)에서 필수인 이름 가운데 옛 PDB에 있는 것이 하나라도 `ported`가 아니면 그 모듈은 아무것도 쓰지 않는다. 쓸 때는 `ported`만 RVA를 넣고 나머지는 빈 값이다. 이미지 머리 안이나 밖의 RVA, 옛 빌드에서는 따로였는데 새 빌드에서 한 주소에 모인 이름도 빈 값이 된다.
+- **곁 파일 `.ported`.** `key=value` 줄이다: `engine`, `host`, `source`(파일 버전과 키), `sourceKind`(`local`, `shipped`), `date`, `lastProbe`, 그리고 이름마다 `name=<결과>\t<RVA 16진>\t<근거>\t<이름>`. 곁 파일을 먼저 쓰고 오프셋 파일을 통째로 나중에 쓴다. 곁 파일이 있는 오프셋은 임시다.
+- **진짜로 바꾸기.** 임시 오프셋이 있으면 시작할 때 6시간에 한 번까지 진짜 PDB를 다시 찾는다. 찾으면 평소처럼 풀어 오프셋을 덮어쓰고, `host.log`에 `port diff: N same, M differ: <이름>`을 남긴 뒤 곁 파일, `.portfail`, `.quarantined`를 지운다. 못 찾으면 `lastProbe`만 고친다.
+- **실패 기억 `.portfail`.** 옮겨 찾지 못하면 `engine`, `host`, `sources`(후보 키와 `deny` 키), `at`, `why`를 남긴다. 엔진·호스트 버전·후보가 같으면 24시간 동안 다시 받지 않는다(Bloom의 30분 재시도). 이유는 `pdbMissing`이다.
+- **충돌 가드 `ported-guard.json`.** `{ "v": 1, "keys": ["taskbar.dll_<GUID+age>"], "armedAt": "…" }`. 임시 오프셋으로 넣거나 이어받기 전에 켜고, 임시 오프셋이 모두 진짜로 바뀔 때까지 둔다. 켜져 있는 동안 explorer가 한 번이라도 충돌하면(4절 "지키기"의 판단, 넣은 뒤 지난 시간과 상관없음) 그 키마다 `.quarantined`(이유, 시각, 출처)를 쓰고 임시 오프셋과 곁 파일을 지운 뒤 14, `portCrashed`로 끝난다. 앞선 호스트가 explorer와 함께 죽어 남긴 `loaded`에서 충돌 이벤트를 찾아도 같다. 격리된 빌드는 진짜 PDB가 나올 때까지 다시 옮겨 찾지 않는다.
 
 ## 2. 호스트 명령줄
 
@@ -139,7 +157,7 @@ PillTaskbarHost.exe --serve <Bloom PID> --bloom <Bloom.exe 경로> --bloom-local
                     [--reset-safe-mode] [--log] [--mod <파일 이름>|none]
 PillTaskbarHost.exe --stop
 PillTaskbarHost.exe --safe-mode
-PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--dump <폴더>]
+PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--dump <폴더>] [--simulate-404 <모듈>]
 ```
 
 - `--serve`: 평소 실행. Bloom이 `ArgumentList`로 띄운다.
@@ -149,7 +167,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 - `--reset-safe-mode`: Bloom의 [다시 켜기]. 시작할 때 `safeMode`와 `crashes`를 비운다.
 - `--log`: 런타임의 `Wh_Log`를 처음부터 켠다.
 - `--mod none`: 런타임만 넣는다(주입 시험용). `--mod <파일>`: 같은 폴더의 다른 모드 DLL(충돌 시험용).
-- `--resolve-symbols`: 기호만 준비하고 끝난다. `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다.
+- `--resolve-symbols`: 기호만 준비하고 끝난다. `--no-download`는 PDB를 받지 않고 캐시만 쓴다. `--dump`는 모듈마다 `names-<모듈>.txt`(`RVA 16진\t이름`)를 쓴다. `--simulate-404 <모듈>`(시험용)은 그 모듈의 PDB를 캐시도 서버도 보지 않고 "공개 안 됨"으로 다뤄 옮겨 찾기를 끝까지 돌린다. `--serve`와는 함께 쓸 수 없다.
 
 ## 3. 종료 코드
 
@@ -161,7 +179,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 | 11 | 필수 기호가 이 Windows에 없음 | 기호 없음 |
 | 12 | Windhawk에서 같은 모드가 켜져 있고 Windhawk가 그것을 올릴 수 있음(아래) | Windhawk에서 켜져 있음 |
 | 13 | 코드 무결성(SAC)이 DLL을 막음 | 보안 기능이 막음 |
-| 14 | 기호 파일을 받지 못함 | 받지 못함, [다시 시도] |
+| 14 | 기호 파일을 받지 못함. `reason`이 `pdbMissing`이면 Microsoft가 PDB를 아직 올리지 않았고 옮겨 찾기도 안 됨, `portCrashed`면 옮겨 찾은 오프셋으로 explorer가 충돌해 격리함, `download`면 연결 문제 | 받지 못함, [다시 시도] |
 | 15 | explorer를 다시 시작해야 함(앞서 올린 모드나 런타임 이미지가 explorer에 남아 있음, `runtime-state`의 `refused`/`restart`) | explorer 다시 시작 필요 |
 
 코드 15로 끝날 때 `host-state.json`의 `reason`은 `restart`다.
@@ -174,7 +192,7 @@ Bloom은 종료 코드 10–15 뒤에는 스스로 다시 띄우지 않는다.
 
 ### 넣기
 
-1. 호스트가 기호를 준비한다. 세 모듈의 디스크 파일에서 RSDS를 읽고, 오프셋 파일이 없으면 PDB를 데이터 폴더 `symbols`, Windhawk의 `C:\ProgramData\Windhawk\Engine\Symbols`(읽기만), msdl 순서로 찾아 dbghelp로 푼다.
+1. 호스트가 기호를 준비한다. 세 모듈의 디스크 파일에서 RSDS를 읽고, 오프셋 파일이 없으면 PDB를 데이터 폴더 `symbols`, Windhawk의 `C:\ProgramData\Windhawk\Engine\Symbols`(읽기만), msdl 순서로 찾아 dbghelp로 푼다. msdl이 404면 옮겨 찾는다(1절 "옮겨 찾은 오프셋"). 임시 오프셋을 쓰게 되면 충돌 가드를 켠다.
 2. `Shell_TrayWnd`의 스레드와 pid를 찾는다. 없으면 `TaskbarCreated`를 기다린다.
 3. `Local\PillTaskbar.Loaded.<pid>`가 이미 켜져 있으면 런타임이 들어 있다. `runtime-state.json`의 `version`이 같으면 넣지 않고 이어받는다. 다르면 `Unload`를 켜고 `Unloaded`를 10초까지 기다린 뒤 넣는다.
 4. `host-state.json`에 `loaded`를 먼저 쓴다.

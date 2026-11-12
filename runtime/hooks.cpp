@@ -20,6 +20,20 @@ std::atomic<bool> g_symbolsFailed;
 
 namespace {
 
+SRWLOCK g_degradedLock = SRWLOCK_INIT;
+std::vector<std::wstring> g_degraded;
+
+// True when the module was not listed yet.
+bool NoteDegraded(const std::wstring& file) {
+    AcquireSRWLockExclusive(&g_degradedLock);
+    bool added = std::find(g_degraded.begin(), g_degraded.end(), file) == g_degraded.end();
+    if (added) {
+        g_degraded.push_back(file);
+    }
+    ReleaseSRWLockExclusive(&g_degradedLock);
+    return added;
+}
+
 SRWLOCK g_lock = SRWLOCK_INIT;
 struct Hook {
     void* target;
@@ -111,6 +125,9 @@ bool BeginMod() {
     g_toRemove.clear();
     g_initialized = false;
     g_symbolsFailed = false;
+    AcquireSRWLockExclusive(&g_degradedLock);
+    g_degraded.clear();
+    ReleaseSRWLockExclusive(&g_degradedLock);
     g_unloading = !ok;
     ReleaseSRWLockExclusive(&g_lock);
     return ok;
@@ -347,6 +364,11 @@ BOOL HookSymbols(HMODULE module, const WH_SYMBOL_HOOK* entries, size_t count) {
     }
     if (missingRequired) {
         g_symbolsFailed = true;
+        // Only seen when the mod goes on without this module (a later load of it, or a
+        // module the mod treats as optional as a whole).
+        if (NoteDegraded(id.file.empty() ? std::wstring(L"unknown") : id.file)) {
+            RewriteRunningState();
+        }
         return FALSE;
     }
     // A failed call leaves none of its own hooks behind.
@@ -370,6 +392,13 @@ BOOL HookSymbols(HMODULE module, const WH_SYMBOL_HOOK* entries, size_t count) {
         }
     }
     return TRUE;
+}
+
+std::vector<std::wstring> Degraded() {
+    AcquireSRWLockShared(&g_degradedLock);
+    std::vector<std::wstring> out = g_degraded;
+    ReleaseSRWLockShared(&g_degradedLock);
+    return out;
 }
 
 BOOL Remove(void* target) {

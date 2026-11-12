@@ -12,6 +12,7 @@
 #include <unordered_set>
 
 #include "addon_protocol.h"
+#include "ported.h"
 #include "util.h"
 
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
@@ -63,6 +64,7 @@ bool ReadCodeView(const std::wstring& path, CodeView& out) {
         return false;
     out.timeDateStamp = nt->FileHeader.TimeDateStamp;
     out.sizeOfImage = nt->OptionalHeader.SizeOfImage;
+    out.sizeOfHeaders = nt->OptionalHeader.SizeOfHeaders;
     uint64_t secOff = (uint64_t)dos->e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
                       nt->FileHeader.SizeOfOptionalHeader;
     auto* sec = f.At<IMAGE_SECTION_HEADER>(secOff, nt->FileHeader.NumberOfSections);
@@ -98,6 +100,48 @@ std::wstring PdbId(const CodeView& cv) {
     const GUID& g = cv.guid;
     return Format(L"%08lX%04X%04X%02X%02X%02X%02X%02X%02X%02X%02X%lX", g.Data1, g.Data2, g.Data3, g.Data4[0],
                   g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7], cv.age);
+}
+
+std::wstring BinaryKey(DWORD timeDateStamp, DWORD sizeOfImage) {
+    return Format(L"%08lX%lX", timeDateStamp, sizeOfImage);
+}
+
+std::wstring FileVersion::Text() const {
+    return Format(L"%u.%u.%u.%u", part[0], part[1], part[2], part[3]);
+}
+
+bool ParseFileVersion(const std::wstring& text, FileVersion& out) {
+    unsigned a, b, c, d;
+    wchar_t tail;
+    if (swscanf(text.c_str(), L"%u.%u.%u.%u%lc", &a, &b, &c, &d, &tail) != 4 || a > 0xFFFF || b > 0xFFFF ||
+        c > 0xFFFF || d > 0xFFFF)
+        return false;
+    out = FileVersion{{(uint16_t)a, (uint16_t)b, (uint16_t)c, (uint16_t)d}, true};
+    return true;
+}
+
+bool ReadFileVersion(const std::wstring& path, FileVersion& out) {
+    // The resource itself, not GetFileVersionInfo: version.dll reports some system
+    // files (kernel32.dll) as 6.2 to a process without a supportedOS manifest.
+    HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    if (!m) return false;
+    bool ok = false;
+    HRSRC r = FindResourceW(m, MAKEINTRESOURCEW(VS_VERSION_INFO), RT_VERSION);
+    DWORD size = r ? SizeofResource(m, r) : 0;
+    HGLOBAL g = r ? LoadResource(m, r) : nullptr;
+    const BYTE* p = g ? (const BYTE*)LockResource(g) : nullptr;
+    // VS_VERSIONINFO: three WORDs, L"VS_VERSION_INFO", padding, then VS_FIXEDFILEINFO.
+    for (DWORD off = 0; p && !ok && off + sizeof(VS_FIXEDFILEINFO) <= size && off < 128; off += 4) {
+        VS_FIXEDFILEINFO fi;
+        memcpy(&fi, p + off, sizeof(fi));
+        if (fi.dwSignature != 0xFEEF04BD) continue;
+        out = FileVersion{{HIWORD(fi.dwFileVersionMS), LOWORD(fi.dwFileVersionMS), HIWORD(fi.dwFileVersionLS),
+                           LOWORD(fi.dwFileVersionLS)},
+                          true};
+        ok = true;
+    }
+    FreeLibrary(m);
+    return ok;
 }
 
 std::wstring FixPtr64(std::wstring name) {
@@ -255,7 +299,7 @@ DbgHelp g_dbghelp;
 struct EnumContext {
     DbgHelp* dbg;
     ULONG64 base;
-    const std::unordered_set<std::wstring>* wanted;
+    const std::unordered_set<std::wstring>* wanted;  // null: every name
     std::unordered_map<std::wstring, DWORD> found;  // first match wins, enumeration order
     std::vector<std::pair<DWORD, std::wstring>>* dump;
     std::unordered_set<std::wstring> dumped;
@@ -273,13 +317,13 @@ BOOL CALLBACK OnSymbol(PSYMBOL_INFOW si, ULONG, PVOID ctxPtr) {
         name = FixPtr64(out);
     }
     DWORD rva = (DWORD)(si->Address - ctx->base);
-    if (ctx->wanted->count(name)) ctx->found.emplace(name, rva);
+    if (!ctx->wanted || ctx->wanted->count(name)) ctx->found.emplace(name, rva);
     if (ctx->dump && ctx->dumped.insert(name).second) ctx->dump->emplace_back(rva, name);
     return TRUE;
 }
 
 bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbPath,
-             const std::unordered_set<std::wstring>& wanted, std::unordered_map<std::wstring, DWORD>& found,
+             const std::unordered_set<std::wstring>* wanted, std::unordered_map<std::wstring, DWORD>& found,
              std::vector<std::pair<DWORD, std::wstring>>* dump) {
     if (!g_dbghelp.Load()) {
         Log(L"dbghelp.dll from System32 did not load (%lu)", GetLastError());
@@ -299,7 +343,7 @@ bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbP
     const ULONG64 base = 0x180000000ull;  // any base; RVAs are taken relative to it
     bool ok = false;
     if (d.loadModule(proc, nullptr, m.path.c_str(), nullptr, base, cv.sizeOfImage, nullptr, 0)) {
-        EnumContext ctx{&d, base, &wanted, {}, dump, {}, 0};
+        EnumContext ctx{&d, base, wanted, {}, dump, {}, 0};
         d.enumSymbols(proc, base, L"*", OnSymbol, &ctx);
         IMAGEHLP_MODULEW64 mi{};
         mi.SizeOfStruct = sizeof(mi);
@@ -310,8 +354,11 @@ bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbP
             Log(L"%ls: dbghelp did not load the matching PDB (type %d)", m.name.c_str(),
                 infoOk ? (int)mi.SymType : -1);
         } else {
-            Log(L"%ls: %zu public symbols, %zu of %zu names found", m.name.c_str(), ctx.count, ctx.found.size(),
-                wanted.size());
+            if (wanted)
+                Log(L"%ls: %zu public symbols, %zu of %zu names found", m.name.c_str(), ctx.count, ctx.found.size(),
+                    wanted->size());
+            else
+                Log(L"%ls: %zu public symbols, %zu names", m.name.c_str(), ctx.count, ctx.found.size());
             found = std::move(ctx.found);
             ok = true;
         }
@@ -323,8 +370,6 @@ bool Resolve(const SymbolModule& m, const CodeView& cv, const std::wstring& pdbP
     return ok;
 }
 
-// --- download ---
-
 struct Internet {
     HINTERNET h = nullptr;
     explicit Internet(HINTERNET v) : h(v) {}
@@ -333,93 +378,6 @@ struct Internet {
     }
     explicit operator bool() const { return h != nullptr; }
 };
-
-enum class Download { Ok, Failed, Stopped };
-
-// Gets one PDB from the Microsoft symbol server into dest. The server answers with a
-// redirect to a signed storage URL; WinHTTP follows it and nothing keeps that URL.
-Download DownloadPdb(const std::wstring& pdb, const std::wstring& id, const std::wstring& dest,
-                     uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
-    std::wstring agent = std::wstring(ADDON_NAME L"Host/") + addon::kVersion;
-    Internet session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                                 WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session)  // Windows before 8.1 has no automatic proxy type
-        session.h = WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                                WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return Download::Failed;
-    WinHttpSetTimeouts(session.h, 30000, 30000, 30000, 60000);
-    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    WinHttpSetOption(session.h, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
-    Internet conn(WinHttpConnect(session.h, L"msdl.microsoft.com", INTERNET_DEFAULT_HTTPS_PORT, 0));
-    if (!conn) return Download::Failed;
-    std::wstring path = L"/download/symbols/" + pdb + L"/" + id + L"/" + pdb;
-    Internet req(WinHttpOpenRequest(conn.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                    WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
-    if (!req) return Download::Failed;
-    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(req.h, nullptr)) {
-        Log(L"%ls: request failed (%lu)", pdb.c_str(), GetLastError());
-        return Download::Failed;
-    }
-    DWORD status = 0, len = sizeof(status);
-    WinHttpQueryHeaders(req.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                        &status, &len, WINHTTP_NO_HEADER_INDEX);
-    if (status != 200) {
-        Log(L"%ls: server answered %lu", pdb.c_str(), status);
-        return Download::Failed;
-    }
-    uint64_t total = 0;
-    wchar_t lenText[32];
-    len = sizeof(lenText);
-    if (WinHttpQueryHeaders(req.h, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, lenText, &len,
-                            WINHTTP_NO_HEADER_INDEX))
-        total = wcstoull(lenText, nullptr, 10);
-
-    std::wstring part = dest + L".part";
-    Download result = Download::Ok;
-    {
-        Handle file(CreateFileW(part.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!file) return Download::Failed;
-        std::vector<char> buf(256 * 1024);
-        bytes = 0;
-        while (true) {
-            DWORD got = 0;
-            if (!WinHttpReadData(req.h, buf.data(), (DWORD)buf.size(), &got)) {
-                Log(L"%ls: read failed after %llu bytes (%lu)", pdb.c_str(), bytes, GetLastError());
-                result = Download::Failed;
-                break;
-            }
-            if (got == 0) break;
-            DWORD written = 0;
-            if (!WriteFile(file.get(), buf.data(), got, &written, nullptr) || written != got) {
-                result = Download::Failed;
-                break;
-            }
-            bytes += got;
-            if (progress && !progress(doneBefore + bytes, doneBefore + std::max(total, bytes))) {
-                result = Download::Stopped;
-                break;
-            }
-        }
-        if (result == Download::Ok && total && bytes != total) {
-            Log(L"%ls: got %llu of %llu bytes", pdb.c_str(), bytes, total);
-            result = Download::Failed;
-        }
-    }
-    if (result != Download::Ok || !MoveFileExW(part.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileW(part.c_str());
-        return result == Download::Ok ? Download::Failed : result;
-    }
-    return Download::Ok;
-}
-
-// Windhawk keeps the same symbol-store layout; the host only ever reads it.
-std::wstring WindhawkSymbolsDir() {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"ProgramData", buf, MAX_PATH);
-    std::wstring root = n && n < MAX_PATH ? buf : L"C:\\ProgramData";
-    return JoinPath(root, L"Windhawk\\Engine\\Symbols");
-}
 
 bool WriteDump(const std::wstring& dir, const std::wstring& module,
                std::vector<std::pair<DWORD, std::wstring>>& names) {
@@ -432,102 +390,417 @@ bool WriteDump(const std::wstring& dir, const std::wstring& module,
 
 }  // namespace
 
-int PrepareSymbols(const SymbolOptions& opt) {
+bool ResolveAllPublics(const std::wstring& pdbPath, const std::wstring& dllPath,
+                       std::vector<std::pair<std::wstring, DWORD>>& out, std::wstring& error) {
+    CodeView cv;
+    if (!ReadCodeView(dllPath, cv)) {
+        error = L"no RSDS record in " + FileName(dllPath);
+        return false;
+    }
+    std::unordered_map<std::wstring, DWORD> found;
+    if (!Resolve(SymbolModule{FileName(dllPath), dllPath}, cv, pdbPath, nullptr, found, nullptr)) {
+        error = L"the PDB did not load for " + FileName(dllPath);
+        return false;
+    }
+    out.assign(found.begin(), found.end());
+    std::sort(out.begin(), out.end(),
+              [](auto& a, auto& b) { return a.second != b.second ? a.second < b.second : a.first < b.first; });
+    return true;
+}
+
+// --- download ---
+
+Download DownloadForStatus(DWORD httpStatus) {
+    if (httpStatus == 200) return Download::Ok;
+    if (httpStatus == 404) return Download::NotFound;
+    return Download::Failed;
+}
+
+// The server answers with a redirect to a signed storage URL; WinHTTP follows it and
+// nothing keeps that URL.
+Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
+                            uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes) {
+    bytes = 0;
+    std::wstring agent = std::wstring(ADDON_NAME L"Host/") + addon::kVersion;
+    Internet session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                                 WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session)  // Windows before 8.1 has no automatic proxy type
+        session.h = WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                                WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return Download::Failed;
+    WinHttpSetTimeouts(session.h, 30000, 30000, 30000, 60000);
+    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    WinHttpSetOption(session.h, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
+    Internet conn(WinHttpConnect(session.h, L"msdl.microsoft.com", INTERNET_DEFAULT_HTTPS_PORT, 0));
+    if (!conn) return Download::Failed;
+    std::wstring path = L"/download/symbols/" + file + L"/" + key + L"/" + file;
+    Internet req(WinHttpOpenRequest(conn.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                    WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+    if (!req) return Download::Failed;
+    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(req.h, nullptr)) {
+        Log(L"%ls: request failed (%lu)", file.c_str(), GetLastError());
+        return Download::Failed;
+    }
+    DWORD status = 0, len = sizeof(status);
+    WinHttpQueryHeaders(req.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
+                        &status, &len, WINHTTP_NO_HEADER_INDEX);
+    if (Download d = DownloadForStatus(status); d != Download::Ok) {
+        Log(L"%ls/%ls: server answered %lu", file.c_str(), key.c_str(), status);
+        return d;
+    }
+    uint64_t total = 0;
+    wchar_t lenText[32];
+    len = sizeof(lenText);
+    if (WinHttpQueryHeaders(req.h, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, lenText, &len,
+                            WINHTTP_NO_HEADER_INDEX))
+        total = wcstoull(lenText, nullptr, 10);
+
+    std::wstring part = dest + L".part";
+    Download result = Download::Ok;
+    {
+        Handle out(CreateFileW(part.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!out) return Download::Failed;
+        std::vector<char> buf(256 * 1024);
+        while (true) {
+            DWORD got = 0;
+            if (!WinHttpReadData(req.h, buf.data(), (DWORD)buf.size(), &got)) {
+                Log(L"%ls: read failed after %llu bytes (%lu)", file.c_str(), bytes, GetLastError());
+                result = Download::Failed;
+                break;
+            }
+            if (got == 0) break;
+            DWORD written = 0;
+            if (!WriteFile(out.get(), buf.data(), got, &written, nullptr) || written != got) {
+                result = Download::Failed;
+                break;
+            }
+            bytes += got;
+            if (progress && !progress(doneBefore + bytes, doneBefore + std::max(total, bytes))) {
+                result = Download::Stopped;
+                break;
+            }
+        }
+        if (result == Download::Ok && total && bytes != total) {
+            Log(L"%ls: got %llu of %llu bytes", file.c_str(), bytes, total);
+            result = Download::Failed;
+        }
+    }
+    if (result != Download::Ok || !MoveFileExW(part.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(part.c_str());
+        return result == Download::Ok ? Download::Failed : result;
+    }
+    return Download::Ok;
+}
+
+std::wstring WindhawkSymbolsDir() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", buf, MAX_PATH);
+    std::wstring root = n && n < MAX_PATH ? buf : L"C:\\ProgramData";
+    return JoinPath(root, L"Windhawk\\Engine\\Symbols");
+}
+
+// --- preparing ---
+
+std::vector<std::wstring> SymbolReport::PortedKeys() const {
+    std::vector<std::wstring> keys;
+    for (auto& m : modules)
+        if (m.exit == addon::kExitOk && m.ported) keys.push_back(m.key);
+    return keys;
+}
+
+std::wstring SymbolReport::PortedFrom() const {
+    std::vector<std::wstring> seen;
+    std::wstring out;
+    for (auto& m : modules) {
+        if (m.exit != addon::kExitOk || !m.ported || m.portedFrom.empty()) continue;
+        if (std::find(seen.begin(), seen.end(), m.portedFrom) != seen.end()) continue;
+        seen.push_back(m.portedFrom);
+        if (!out.empty()) out += L',';
+        out += m.portedFrom;
+    }
+    return out;
+}
+
+int WorstExit(int a, int b) {
+    // Something unexpected first, then a module that is not there at all, then one
+    // whose symbols could not be had (worth another try later).
+    auto rank = [](int c) {
+        switch (c) {
+            case addon::kExitOk: return 0;
+            case addon::kExitDownload: return 1;
+            case addon::kExitNoSymbols: return 2;
+            default: return 3;
+        }
+    };
+    return rank(b) > rank(a) ? b : a;
+}
+
+namespace {
+
+struct PdbLookup {
+    Download result = Download::Failed;
+    std::wstring path;
+    bool ours = false;  // in the host's own folder: deleted once used
+};
+
+// Own cache, then Windhawk's (read only), then the symbol server.
+PdbLookup FindPdb(const SymbolOptions& opt, const SymbolModule& m, const CodeView& cv, uint64_t& downloaded) {
+    PdbLookup r;
+    std::wstring id = PdbId(cv);
+    if (!opt.simulate404.empty() && EqualsNoCase(opt.simulate404, m.name)) {
+        Log(L"%ls: %ls/%ls treated as not published (--simulate-404)", m.name.c_str(), cv.pdbName.c_str(),
+            id.c_str());
+        r.result = Download::NotFound;
+        return r;
+    }
+    std::wstring ownDir = JoinPath(JoinPath(JoinPath(opt.dataDir, addon::kSymbolsDir), cv.pdbName), id);
+    r.path = JoinPath(ownDir, cv.pdbName);
+    if (FileExists(r.path)) {
+        r.result = Download::Ok;
+        r.ours = true;
+        return r;
+    }
+    std::wstring wh = JoinPath(JoinPath(JoinPath(WindhawkSymbolsDir(), cv.pdbName), id), cv.pdbName);
+    if (!opt.noWindhawkCache && FileExists(wh)) {
+        Log(L"%ls: using Windhawk's cached %ls", m.name.c_str(), cv.pdbName.c_str());
+        r.path = wh;
+        r.result = Download::Ok;
+        return r;
+    }
+    if (opt.noDownload) {
+        Log(L"%ls: %ls/%ls not cached and downloads are off", m.name.c_str(), cv.pdbName.c_str(), id.c_str());
+        r.result = Download::Failed;
+        return r;
+    }
+    CreateDirs(ownDir);
+    auto t0 = std::chrono::steady_clock::now();
+    uint64_t bytes = 0;
+    r.result = DownloadSymbolFile(cv.pdbName, id, r.path, downloaded, opt.progress, bytes);
+    if (r.result != Download::Ok) {
+        RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
+        return r;
+    }
+    downloaded += bytes;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+    Log(L"%ls: downloaded %ls, %llu bytes in %lld ms", m.name.c_str(), cv.pdbName.c_str(), bytes,
+        (long long)ms.count());
+    r.ours = true;
+    return r;
+}
+
+// A PDB in our own folder only ever came from the symbol server; once the offsets
+// exist it is not needed. A broken one goes too, so the next try downloads it again.
+void DropOwnPdb(const PdbLookup& p, const std::wstring& dataDir) {
+    if (!p.ours) return;
+    DeleteFileW(p.path.c_str());
+    RemoveEmptyDirsUpTo(DirName(p.path), dataDir);
+}
+
+// The files that only mean something while this build has no real offsets.
+void DropPortFiles(const std::wstring& offsetsDir, const std::wstring& key) {
+    for (const wchar_t* ext : {kPortedExt, kPortFailExt, kQuarantinedExt})
+        DeleteFileW(JoinPath(offsetsDir, key + ext).c_str());
+}
+
+class Preparer {
+public:
+    Preparer(const SymbolOptions& opt, const std::vector<std::wstring>& names)
+        : opt_(opt), names_(names), wanted_(names.begin(), names.end()),
+          offsetsDir_(JoinPath(opt.dataDir, addon::kOffsetsDir)) {}
+
+    // kExitOk or this module's failure; kSymbolsStopped to stop.
+    int Module(const SymbolModule& m, ModuleReport& rep);
+
+    uint64_t downloaded = 0;
+    bool pdbMissing = false;   // a 404 that porting did not cover
+    bool portCrashed = false;  // a 404 on a build that is quarantined
+
+private:
+    int Real(const SymbolModule& m, const CodeView& cv, const PdbLookup& pdb, const std::wstring& offPath,
+             const OffsetsFile* ported);
+    int ProbePorted(const SymbolModule& m, const CodeView& cv, const std::wstring& offPath,
+                    const OffsetsFile& ported, ModuleReport& rep);
+    int Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep);
+
+    const SymbolOptions& opt_;
+    const std::vector<std::wstring>& names_;
+    std::unordered_set<std::wstring> wanted_;
+    std::wstring offsetsDir_;
+};
+
+int Preparer::Module(const SymbolModule& m, ModuleReport& rep) {
+    rep.module = m.name;
+    CodeView cv;
+    if (!FileExists(m.path)) {
+        Log(L"%ls: not found at %ls", m.name.c_str(), m.path.c_str());
+        return addon::kExitNoSymbols;
+    }
+    if (!ReadCodeView(m.path, cv)) {
+        Log(L"%ls: no RSDS record", m.name.c_str());
+        return addon::kExitNoSymbols;
+    }
+    rep.key = ModuleKey(m.name, cv);
+    std::wstring offPath = JoinPath(offsetsDir_, OffsetsFileName(m.name, cv));
+    std::string existing;
+    OffsetsFile old;
+    if (opt_.dumpDir.empty() && ReadFileBytes(offPath, existing) && ParseOffsets(existing, old) &&
+        OffsetsMatch(old, m.name, cv, names_)) {
+        if (!FileExists(JoinPath(offsetsDir_, rep.key + kPortedExt))) {
+            Log(L"%ls: offsets for %ls already there", m.name.c_str(), PdbId(cv).c_str());
+            return addon::kExitOk;
+        }
+        return ProbePorted(m, cv, offPath, old, rep);
+    }
+
+    PdbLookup pdb = FindPdb(opt_, m, cv, downloaded);
+    switch (pdb.result) {
+        case Download::Ok: return Real(m, cv, pdb, offPath, nullptr);
+        case Download::Stopped: return kSymbolsStopped;
+        case Download::Failed: return addon::kExitDownload;
+        case Download::NotFound: return Port(m, cv, rep);
+    }
+    return addon::kExitError;
+}
+
+// Writes the module's real offsets; ported, when given, is what they replace.
+int Preparer::Real(const SymbolModule& m, const CodeView& cv, const PdbLookup& pdb, const std::wstring& offPath,
+                   const OffsetsFile* ported) {
+    std::unordered_map<std::wstring, DWORD> found;
+    std::vector<std::pair<DWORD, std::wstring>> dump;
+    bool ok = Resolve(m, cv, pdb.path, &wanted_, found, opt_.dumpDir.empty() ? nullptr : &dump);
+    OffsetsFile out;
+    if (ok) {
+        out.module = Lower(m.name);
+        out.timeDateStamp = cv.timeDateStamp;
+        out.sizeOfImage = cv.sizeOfImage;
+        for (auto& n : names_) {
+            auto it = found.find(n);
+            out.entries.emplace_back(n, it == found.end() ? std::nullopt : std::optional<DWORD>(it->second));
+        }
+        ok = WriteFileAtomic(offPath, FormatOffsets(out));
+        if (!ok) Log(L"%ls: could not write its offsets file (%lu)", m.name.c_str(), GetLastError());
+    }
+    if (ok) {
+        if (ported) {
+            size_t differ = 0;
+            Log(L"%ls: the real PDB is out; port diff: %ls", m.name.c_str(), PortDiff(*ported, out, differ).c_str());
+        }
+        // Real offsets first, then the sidecar goes: a stop in between leaves an extra
+        // sidecar, which only makes the next start ask for the PDB once more.
+        DropPortFiles(offsetsDir_, ModuleKey(m.name, cv));
+    }
+    if (ok && !opt_.dumpDir.empty() && !WriteDump(opt_.dumpDir, m.name, dump))
+        Log(L"%ls: could not write the name dump", m.name.c_str());
+    DropOwnPdb(pdb, opt_.dataDir);
+    return ok ? addon::kExitOk : addon::kExitError;
+}
+
+// Ported offsets that cover every name stay in use until the real PDB turns up, which
+// is asked for at most every kPortProbeInterval.
+int Preparer::ProbePorted(const SymbolModule& m, const CodeView& cv, const std::wstring& offPath,
+                          const OffsetsFile& ported, ModuleReport& rep) {
+    std::wstring sidecarPath = JoinPath(offsetsDir_, rep.key + kPortedExt);
+    std::string text;
+    Sidecar sc;
+    bool known = ReadFileBytes(sidecarPath, text) && ParseSidecar(text, sc);
+    rep.ported = true;
+    rep.portedFrom = known ? sc.sourceVersion : L"";
+    uint64_t now = NowTicks();
+    if ((known && !ProbeDue(sc, now)) || opt_.noDownload) {
+        Log(L"%ls: ported offsets for %ls (from %ls) already there", m.name.c_str(), PdbId(cv).c_str(),
+            rep.portedFrom.empty() ? L"?" : rep.portedFrom.c_str());
+        return addon::kExitOk;
+    }
+    PdbLookup pdb = FindPdb(opt_, m, cv, downloaded);
+    if (pdb.result == Download::Stopped) return kSymbolsStopped;
+    if (pdb.result == Download::Ok) {
+        if (Real(m, cv, pdb, offPath, &ported) == addon::kExitOk) {
+            rep.ported = false;
+            rep.portedFrom.clear();
+            return addon::kExitOk;
+        }
+        Log(L"%ls: the real PDB did not resolve; keeping the ported offsets", m.name.c_str());
+    } else {
+        Log(L"%ls: the real PDB is still %ls; keeping the ported offsets", m.name.c_str(),
+            pdb.result == Download::NotFound ? L"not published" : L"out of reach");
+    }
+    if (known) {
+        sc.lastProbe = now;
+        if (!WriteFileAtomic(sidecarPath, FormatSidecar(sc)))
+            Log(L"%ls: could not update its sidecar", m.name.c_str());
+    }
+    return addon::kExitOk;
+}
+
+int Preparer::Port(const SymbolModule& m, const CodeView& cv, ModuleReport& rep) {
+    PortRequest req;
+    req.dataDir = opt_.dataDir;
+    req.exeDir = DirName(opt_.symbolList);
+    req.module = m;
+    req.cv = cv;
+    req.names = names_;
+    req.noWindhawkCache = opt_.noWindhawkCache;
+    req.progress = opt_.progress;
+    req.downloaded = &downloaded;
+    PortReport pr;
+    PortStatus st = PortModule(req, pr);
+    if (!pr.detail.empty()) Log(L"%ls: %ls", m.name.c_str(), pr.detail.c_str());
+    switch (st) {
+        case PortStatus::Written:
+            rep.ported = true;
+            rep.portedFrom = pr.sourceVersion;
+            return addon::kExitOk;
+        case PortStatus::Stopped: return kSymbolsStopped;
+        case PortStatus::Failed: return addon::kExitDownload;
+        case PortStatus::Quarantined:
+            portCrashed = true;
+            return addon::kExitDownload;
+        case PortStatus::Unported:
+        case PortStatus::Skipped:
+            pdbMissing = true;
+            return addon::kExitDownload;
+    }
+    return addon::kExitError;
+}
+
+}  // namespace
+
+int PrepareSymbols(const SymbolOptions& opt, SymbolReport* report) {
+    SymbolReport local;
+    SymbolReport& rep = report ? *report : local;
+    rep = SymbolReport{};
     std::vector<std::wstring> names;
     if (!ReadSymbolList(opt.symbolList, names)) {
         Log(L"%ls is missing or empty", addon::kSymbolList);
         return addon::kExitError;
     }
-    std::unordered_set<std::wstring> wanted(names.begin(), names.end());
-    std::wstring offsetsDir = JoinPath(opt.dataDir, addon::kOffsetsDir);
-    std::wstring symbolsDir = JoinPath(opt.dataDir, addon::kSymbolsDir);
-    if (!CreateDirs(offsetsDir)) {
+    if (!CreateDirs(JoinPath(opt.dataDir, addon::kOffsetsDir))) {
         Log(L"could not create the offsets folder (%lu)", GetLastError());
         return addon::kExitError;
     }
-    uint64_t downloaded = 0;
-
+    // Every module is tried even after one fails, so what is published gets its
+    // offsets now and only the rest waits.
+    Preparer p(opt, names);
+    int worst = addon::kExitOk;
+    bool plainDownload = false;  // a module failed on the network, not on a 404
     for (const SymbolModule& m : opt.modules) {
-        CodeView cv;
-        if (!FileExists(m.path)) {
-            Log(L"%ls: not found at %ls", m.name.c_str(), m.path.c_str());
-            return addon::kExitNoSymbols;
-        }
-        if (!ReadCodeView(m.path, cv)) {
-            Log(L"%ls: no RSDS record", m.name.c_str());
-            return addon::kExitNoSymbols;
-        }
-        std::wstring id = PdbId(cv);
-        std::wstring offPath = JoinPath(offsetsDir, OffsetsFileName(m.name, cv));
-        std::string existing;
-        OffsetsFile old;
-        if (opt.dumpDir.empty() && ReadFileBytes(offPath, existing) && ParseOffsets(existing, old) &&
-            OffsetsMatch(old, m.name, cv, names)) {
-            Log(L"%ls: offsets for %ls already there", m.name.c_str(), id.c_str());
-            continue;
-        }
-
-        // Own cache, then Windhawk's (read only), then the symbol server.
-        std::wstring ownDir = JoinPath(JoinPath(symbolsDir, cv.pdbName), id);
-        std::wstring pdbPath = JoinPath(ownDir, cv.pdbName);
-        bool ours = FileExists(pdbPath);
-        if (!ours) {
-            std::wstring wh = JoinPath(JoinPath(JoinPath(WindhawkSymbolsDir(), cv.pdbName), id), cv.pdbName);
-            if (!opt.noWindhawkCache && FileExists(wh)) {
-                pdbPath = wh;
-                Log(L"%ls: using Windhawk's cached %ls", m.name.c_str(), cv.pdbName.c_str());
-            } else if (opt.noDownload) {
-                Log(L"%ls: %ls/%ls not cached and downloads are off", m.name.c_str(), cv.pdbName.c_str(), id.c_str());
-                return addon::kExitDownload;
-            } else {
-                CreateDirs(ownDir);
-                auto t0 = std::chrono::steady_clock::now();
-                uint64_t bytes = 0;
-                Download r = DownloadPdb(cv.pdbName, id, pdbPath, downloaded, opt.progress, bytes);
-                if (r == Download::Stopped) {
-                    RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
-                    return kSymbolsStopped;
-                }
-                if (r != Download::Ok) {
-                    RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
-                    return addon::kExitDownload;
-                }
-                downloaded += bytes;
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
-                Log(L"%ls: downloaded %ls, %llu bytes in %lld ms", m.name.c_str(), cv.pdbName.c_str(), bytes,
-                    (long long)ms.count());
-                ours = true;
-            }
-        }
-
-        std::unordered_map<std::wstring, DWORD> found;
-        std::vector<std::pair<DWORD, std::wstring>> dump;
-        bool resolved = Resolve(m, cv, pdbPath, wanted, found, opt.dumpDir.empty() ? nullptr : &dump);
-        OffsetsFile out;
-        if (resolved) {
-            out.module = Lower(m.name);
-            out.timeDateStamp = cv.timeDateStamp;
-            out.sizeOfImage = cv.sizeOfImage;
-            for (auto& n : names) {
-                auto it = found.find(n);
-                out.entries.emplace_back(n, it == found.end() ? std::nullopt : std::optional<DWORD>(it->second));
-            }
-            resolved = WriteFileAtomic(offPath, FormatOffsets(out));
-            if (!resolved) Log(L"%ls: could not write its offsets file (%lu)", m.name.c_str(), GetLastError());
-        }
-        if (resolved && !opt.dumpDir.empty() && !WriteDump(opt.dumpDir, m.name, dump))
-            Log(L"%ls: could not write the name dump", m.name.c_str());
-        // A PDB in our own folder only ever came from the symbol server; once the
-        // offsets exist it is not needed. A broken one goes too, so the next try
-        // downloads it again.
-        if (ours) {
-            DeleteFileW(pdbPath.c_str());
-            RemoveEmptyDirsUpTo(ownDir, opt.dataDir);
-        }
-        if (!resolved) return addon::kExitError;
+        ModuleReport mr;
+        bool missingBefore = p.pdbMissing, crashedBefore = p.portCrashed;
+        int r = p.Module(m, mr);
+        if (r == kSymbolsStopped) return kSymbolsStopped;
+        mr.exit = r;
+        if (r == addon::kExitDownload && p.pdbMissing == missingBefore && p.portCrashed == crashedBefore)
+            plainDownload = true;
+        rep.modules.push_back(std::move(mr));
+        worst = WorstExit(worst, r);
     }
-    if (opt.progress && downloaded) opt.progress(downloaded, downloaded);
-    return addon::kExitOk;
+    // The reason that helps most: a quarantine stays until Microsoft publishes, a
+    // network failure the user can fix, a missing PDB only waits.
+    if (worst == addon::kExitDownload)
+        rep.reason = p.portCrashed ? L"portCrashed" : plainDownload ? L"" : p.pdbMissing ? L"pdbMissing" : L"";
+    if (opt.progress && p.downloaded) opt.progress(p.downloaded, p.downloaded);
+    return worst;
 }
 
 }  // namespace host
