@@ -804,7 +804,8 @@ private:
     // or a Microsoft signature.
     PortStatus GetOldDll(Candidate& c, std::wstring& path, std::wstring& why);
     PortStatus GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wstring& why);
-    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, std::wstring& why);
+    PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, uint64_t maxBytes,
+                     std::wstring& why);
     PortStatus TryOne(Candidate& c, PortReport& rep, std::wstring& why);
     void RememberFailure(const std::wstring& why);
 
@@ -817,7 +818,7 @@ private:
 
 // why is set only when downloads are off.
 PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
-                         std::wstring& why) {
+                         uint64_t maxBytes, std::wstring& why) {
     if (req_.noDownload) {
         why = file + L"/" + key + L": not cached and downloads are off";
         return PortStatus::Failed;
@@ -825,7 +826,7 @@ PortStatus Porter::Fetch(const std::wstring& file, const std::wstring& key, cons
     CreateDirs(DirName(dest));
     uint64_t bytes = 0;
     uint64_t before = req_.downloaded ? *req_.downloaded : 0;
-    Download d = DownloadSymbolFile(file, key, dest, before, req_.progress, bytes);
+    Download d = DownloadSymbolFile(file, key, dest, maxBytes, before, req_.progress, bytes);
     if (req_.downloaded) *req_.downloaded += bytes;
     switch (d) {
         case Download::Ok: return PortStatus::Written;
@@ -843,7 +844,12 @@ PortStatus Porter::GetOldDll(Candidate& c, std::wstring& path, std::wstring& why
     }
     std::wstring file = Lower(req_.module.name);
     path = JoinPath(JoinPath(tmp_, file + L"_" + c.key), file);
-    PortStatus st = Fetch(file, c.key, path, why);
+    DWORD stamp = 0, size = 0;
+    if (!ParseBinaryKey(c.key, stamp, size)) {
+        why = c.key + L": not a binary key";
+        return PortStatus::Unported;
+    }
+    PortStatus st = Fetch(file, c.key, path, DllDownloadCap(size), why);
     if (st != PortStatus::Written) {
         if (why.empty())
             why = c.key + (st == PortStatus::Unported ? L": the old DLL is not on the symbol server" : L": download failed");
@@ -924,7 +930,7 @@ PortStatus Porter::GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wst
         return PortStatus::Written;
     }
     path = JoinPath(JoinPath(tmp_, oldCv.pdbName + L"_" + id), oldCv.pdbName);
-    PortStatus st = Fetch(oldCv.pdbName, id, path, why);
+    PortStatus st = Fetch(oldCv.pdbName, id, path, kMaxPdbBytes, why);
     if (st != PortStatus::Written && why.empty())
         why = id + (st == PortStatus::Unported ? L": the old PDB is not on the symbol server" : L": download failed");
     return st;

@@ -342,6 +342,14 @@ void TestDownloadMapping() {
           L"symbols: worst exit order");
     Check(BinaryKey(1635664427, 3252224) == L"617E422B31A000" && BinaryKey(0x0ABC, 0x1000) == L"00000ABC1000",
           L"symbols: msdl binary key");
+    DWORD stamp = 0, size = 0;
+    Check(ParseBinaryKey(L"E8E4B3D1308000", stamp, size) && stamp == 0xE8E4B3D1 && size == 0x308000 &&
+              !ParseBinaryKey(L"E8E4B3D1", stamp, size) && !ParseBinaryKey(L"E8E4B3D13080x0", stamp, size),
+          L"symbols: msdl binary key parsed back");
+    // taskbar.dll 9549: SizeOfImage 0x308000, the file 3216656 bytes.
+    Check(DllDownloadCap(0x308000) > 3216656 && DllDownloadCap(0x308000) < 6 * 1024 * 1024 &&
+              kMaxPdbBytes >= 10 * 50ull * 1024 * 1024 && kDownloadDeadlineMs >= 10 * 60 * 1000,
+          L"symbols: download caps leave room for the files measured");
     FileVersion a, b, c;
     Check(ParseFileVersion(L"10.0.26100.9818", a) && ParseFileVersion(L"10.0.26100.9974", b) &&
               ParseFileVersion(L"10.0.26300.7000", c) && a.Text() == L"10.0.26100.9818",
