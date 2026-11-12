@@ -527,6 +527,25 @@ private:
 
 enum Tag : uint8_t { kTagAnchor = 1, kTagRefs = 2, kTagVtslot = 4, kTagReferrer = 8 };
 enum SrcKind : uint64_t { kSrcA = 1, kSrcV = 2, kSrcR = 3 };
+
+// The independent roots a pair's evidence grew from: a seed anchor, or a table matched by
+// RTTI or by slot content. Only "one or several" matters, so a set keeps its two
+// smallest ids; two such sets merge to two exactly when the full sets do.
+struct Roots {
+    uint64_t id[2] = {};
+    uint8_t n = 0;
+    void Add(uint64_t r) {
+        if ((n > 0 && id[0] == r) || (n > 1 && id[1] == r)) return;
+        if (n < 2) id[n++] = r;
+        else if (r < id[1]) id[1] = r;
+        else return;
+        if (n == 2 && id[0] > id[1]) std::swap(id[0], id[1]);
+    }
+    void Add(const Roots& o) {
+        for (uint8_t i = 0; i < o.n; i++) Add(o.id[i]);
+    }
+    size_t size() const { return n; }
+};
 uint64_t Src(SrcKind k, uint32_t id) { return (uint64_t)k << 32 | id; }
 uint64_t Key(uint32_t x, uint32_t y) { return (uint64_t)x << 32 | y; }
 
@@ -568,7 +587,10 @@ public:
     void Run();
 
     std::unordered_map<uint32_t, Cands> ev;
+    // Per pair: the sources a contradiction bans, and the roots its evidence grew from. A
+    // derived pair inherits the roots of what produced it.
     std::unordered_map<uint64_t, std::vector<uint64_t>> prov;
+    std::unordered_map<uint64_t, Roots> roots;
     std::unordered_map<uint32_t, uint32_t> anchors;
     std::unordered_map<uint32_t, VtMapping> vtMap;
     std::unordered_set<uint32_t> seeds, shared, finalBad, conflicted;
@@ -583,6 +605,11 @@ public:
         double r = fo && fn ? sim_.Ratio(old_, *fo, new_, *fn) : 0.0;
         simCache_[k] = r;
         return r;
+    }
+    Roots RootsOf(uint32_t x, uint32_t y) const {
+        static const Roots none;
+        auto it = roots.find(Key(x, y));
+        return it == roots.end() ? none : it->second;
     }
     bool Single(uint32_t x, uint32_t& y, uint8_t& tags) const {
         auto it = ev.find(x);
@@ -622,6 +649,7 @@ private:
         ev[x].Add(y) |= tag;
         InsertSorted(prov[Key(x, y)], src);
     }
+    void AddRoots(uint32_t x, uint32_t y, const Roots& src) { roots[Key(x, y)].Add(src); }
 };
 
 bool Engine::ByRtti(uint32_t v, uint32_t& to) const {
@@ -737,6 +765,7 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         if (!banAnchor_.count(o)) anchors[o] = n;
     ev.clear();
     prov.clear();
+    roots.clear();
     vtMap.clear();
     d2Known.clear();
     std::unordered_set<uint32_t> doneAnchor, doneVt;
@@ -754,10 +783,14 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         std::sort(fresh.begin(), fresh.end());
         for (auto& [o, n] : fresh) {
             Add(o, n, kTagAnchor, Src(kSrcA, o));
+            // A seed is a root of its own; a derived anchor passes on the roots it grew from.
+            if (seedMap.count(o)) roots[Key(o, n)].Add(Src(kSrcA, o));
+            const Roots from = RootsOf(o, n);
             RefPairs(*old_.At(o), *new_.At(n), pairs);
             for (auto& [x, y] : pairs) {
                 if (x == kNoTarget || y == kNoTarget) continue;
                 Add(x, y, kTagRefs, Src(kSrcA, o));
+                AddRoots(x, y, from);
             }
         }
         for (uint32_t v : vtCands_) {
@@ -795,9 +828,14 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
             std::vector<uint64_t> srcs{Src(kSrcV, v)};
             auto p = prov.find(Key(v, m.to));
             if (p != prov.end()) MergeInto(srcs, p->second);
+            // RTTI and slot content are roots of their own; code references only pass on
+            // the roots of the anchors that hold them.
+            Roots rs = RootsOf(v, m.to);
+            if (m.rtti || m.slots) rs.Add(Src(kSrcV, v));
             for (size_t k = 0; k < so.size(); k++) {
                 ev[so[k]].Add(sn[k]) |= kTagVtslot;
                 MergeInto(prov[Key(so[k], sn[k])], srcs);
+                AddRoots(so[k], sn[k], rs);
             }
         }
         {
@@ -822,6 +860,8 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
                     auto& dst = prov[Key(t, t2)];
                     auto p = prov.find(Key(x, y));
                     if (p != prov.end()) MergeInto(dst, p->second);
+                    // The referrer adds no root: it only follows what x -> y stands on.
+                    AddRoots(t, t2, RootsOf(x, y));
                 }
             }
         }
@@ -830,7 +870,9 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
             uint32_t y = c.ys[0].first;
             const Func* fo = old_.At(x);
             const Func* fn = new_.At(y);
-            if (fo && fn && fo->tok == fn->tok) anchors[x] = y;
+            // Only a body unique in both builds: one candidate behind a common body (a thunk,
+            // a getter) may be any of its copies.
+            if (fo && fn && fo->tok == fn->tok && old_.TokCount(*fo) == 1 && new_.TokCount(*fn) == 1) anchors[x] = y;
         }
         auto after = std::make_tuple(anchors.size(), total(), vtMap.size());
         if (after == before || rounds > 30) break;
@@ -1054,6 +1096,7 @@ private:
         return AnyName(a, [](const std::wstring& n) { return n.find(L"`vftable'") != std::wstring::npos; });
     }
     bool TemplateName(uint32_t a) const;
+    bool R8Roots(uint32_t a, uint32_t y) const;
     void Vftables();
     void Functions();
     void Globals();
@@ -1080,6 +1123,16 @@ public:
         return old_.pe.IsExec(a) && old_.At(a) && (StillFolded(a, y) || OwnFoldedSlot(name, a, y));
     }
 };
+
+// R8: references that grew from two independent roots, or a reference in a seed itself.
+bool Acceptor::R8Roots(uint32_t a, uint32_t y) const {
+    if (eng_.RootsOf(a, y).size() >= 2) return true;
+    auto p = eng_.prov.find(Key(a, y));
+    if (p != eng_.prov.end())
+        for (uint64_t src : p->second)
+            if ((src >> 32) == kSrcA && eng_.seeds.count((uint32_t)src)) return true;
+    return false;
+}
 
 bool Acceptor::TemplateName(uint32_t a) const {
     auto it = names_.find(a);
@@ -1380,9 +1433,11 @@ void Acceptor::Functions() {
         // Proof: the masked body is identical and unique, and its shape is unique, in both builds.
         bool proof = same && old_.TokCount(fo) == 1 && new_.TokCount(*fn) == 1 && old_.ShapeCount(fo) == 1 &&
                      new_.ShapeCount(*fn) == 1;
-        // R2: two independent kinds of evidence, or the proof. Referrer alone never decides.
-        if (Bits(tags) < 2 && !proof) {
-            vd.evidence = L"R2 one kind of evidence (" + kinds + L")";
+        // R2: two kinds of evidence that grew from two independent roots, or the proof.
+        // Referrer alone never decides.
+        if ((Bits(tags) < 2 || eng_.RootsOf(a, y).size() < 2) && !proof) {
+            vd.evidence = std::wstring(Bits(tags) < 2 ? L"R2 one kind of evidence (" : L"R2 one root of evidence (") +
+                          kinds + L")";
             verdicts_[a] = vd;
             continue;
         }
@@ -1505,6 +1560,8 @@ void Acceptor::Globals() {
                 // R3: references are the only evidence for data, and no structure proves
                 // one instance of a template's data from another.
                 vd.evidence = L"R3 template name, data has no structural proof (refs)";
+            } else if (!R8Roots(a, y)) {
+                vd.evidence = L"R8 one root of evidence (refs)";
             } else {
                 vd.outcome = Outcome::Ported;
                 vd.rva = y;
