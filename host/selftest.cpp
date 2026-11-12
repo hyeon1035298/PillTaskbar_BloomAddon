@@ -666,6 +666,40 @@ void TestWorker() {
     Check(ok && !*done, L"worker: without idle the caller just waits");
 }
 
+// port::Run checks the NEW build before it reads code, and a set cancel flag stops it.
+// System32's kernel32.dll stands in for both builds.
+void TestPortIdentity() {
+    wchar_t sys[MAX_PATH];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring dll = JoinPath(sys, L"kernel32.dll");
+    CodeView cv;
+    if (!ReadCodeView(dll, cv)) {
+        Check(false, L"port identity: kernel32.dll has a CodeView record");
+        return;
+    }
+    std::atomic<bool> stop{true};
+    port::Input in;
+    in.oldDll = in.newDll = dll;
+    in.cancel = &stop;
+    std::vector<port::Result> out;
+    port::Stats stats;
+    std::wstring error;
+    in.expectNew = ExpectedNew(cv);
+    bool ok = port::Run(in, out, stats, error);
+    Check(!ok && error == L"stopped", L"port identity: the build it was told of passes, then the cancel flag stops it");
+    in.expectNew.pdbGuid[0] ^= 1;
+    ok = port::Run(in, out, stats, error);
+    Check(!ok && error.find(L"another build") != std::wstring::npos, L"port identity: another RSDS GUID fails");
+    in.expectNew = ExpectedNew(cv);
+    in.expectNew.pdbAge++;
+    ok = port::Run(in, out, stats, error);
+    Check(!ok && error.find(L"another build") != std::wstring::npos, L"port identity: another age fails");
+    in.expectNew = ExpectedNew(cv);
+    in.expectNew.timeDateStamp ^= 1;
+    ok = port::Run(in, out, stats, error);
+    Check(!ok && error.find(L"another build") != std::wstring::npos, L"port identity: another TimeDateStamp fails");
+}
+
 // PrepareSymbols end to end without the network: modules that are missing, one whose
 // PDB is not cached with downloads off, and one with --simulate-404.
 void TestPrepare() {
@@ -861,6 +895,7 @@ int RunSelfTest() {
     TestWriteRule();
     TestPortFailAndGuard();
     TestWorker();
+    TestPortIdentity();
     TestPrepare();
     Print(Format(L"self-test: %d checks, %d failed", g_checks, g_failures));
     return g_failures;
