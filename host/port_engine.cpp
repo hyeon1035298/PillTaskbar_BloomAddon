@@ -82,6 +82,11 @@ uint64_t Hash64(const void* data, size_t n, uint64_t seed) {
     return Mix(h ^ tail ^ 0xA5A5A5A5ull);
 }
 
+bool Stopped(const std::atomic<bool>* cancel) { return cancel && cancel->load(std::memory_order_relaxed); }
+
+// Checked every so many functions in the long loops.
+constexpr uint32_t kStopEvery = 512;
+
 H128 Hash128(const void* data, size_t n) { return {Hash64(data, n, 0x243F6A8885A308D3ull), Hash64(data, n, 0x13198A2E03707344ull)}; }
 
 // --- one build ---
@@ -135,7 +140,7 @@ public:
     std::unordered_set<uint32_t> unchainedBegins;
 
     // expect: the build the caller means (port::Identity), checked before the analysis.
-    bool Load(const std::wstring& path, std::wstring& error, const Identity* expect);
+    bool Load(const std::wstring& path, std::wstring& error, const Identity* expect, const std::atomic<bool>* cancel);
     const Func* At(uint32_t start) const {
         auto it = index.find(start);
         return it == index.end() ? nullptr : &funcs[it->second];
@@ -353,7 +358,8 @@ void Build::ReadRtti() {
     }
 }
 
-bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* expect) {
+bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* expect,
+                 const std::atomic<bool>* cancel) {
     if (!pe.Load(path, error)) return false;
     if (pe.machine != IMAGE_FILE_MACHINE_AMD64) {
         error = L"not an x64 module";
@@ -397,7 +403,12 @@ bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* 
             if (!chained_.count(v)) starts.insert(v);
         }
     }
+    uint32_t done = 0;
     for (auto& [b, e] : primary) {
+        if (++done % kStopEvery == 0 && Stopped(cancel)) {
+            error = L"stopped";
+            return false;
+        }
         if (!pe.IsExec(b) || !pe.Bytes(b, e - b)) continue;
         Func f;
         f.start = b;
@@ -419,6 +430,10 @@ bool Build::Load(const std::wstring& path, std::wstring& error, const Identity* 
     std::unordered_set<uint32_t> have;
     for (auto& f : funcs) have.insert(f.start);
     for (uint32_t s : starts) {
+        if (++done % kStopEvery == 0 && Stopped(cancel)) {
+            error = L"stopped";
+            return false;
+        }
         if (have.count(s)) continue;
         auto it = std::upper_bound(srt.begin(), srt.end(), s);
         uint64_t end = it != srt.end() ? *it : (uint64_t)s + 64;
@@ -595,13 +610,15 @@ struct VtMapping {
 
 class Engine {
 public:
-    Engine(const Build& o, const Build& n, const std::vector<uint32_t>& vtNamed) : old_(o), new_(n) {
+    Engine(const Build& o, const Build& n, const std::vector<uint32_t>& vtNamed, const std::atomic<bool>* cancel)
+        : old_(o), new_(n), cancel_(cancel) {
         std::set<uint32_t> v(vtNamed.begin(), vtNamed.end());
         for (auto& [a, c] : old_.vtCol) v.insert(a);
         vtCands_.assign(v.begin(), v.end());
     }
 
     void Run();
+    bool stopped = false;  // Run ended early on the cancel flag; nothing it holds counts
 
     std::unordered_map<uint32_t, Cands> ev;
     // Per pair: the sources a contradiction bans, and the roots its evidence grew from. A
@@ -642,6 +659,7 @@ public:
 private:
     const Build& old_;
     const Build& new_;
+    const std::atomic<bool>* cancel_;
     std::vector<uint32_t> vtCands_;
     std::unordered_set<uint32_t> banAnchor_, banVt_, banRef_;
     Similarity sim_;
@@ -793,6 +811,10 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
         return s;
     };
     for (int rounds = 1;; rounds++) {
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
+        }
         auto before = std::make_tuple(anchors.size(), total(), vtMap.size());
         std::vector<std::pair<uint32_t, uint32_t>> fresh;
         for (auto& [o, n] : anchors)
@@ -809,6 +831,10 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
                 Add(x, y, kTagRefs, Src(kSrcA, o));
                 AddRoots(x, y, from);
             }
+        }
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
         }
         for (uint32_t v : vtCands_) {
             if (vtMap.count(v) || banVt_.count(v)) continue;
@@ -854,6 +880,10 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
                 MergeInto(prov[Key(so[k], sn[k])], srcs);
                 AddRoots(so[k], sn[k], rs);
             }
+        }
+        if (Stopped(cancel_)) {
+            stopped = true;
+            return;
         }
         {
             std::vector<std::pair<uint32_t, uint32_t>> singles;
@@ -931,12 +961,17 @@ void Engine::Run() {
         if (m != new_.byTok.end() && m->second.size() == 1 && old_.TokCount(f) == 1) a0[f.start] = m->second[0];
     }
     auto pruned = Prune(a0);
+    if (Stopped(cancel_)) {
+        stopped = true;
+        return;
+    }
     std::unordered_map<uint32_t, uint32_t> seedMap;
     for (auto& [o, n] : pruned)
         if (old_.ShapeCount(*old_.At(o)) == 1 && new_.ShapeCount(*new_.At(n)) == 1) seedMap[o] = n;
     for (auto& [o, n] : seedMap) seeds.insert(o);
     for (int outer = 1;; outer++) {
         Propagate(seedMap);
+        if (stopped) return;
         if (outer > 12) break;
         auto bad = Contradictions();
         finalBad = bad;
@@ -1072,10 +1107,12 @@ int Bits(uint8_t t) { return __builtin_popcount(t); }
 
 class Acceptor {
 public:
-    Acceptor(const Build& o, const Build& n, Engine& e, const std::unordered_map<uint32_t, std::vector<std::wstring>>& names)
-        : old_(o), new_(n), eng_(e), names_(names) {}
+    Acceptor(const Build& o, const Build& n, Engine& e,
+             const std::unordered_map<uint32_t, std::vector<std::wstring>>& names, const std::atomic<bool>* cancel)
+        : old_(o), new_(n), eng_(e), names_(names), cancel_(cancel) {}
 
     void Decide();
+    bool stopped = false;  // Decide ended early on the cancel flag
     const Verdict* Of(uint32_t oldRva) const {
         auto it = verdicts_.find(oldRva);
         return it == verdicts_.end() ? nullptr : &it->second;
@@ -1086,6 +1123,7 @@ private:
     const Build& new_;
     Engine& eng_;
     const std::unordered_map<uint32_t, std::vector<std::wstring>>& names_;
+    const std::atomic<bool>* cancel_;
     std::unordered_map<uint32_t, Verdict> verdicts_;
     std::unordered_map<uint32_t, uint32_t> vtAccepted_;     // OLD table -> NEW table
     std::unordered_set<uint32_t> newSlotTargets_;            // NEW functions in accepted tables
@@ -1413,7 +1451,12 @@ bool Acceptor::OwnFoldedSlot(const std::wstring& name, uint32_t a, uint32_t y) c
 
 // R1-R6 and R9 for functions.
 void Acceptor::Functions() {
+    uint32_t done = 0;
     for (auto& fo : old_.funcs) {
+        if (++done % kStopEvery == 0 && Stopped(cancel_)) {
+            stopped = true;
+            return;
+        }
         uint32_t a = fo.start;
         if (!names_.count(a)) continue;
         Verdict vd;
@@ -1662,6 +1705,7 @@ void Acceptor::Thunks() {
 void Acceptor::Decide() {
     Vftables();
     Functions();
+    if (stopped) return;
     Globals();
     NeverPortedNames();
     Collisions();
@@ -1675,8 +1719,8 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
     out.clear();
     auto ob = std::make_unique<Build>(), nb = std::make_unique<Build>();
     // NEW first: a build other than the one asked for fails before any analysis.
-    if (!nb->Load(in.newDll, error, &in.expectNew)) return false;
-    if (!ob->Load(in.oldDll, error, nullptr)) return false;
+    if (!nb->Load(in.newDll, error, &in.expectNew, in.cancel)) return false;
+    if (!ob->Load(in.oldDll, error, nullptr, in.cancel)) return false;
     auto t1 = std::chrono::steady_clock::now();
     stats.functionsOld = (uint32_t)ob->funcs.size();
     stats.functionsNew = (uint32_t)nb->funcs.size();
@@ -1697,10 +1741,14 @@ bool Run(const Input& in, std::vector<Result>& out, Stats& stats, std::wstring& 
         names[s.rva].push_back(s.name);
         if (s.name.find(L"`vftable'") != std::wstring::npos) vtNamed.push_back(s.rva);
     }
-    Engine eng(*ob, *nb, vtNamed);
+    Engine eng(*ob, *nb, vtNamed, in.cancel);
     eng.Run();
-    Acceptor acc(*ob, *nb, eng, names);
-    acc.Decide();
+    Acceptor acc(*ob, *nb, eng, names, in.cancel);
+    if (!eng.stopped) acc.Decide();
+    if (eng.stopped || acc.stopped) {
+        error = L"stopped";
+        return false;
+    }
     auto t2 = std::chrono::steady_clock::now();
 
     for (auto& w : in.wanted) {
