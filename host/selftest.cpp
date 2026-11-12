@@ -765,7 +765,7 @@ void TestPrepare() {
     std::string text;
     Sidecar after;
     Check(r == addon::kExitOk && rep.modules[0].ported && ReadFileBytes(JoinPath(off, key + kPortedExt), text) &&
-              ParseSidecar(text, after) && after.lastProbe == sc.lastProbe,
+              ParseSidecar(text, after) && IsoTime(after.lastProbe) == IsoTime(sc.lastProbe),
           L"prepare: a due probe under --simulate-404 keeps the port and is not noted as a probe");
 
     // Ported offsets the host no longer trusts are dropped and the module ported again
