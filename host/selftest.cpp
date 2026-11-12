@@ -504,6 +504,12 @@ void TestWriteRule() {
     ok = BuildPortedOffsets(L"taskbar.dll", cv, wanted, folded, results(port::Outcome::Ported, 0x3100), f, names,
                             missing);
     Check(ok && f.entries[3].second == 0x3100u, L"write rule: folded code may share its address");
+    // ResolveAll gives a name once per OLD address, the host's first: only that one counts.
+    std::vector<port::OldSymbol> twice = {{L"A", 0x2100}, {L"B", 0x2200}, {L"A", 0x2500}, {L"D", 0x2100}};
+    ok = BuildPortedOffsets(L"taskbar.dll", cv, wanted, twice, results(port::Outcome::Ported, 0x3100), f, names,
+                            missing);
+    Check(ok && f.entries[0].second == 0x3100u && f.entries[3].second == 0x3100u,
+          L"write rule: a name at several old addresses is judged by the host's (the first)");
     ok = BuildPortedOffsets(L"taskbar.dll", cv, wanted, old, results(port::Outcome::Ported, 0x800), f, names, missing);
     Check(!ok && missing.size() == 1 && missing[0] == L"D", L"write rule: an address in the headers is no port");
     ok = BuildPortedOffsets(L"taskbar.dll", cv, wanted, old, results(port::Outcome::Ported, 0x100000), f, names,
