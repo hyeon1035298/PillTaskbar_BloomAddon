@@ -18,7 +18,6 @@
 
 #include "addon_protocol.h"
 #include "json.h"
-#include "taskbar.h"
 
 namespace host {
 
@@ -121,6 +120,11 @@ bool Readable(const std::wstring& path) {
     Handle f(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, 0, nullptr));
     return (bool)f;
+}
+
+bool Running(DWORD pid) {
+    Handle p(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
+    return p && WaitForSingleObject(p.get(), 0) == WAIT_TIMEOUT;
 }
 
 }  // namespace
@@ -623,7 +627,7 @@ void CleanStalePortTmp(const std::wstring& dataDir) {
         bool pidDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
                       !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && n.size() <= 10 &&
                       std::all_of(n.begin(), n.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
-        if (pidDir && ProcessAlive((DWORD)wcstoul(n.c_str(), nullptr, 10), 0)) continue;
+        if (pidDir && Running((DWORD)wcstoul(n.c_str(), nullptr, 10))) continue;
         // A dead process's folder, or what a host before per-process folders left.
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             DeleteTree(p);
