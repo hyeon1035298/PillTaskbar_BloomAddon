@@ -91,8 +91,10 @@ typedef struct tagPILL_ADDON_CALLBACKS {
     const PillAddonDefault* defaults;
     size_t defaultsCount;
     // How many objects the mod made with C++/WinRT (delegates, implements<> types,
-    // coroutines) are alive now: its module lock. Asked after uninit, before the
-    // mod DLL is freed.
+    // IAsync* coroutines) are alive now: its module lock. Asked after uninit, before
+    // the mod DLL is freed. A fire_and_forget coroutine and the thread-pool waits of
+    // resume_background, resume_after and resume_on_signal are not counted: the mod
+    // must finish them inside Wh_ModUninit.
     DWORD (*liveObjects)(void);
 } PillAddonCallbacks;
 

@@ -45,7 +45,10 @@ BOOL SettingsChanged(BOOL* reload) {
     return Wh_ModSettingsChanged(reload);
 }
 // C++/WinRT counts every delegate and implements<> object of this DLL in its module
-// lock (what DllCanUnloadNow would read). Always 0 for a mod without C++/WinRT.
+// lock (what DllCanUnloadNow would read), IAsync* coroutines among them. Not counted:
+// fire_and_forget coroutines and the thread-pool waits of resume_background,
+// resume_after and resume_on_signal, which the mod finishes in Wh_ModUninit. Always 0
+// for a mod without C++/WinRT.
 DWORD LiveObjects() {
     return winrt::get_module_lock();
 }
