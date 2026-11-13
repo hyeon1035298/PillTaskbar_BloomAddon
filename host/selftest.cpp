@@ -584,6 +584,14 @@ void TestPortFailAndGuard() {
     Check(!PortFailBlocks(r, 2, L"0.2.15", f.sources, f.at + h) && !PortFailBlocks(r, 1, L"0.2.16", f.sources, f.at + h) &&
               !PortFailBlocks(r, 1, L"0.2.15", L"617E422B31A000", f.at + h),
           L"portfail: a new engine, host or source set tries again");
+    PortFail probe = f;
+    probe.retry = kPortProbeFailRetry;
+    Check(FormatPortFail(f).find("retry=") == std::string::npos && ParsePortFail(FormatPortFail(probe), r) &&
+              r.retry == kPortProbeFailRetry && PortFailBlocks(r, 1, L"0.2.15", f.sources, f.at + h) &&
+              !PortFailBlocks(r, 1, L"0.2.15", f.sources, f.at + 3 * h),
+          L"portfail: a failed version probe holds for two hours, not a day");
+    Check(ParsePortFail(FormatPortFail(f) + "retry=0\nretry=99999\n", r) && r.retry == kPortFailRetry,
+          L"portfail: a retry of none or over a day holds a day");
 
     std::wstring data = TestDir(L"guard");
     std::wstring off = JoinPath(data, addon::kOffsetsDir);
