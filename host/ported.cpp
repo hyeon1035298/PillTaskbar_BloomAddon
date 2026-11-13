@@ -599,6 +599,49 @@ std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::
     return gone;
 }
 
+std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key) {
+    std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
+    if (key.find_first_of(L"\\/:") != std::wstring::npos || FileExists(JoinPath(offsetsDir, key + kPortedExt)))
+        return {};
+    std::string text;
+    OffsetsFile cur;
+    if (!ReadFileBytes(JoinPath(offsetsDir, key + L".txt"), text) || !ParseOffsets(text, cur)) return {};
+    std::vector<std::wstring> empty;
+    for (auto& [name, rva] : cur.entries)
+        if (!rva) empty.push_back(name);
+    if (empty.empty()) return {};
+    std::string meta;
+    std::vector<bool> required =
+        ParseSymbolsMeta(ReadFileBytes(JoinPath(exeDir, kSymbolsMeta), meta) ? meta : std::string(), empty);
+    std::unordered_set<std::wstring> wanted;
+    for (size_t i = 0; i < empty.size(); i++)
+        if (required[i]) wanted.insert(empty[i]);
+    if (wanted.empty()) return {};
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(offsetsDir, cur.module + L"_*.txt").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    std::wstring lost;
+    do {
+        if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        std::wstring name = fd.cFileName, stem = name.substr(0, name.size() - 4);
+        // Ported offsets say nothing about what the module had.
+        if (stem == key || FileExists(JoinPath(offsetsDir, stem + kPortedExt))) continue;
+        OffsetsFile older;
+        text.clear();
+        if (!ReadFileBytes(JoinPath(offsetsDir, name), text) || !ParseOffsets(text, older) ||
+            older.module != cur.module ||
+            (older.timeDateStamp == cur.timeDateStamp && older.sizeOfImage == cur.sizeOfImage))
+            continue;
+        for (auto& [n, rva] : older.entries)
+            if (rva && wanted.count(n)) {
+                lost = n;
+                break;
+            }
+    } while (lost.empty() && FindNextFileW(h, &fd));
+    FindClose(h);
+    return lost;
+}
+
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine) {
     std::wstring path = JoinPath(offsetsDir, key + kQuarantinedExt);
     if (!FileExists(path)) return false;
