@@ -19,8 +19,8 @@
 //      vtslot    the slots of a mapped vftable (same length, no disagreeing known slot)
 //      referrer  x maps to x', x is used only by T and x' only by T' (similar bodies)
 //    and vftables by RTTI, by slot content or by code references (all must agree);
-//    slot content alone decides only when every slot that is not common is known or a
-//    known slot holds a function of the table's own.
+//    slot content alone decides only when a known slot holds a function of the table's
+//    own.
 //    Derived pairs with an identical body become anchors.
 // 4. Validation: a changed body whose strings, imports or GUIDs were swapped (some only in
 //    OLD, some only in NEW) bans the sources that produced it, and propagation reruns.
@@ -656,9 +656,8 @@ public:
     }
     // RTTI (method d), and slot content (d2).
     bool ByRtti(uint32_t v, uint32_t& to) const;
-    // decisive: every slot but the common ones is known, or a known one holds a
-    // function no other OLD slot holds. Only such a match may stand on slots alone (no
-    // code references, no RTTI).
+    // decisive: a known slot holds a function no other OLD slot holds. Only such a
+    // match may stand on slots alone (no code references, no RTTI).
     bool BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* known = nullptr, bool* decisive = nullptr) const;
 
 private:
@@ -734,14 +733,12 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut, 
     // Known slots, without the ones every table shares (_purecall, common thunks): those
     // match any table of the right length.
     std::vector<std::pair<uint32_t, uint32_t>> known;
-    size_t uncommon = 0;
     bool ownKnown = false;  // a known slot holds a function only this table holds
     for (uint32_t k = 0; k < so.size(); k++) {
         uint32_t y;
         uint8_t t;
         auto users = old_.ptrAt.find(so[k]);
         if (users != old_.ptrAt.end() && users->second.size() > kCommonSlot) continue;
-        uncommon++;
         if (!Single(so[k], y, t)) continue;
         known.emplace_back(k, y);
         ownKnown = ownKnown || (users != old_.ptrAt.end() && users->second.size() == 1);
@@ -781,10 +778,12 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut, 
     // its slots, is neither a candidate nor a rival: its overriding slot does not match
     // the known one, and a shifted table does not hold the first known target where it
     // is looked for. When every known slot is inherited, a base table that kept them is
-    // then the only candidate. A known slot of the table's own (its function in no other
-    // OLD slot) is not in a base table, and when every slot is known no slot is left for
-    // such an override.
-    if (decisive) *decisive = ownKnown || known.size() == uncommon;
+    // then the only candidate. Knowing every slot does not rule that out: the override
+    // can sit at a known slot (the OLD function shared with the base, the table's own
+    // functions only in common slots), and then that slot drops the real table. Only a
+    // known slot of the table's own (its function in no other OLD slot) is not in a base
+    // table.
+    if (decisive) *decisive = ownKnown;
     if (knownOut)
         for (auto& [k, y] : known) knownOut->push_back(so[k]);
     return true;
