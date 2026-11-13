@@ -35,14 +35,19 @@ constexpr int kRereads = 10;
 constexpr DWORD kRereadMs = 1000;
 // How often values.json is read while the data folder cannot be watched.
 constexpr DWORD kPollMs = 5000;
-// How long an unload waits for the mod's objects to go, within its budget, and how
-// often it looks (WaitForObjects).
+// How long an unload waits for the mod's objects to go while the UI thread answers,
+// within its budget, how often it looks, and how long one question to the UI thread
+// may take (WaitForObjects).
 constexpr DWORD kObjectWaitMs = 2000;
 constexpr DWORD kObjectPollMs = 10;
+constexpr UINT kAnswerMs = 100;
 
 HANDLE g_unload;
 HANDLE g_loaded;
 HANDLE g_unloaded;
+// The thread the host hooked (the taskbar's), set by Begin: XAML's last Release of
+// the mod's objects comes on it.
+DWORD g_uiThread;
 
 // Set again by each hook call that finds it false; the control thread clears it as
 // its very last step, so a later injection into this same image starts afresh.
@@ -197,6 +202,32 @@ ULONGLONG UnloadDeadline() {
     return GetTickCount64() + (ULONGLONG)std::max(budget, 0);
 }
 
+// A top-level window of the UI thread, or null when it has none (or is gone).
+HWND UiWindow() {
+    HWND found = nullptr;
+    EnumThreadWindows(
+        g_uiThread,
+        [](HWND window, LPARAM out) -> BOOL {
+            *reinterpret_cast<HWND*>(out) = window;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+// Whether the UI thread takes a message within kAnswerMs. One that is hung answers
+// false at once. Without a window to ask, true: the wait then counts as before.
+bool UiThreadAnswers(HWND& window) {
+    if (!window || !IsWindow(window)) {
+        window = UiWindow();
+        if (!window) {
+            return true;
+        }
+    }
+    DWORD_PTR result;
+    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, kAnswerMs, &result) != 0;
+}
+
 // XAML can keep an element the mod took out of the tree, with the handlers the mod
 // gave it, until the panel's unload transition ends (0.45 s, 27 frames, for
 // AddDeleteThemeTransition); their last Release runs the mod's code. So the image stays
@@ -204,9 +235,11 @@ ULONGLONG UnloadDeadline() {
 // of a fixed time, misses such a transition or slows every unload. Pinning the image
 // would keep it, and through its imports this runtime, mapped for good: each reload
 // would map a copy, and the next version's runtime would refuse to start beside this
-// one. The count is polled on this thread, never through a UI thread, so a busy or
-// stuck one only uses up the wait. An object alive after kObjectWaitMs has a holder
-// that does not let go by itself (a handler on a long-lived element, a global of the
+// one. The count is polled on this thread. Those Releases come on the UI thread, so
+// only the time it answers messages counts toward kObjectWaitMs: while it is busy (a
+// long layout pass, another add-on's start) or hung, the wait runs on to the deadline.
+// An object alive after kObjectWaitMs of a UI thread that answers has a holder that
+// does not let go by itself (a handler on a long-lived element, a global of the
 // mod's): the image then goes as it did before this wait, and the log says how many
 // were left.
 void WaitForObjects(ULONGLONG deadline) {
@@ -216,13 +249,24 @@ void WaitForObjects(ULONGLONG deadline) {
         return;
     }
     ULONGLONG start = GetTickCount64();
-    ULONGLONG end = std::min(deadline, start + kObjectWaitMs);
+    ULONGLONG last = start;
+    ULONGLONG answered = 0, silent = 0;  // time the UI thread did and did not answer
+    HWND window = nullptr;
     DWORD left = first;
-    while (left && GetTickCount64() < end) {
+    while (left && GetTickCount64() < deadline) {
+        bool answers = UiThreadAnswers(window);
+        ULONGLONG now = GetTickCount64();
+        (answers ? answered : silent) += now - last;
+        last = now;
+        if (answered >= kObjectWaitMs) {
+            break;
+        }
         Sleep(kObjectPollMs);
         left = live();
     }
-    log::Line(L"waited %llu ms for %u objects of the mod: %u left", GetTickCount64() - start, first, left);
+    log::Line(L"waited %llu ms (%llu of them for a UI thread that did not answer) for %u objects of the mod: "
+              L"%u left",
+              GetTickCount64() - start, silent, first, left);
 }
 
 // Frees the mod DLL once no thread can still be in its code or in a trampoline. When
@@ -648,6 +692,7 @@ bool UsableDataDir(PCWSTR dir) {
 // On the taskbar thread, inside its message retrieval: only copy the host's
 // configuration, keep this DLL loaded and start the control thread.
 void Begin() {
+    g_uiThread = GetCurrentThreadId();
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, NamedObject(addon::kConfigMapping).c_str());
     if (!mapping) {
         return;  // not loaded by our host
