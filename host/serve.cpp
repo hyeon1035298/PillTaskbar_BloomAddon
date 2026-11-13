@@ -384,9 +384,12 @@ bool Host::QuarantineOnCrash() {
 // its real PDB lost a required name since an older build, the mod needs an update:
 // that stays noSymbols, and the ported offsets stay.
 int Host::PortedSymbolsFailed() {
+    std::vector<std::wstring> keys;
+    for (auto& m : symbols_.modules)
+        if (m.exit == addon::kExitOk) keys.push_back(m.key);
     for (auto& m : symbols_.modules) {
         if (m.exit != addon::kExitOk || m.ported) continue;
-        std::wstring lost = LostRequiredName(dataDir_, exeDir_, m.key);
+        std::wstring lost = LostRequiredName(dataDir_, exeDir_, m.key, keys);
         if (lost.empty()) continue;
         Log(L"%ls no longer has the required %ls (its real PDB says so); not the ported offsets' fault",
             m.module.c_str(), lost.c_str());

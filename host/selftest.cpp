@@ -653,9 +653,10 @@ void TestLostRequired() {
     std::wstring exe = JoinPath(data, L"exe");
     std::wstring off = JoinPath(data, addon::kOffsetsDir);
     WriteText(JoinPath(exe, kSymbolsMeta), "Gone\treq\nOther\treq\nMaybe\topt\n");
-    auto file = [](DWORD stamp, std::vector<std::pair<std::wstring, std::optional<DWORD>>> e) {
+    auto file = [](DWORD stamp, std::vector<std::pair<std::wstring, std::optional<DWORD>>> e,
+                   const wchar_t* module = L"taskbar.dll") {
         OffsetsFile f;
-        f.module = L"taskbar.dll";
+        f.module = module;
         f.timeDateStamp = stamp;
         f.sizeOfImage = 0x100000;
         f.entries = std::move(e);
@@ -668,6 +669,16 @@ void TestLostRequired() {
     WriteText(JoinPath(off, L"taskbar.dll_OLD1.txt"), file(1, {{L"Gone", 0x1000}, {L"Other", {}}, {L"Maybe", 0x2000}}));
     Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1") == L"Gone",
           L"lost: a required name the older build had and this one lacks");
+    // A template both PDBs list, hooked only through the other module's table.
+    WriteText(JoinPath(off, L"taskbar.view.dll_V1.txt"),
+              file(7, {{L"Gone", 0x3000}, {L"Other", {}}, {L"Maybe", {}}}, L"Taskbar.View.dll"));
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1", {L"taskbar.dll_NEW1", L"taskbar.view.dll_V1"}).empty(),
+          L"lost: a required name another module of this run has is not this module's loss");
+    WriteText(JoinPath(off, L"taskbar.view.dll_V1.txt"),
+              file(7, {{L"Gone", {}}, {L"Other", 0x3000}, {L"Maybe", {}}}, L"Taskbar.View.dll"));
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1", {L"taskbar.dll_NEW1", L"taskbar.view.dll_V1"}) == L"Gone",
+          L"lost: another module's names leave this module's own loss counted");
+    DeleteFileW(JoinPath(off, L"taskbar.view.dll_V1.txt").c_str());
     WriteText(JoinPath(off, L"taskbar.dll_OLD1.ported"), "engine=2\n");
     Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1").empty(), L"lost: an older build's ported offsets prove nothing");
     DeleteFileW(JoinPath(off, L"taskbar.dll_OLD1.ported").c_str());
