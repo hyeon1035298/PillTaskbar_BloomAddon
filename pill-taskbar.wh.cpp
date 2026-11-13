@@ -11159,8 +11159,14 @@ void OnDragEnter(int id) {
     }
 }
 
+// Drop targets alive. RevokeDragDrop only ends the registration: a drag over the
+// island at unload keeps its target in OLE until DragLeave or Drop and the last
+// Release, which run this module's code. Wh_ModUninit waits for none to be left.
+std::atomic<int> g_dropTargets;
+
 struct DropTarget : winrt::implements<DropTarget, ::IDropTarget> {
-    explicit DropTarget(int id) : id(id) {}
+    explicit DropTarget(int id) : id(id) { g_dropTargets++; }
+    ~DropTarget() { g_dropTargets--; }
 
     // Later, on the taskbar thread: the tray's slide doesn't run inside the
     // drag's call.
@@ -11181,6 +11187,22 @@ struct DropTarget : winrt::implements<DropTarget, ::IDropTarget> {
 
     int id;
 };
+
+// Wh_ModUninit, after the islands are torn down: a drag still over one lets go of
+// its target when it ends. Not waited on for long.
+constexpr int kDropWaitMs = 1000;
+
+void WaitForDropTargets() {
+    int waited = 0;
+    for (; g_dropTargets > 0 && waited < kDropWaitMs; waited += 10) {
+        Sleep(10);
+    }
+    if (g_dropTargets > 0) {
+        Wh_Log(L"%d drop targets still held at unload", g_dropTargets.load());
+    } else if (waited > 0) {
+        Sleep(20);  // the last release returning from its destructor
+    }
+}
 
 // ---- lifecycle ------------------------------------------------------------------
 
@@ -27254,6 +27276,7 @@ void Wh_ModUninit() {
     size::WaitForHooks();
     core::WaitForPosted();
     pill::WaitForGlass();
+    island::WaitForDropTargets();
     autohide::UnhookLeftover();
 }
 
