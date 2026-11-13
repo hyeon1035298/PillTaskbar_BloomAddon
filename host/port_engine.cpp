@@ -1547,6 +1547,13 @@ void Acceptor::Functions() {
             }
         }
         // Proof: the masked body is identical and unique, and its shape is unique, in both builds.
+        // What it cannot see: an overload whose signature changed while its body did not
+        // (the new argument is never read, or goes on in a register to a callee that maps
+        // to its own same-body overload). Nothing in the two binaries tells the two
+        // apart, so such a name is ported to the new overload (taskbar 9444->9549:
+        // CTaskBand::_UpdateItemIcon(ITaskGroup*,ITaskItem*) to the 3-argument one).
+        // Requiring a second root here does not help (that one had five), and dropping
+        // the proof for one root loses required names (TaskbarHost::FrameHeight).
         bool proof = same && old_.TokCount(fo) == 1 && new_.TokCount(*fn) == 1 && old_.ShapeCount(fo) == 1 &&
                      new_.ShapeCount(*fn) == 1;
         // R2: two kinds of evidence that grew from two independent roots, or the proof.
