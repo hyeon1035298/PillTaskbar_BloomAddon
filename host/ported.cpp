@@ -510,6 +510,11 @@ bool PortFailBlocks(const PortFail& f, int engine, const std::wstring& hostVersi
            now - f.at < f.retry;
 }
 
+std::wstring PortFailSkipDetail(const PortFail& f) {
+    return L"porting this build failed at " + IsoTime(f.at) + L" (" + f.why + L"); next try after " +
+           IsoTime(f.at + f.retry);
+}
+
 // --- the crash guard ---
 
 std::string FormatGuard(const PortGuard& g) {
@@ -1150,8 +1155,7 @@ PortStatus Porter::Run(PortReport& rep) {
     uint64_t now = NowTicks();
     if (ReadFileBytes(JoinPath(offsetsDir_, key_ + kPortFailExt), failText) && ParsePortFail(failText, fail) &&
         PortFailBlocks(fail, port::kEngineVersion, addon::kVersion, identity_, now)) {
-        rep.detail = L"porting this build failed at " + IsoTime(fail.at) + L" (" + fail.why + L"); next try after " +
-                     IsoTime(fail.at + kPortFailRetry);
+        rep.detail = PortFailSkipDetail(fail);
         return PortStatus::Skipped;
     }
     CleanStalePortTmp(req_.dataDir);
