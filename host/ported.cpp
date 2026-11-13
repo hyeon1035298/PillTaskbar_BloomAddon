@@ -474,8 +474,9 @@ std::wstring PortDiff(const OffsetsFile& ported, const OffsetsFile& real, size_t
 // --- .portfail ---
 
 std::string FormatPortFail(const PortFail& f) {
+    std::wstring retry = f.retry == kPortFailRetry ? L"" : Format(L"retry=%llu\n", f.retry / kTicksPerMinute);
     return Narrow(Format(L"engine=%d\n", f.engine) + L"host=" + f.hostVersion + L"\nsources=" + f.sources +
-                  L"\nat=" + IsoTime(f.at) + L"\nwhy=" + NoTabs(f.why) + L"\n");
+                  L"\nat=" + IsoTime(f.at) + L"\nwhy=" + NoTabs(f.why) + L"\n" + retry);
 }
 
 bool ParsePortFail(const std::string& utf8, PortFail& out) {
@@ -493,6 +494,9 @@ bool ParsePortFail(const std::string& utf8, PortFail& out) {
             haveAt = ParseIsoTime(v, f.at);
         } else if (k == L"why") {
             f.why = v;
+        } else if (k == L"retry") {
+            uint64_t m = wcstoull(v.c_str(), nullptr, 10);
+            if (m > 0 && m <= kPortFailRetry / kTicksPerMinute) f.retry = m * kTicksPerMinute;
         }
     }
     if (!haveEngine || !haveAt) return false;
@@ -503,7 +507,7 @@ bool ParsePortFail(const std::string& utf8, PortFail& out) {
 bool PortFailBlocks(const PortFail& f, int engine, const std::wstring& hostVersion, const std::wstring& sources,
                     uint64_t now) {
     return f.engine == engine && f.hostVersion == hostVersion && f.sources == sources && now >= f.at &&
-           now - f.at < kPortFailRetry;
+           now - f.at < f.retry;
 }
 
 // --- the crash guard ---
@@ -850,7 +854,7 @@ private:
     PortStatus Fetch(const std::wstring& file, const std::wstring& key, const std::wstring& dest, uint64_t maxBytes,
                      std::wstring& why);
     PortStatus TryOne(Candidate& c, PortReport& rep, std::wstring& why);
-    void RememberFailure(const std::wstring& why);
+    void RememberFailure(const std::wstring& why, uint64_t retry = kPortFailRetry);
 
     const PortRequest& req_;
     std::wstring offsetsDir_, tmp_, key_;
@@ -979,8 +983,8 @@ PortStatus Porter::GetOldPdb(const CodeView& oldCv, std::wstring& path, std::wst
     return st;
 }
 
-void Porter::RememberFailure(const std::wstring& why) {
-    PortFail f{port::kEngineVersion, addon::kVersion, identity_, NowTicks(), why};
+void Porter::RememberFailure(const std::wstring& why, uint64_t retry) {
+    PortFail f{port::kEngineVersion, addon::kVersion, identity_, NowTicks(), why, retry};
     if (!WriteFileAtomic(JoinPath(offsetsDir_, key_ + kPortFailExt), FormatPortFail(f)))
         Log(L"%ls: could not write its %ls", req_.module.name.c_str(), kPortFailExt);
 }
@@ -1183,8 +1187,11 @@ PortStatus Porter::Run(PortReport& rep) {
         Log(L"%ls: %ls", mod.c_str(), w.c_str());
         why = w;
     }
-    // A skipped build was never judged: nothing is remembered, the next start tries again.
+    // A skipped build was never judged, so this is no verdict on the candidates: it is
+    // remembered only for kPortProbeFailRetry, which keeps every start from downloading
+    // the judged ones again. With downloads off nothing was judged, and nothing is kept.
     if (!probeFailed.empty()) {
+        if (!req_.noDownload) RememberFailure(why + L"; " + probeFailed, kPortProbeFailRetry);
         rep.detail = L"not ported; " + probeFailed;
         return PortStatus::Failed;
     }

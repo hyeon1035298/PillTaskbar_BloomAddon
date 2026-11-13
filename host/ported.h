@@ -39,6 +39,10 @@ constexpr uint64_t kPortProbeInterval = 6 * 60 * kTicksPerMinute;
 // A failed port is tried again after this long, or sooner when the engine or the
 // candidate builds change.
 constexpr uint64_t kPortFailRetry = 24 * 60 * kTicksPerMinute;
+// An attempt that judged every candidate it reached but could not reach a local one
+// (its version probe failed) is tried again after this long: sooner than a judged
+// failure, but not on every start, each of which would download the others again.
+constexpr uint64_t kPortProbeFailRetry = 2 * 60 * kTicksPerMinute;
 // Source builds tried per module, newest first.
 constexpr size_t kMaxPortSources = 2;
 // Local candidates whose version is unknown until their DLL is downloaded.
@@ -146,10 +150,12 @@ struct PortFail {
     std::wstring sources;
     uint64_t at = 0;
     std::wstring why;
+    uint64_t retry = kPortFailRetry;  // "retry" in minutes; a record without it holds a day
 };
 std::string FormatPortFail(const PortFail& f);
 bool ParsePortFail(const std::string& utf8, PortFail& out);
-// True while a failed attempt with the same engine, host and candidates is under a day old.
+// True while a failed attempt with the same engine, host and candidates is younger than
+// its retry (a day unless it says otherwise).
 bool PortFailBlocks(const PortFail& f, int engine, const std::wstring& hostVersion, const std::wstring& sources,
                     uint64_t now);
 
