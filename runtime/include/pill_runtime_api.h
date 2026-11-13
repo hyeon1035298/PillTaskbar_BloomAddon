@@ -90,6 +90,10 @@ typedef struct tagPILL_ADDON_CALLBACKS {
     BOOL (*settingsChanged)(BOOL* reload);
     const PillAddonDefault* defaults;
     size_t defaultsCount;
+    // How many objects the mod made with C++/WinRT (delegates, implements<> types,
+    // coroutines) are alive now: its module lock. Asked after uninit, before the
+    // mod DLL is freed.
+    DWORD (*liveObjects)(void);
 } PillAddonCallbacks;
 
 #define PILL_ADDON_ENTRY_NAME "PillAddonGetCallbacks"
