@@ -158,6 +158,9 @@ bool ParsePortFail(const std::string& utf8, PortFail& out);
 // its retry (a day unless it says otherwise).
 bool PortFailBlocks(const PortFail& f, int engine, const std::wstring& hostVersion, const std::wstring& sources,
                     uint64_t now);
+// What a skipped attempt reports: when the record's attempt failed, why, and when its
+// own retry lets the next one start.
+std::wstring PortFailSkipDetail(const PortFail& f);
 
 // --- the crash guard, ported-guard.json in the data folder ---
 struct PortGuard {

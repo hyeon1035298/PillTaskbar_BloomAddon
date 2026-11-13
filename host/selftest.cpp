@@ -594,6 +594,9 @@ void TestPortFailAndGuard() {
               r.retry == kPortProbeFailRetry && PortFailBlocks(r, 1, L"0.2.15", f.sources, f.at + h) &&
               !PortFailBlocks(r, 1, L"0.2.15", f.sources, f.at + 3 * h),
           L"portfail: a failed version probe holds for two hours, not a day");
+    Check(PortFailSkipDetail(r).find(L"next try after 2026-11-13T12:00:00Z") != std::wstring::npos &&
+              PortFailSkipDetail(f).find(L"next try after 2026-11-14T10:00:00Z") != std::wstring::npos,
+          L"portfail: a skipped attempt names the record's own retry time");
     Check(ParsePortFail(FormatPortFail(f) + "retry=0\nretry=99999\n", r) && r.retry == kPortFailRetry,
           L"portfail: a retry of none or over a day holds a day");
 
