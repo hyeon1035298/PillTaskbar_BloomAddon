@@ -634,6 +634,39 @@ void TestPortFailAndGuard() {
     RemoveTree(data);
 }
 
+// A real module that lost a required name since an older build is the mod's problem,
+// not the ported offsets' (serve: noSymbols, the ported offsets stay).
+void TestLostRequired() {
+    std::wstring data = TestDir(L"lost");
+    std::wstring exe = JoinPath(data, L"exe");
+    std::wstring off = JoinPath(data, addon::kOffsetsDir);
+    WriteText(JoinPath(exe, kSymbolsMeta), "Gone\treq\nOther\treq\nMaybe\topt\n");
+    auto file = [](DWORD stamp, std::vector<std::pair<std::wstring, std::optional<DWORD>>> e) {
+        OffsetsFile f;
+        f.module = L"taskbar.dll";
+        f.timeDateStamp = stamp;
+        f.sizeOfImage = 0x100000;
+        f.entries = std::move(e);
+        return FormatOffsets(f);
+    };
+    // Every module's file lists every name; Other is another module's (empty in both).
+    WriteText(JoinPath(off, L"taskbar.dll_NEW1.txt"), file(2, {{L"Gone", {}}, {L"Other", {}}, {L"Maybe", {}}}));
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1").empty(),
+          L"lost: no older build, no proof that a name was the module's");
+    WriteText(JoinPath(off, L"taskbar.dll_OLD1.txt"), file(1, {{L"Gone", 0x1000}, {L"Other", {}}, {L"Maybe", 0x2000}}));
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1") == L"Gone",
+          L"lost: a required name the older build had and this one lacks");
+    WriteText(JoinPath(off, L"taskbar.dll_OLD1.ported"), "engine=2\n");
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1").empty(), L"lost: an older build's ported offsets prove nothing");
+    DeleteFileW(JoinPath(off, L"taskbar.dll_OLD1.ported").c_str());
+    WriteText(JoinPath(exe, kSymbolsMeta), "Gone\topt\nOther\treq\nMaybe\topt\n");
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1").empty(), L"lost: an optional name lost is no reason");
+    WriteText(JoinPath(exe, kSymbolsMeta), "Gone\treq\nOther\treq\nMaybe\topt\n");
+    WriteText(JoinPath(off, L"taskbar.dll_NEW1.ported"), "engine=2\n");
+    Check(LostRequiredName(data, exe, L"taskbar.dll_NEW1").empty(), L"lost: ported offsets are never the real module");
+    RemoveTree(data);
+}
+
 // Porting work runs on a worker while the calling thread keeps serving.
 void TestWorker() {
     auto done = std::make_shared<std::atomic<bool>>(false);
@@ -894,6 +927,7 @@ int RunSelfTest() {
     TestSidecar();
     TestWriteRule();
     TestPortFailAndGuard();
+    TestLostRequired();
     TestWorker();
     TestPortIdentity();
     TestPrepare();

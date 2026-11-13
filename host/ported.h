@@ -176,6 +176,13 @@ bool IsQuarantined(const std::wstring& offsetsDir, const std::wstring& key);
 // there. Returns the keys whose offsets went.
 std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::vector<std::wstring>& keys,
                                         const std::wstring& why, uint64_t now);
+// A name required in symbols-meta.txt (beside exeDir) that the real offsets
+// offsets\<key>.txt leave empty while the real offsets of an older build of the same
+// module had it: Microsoft took it out of that module, so the runtime's "symbols" may
+// be this module's, which porting another one cannot mend. Every offsets file lists
+// every name of symbols.txt, so only an older build of the module shows that a name is
+// its own. Empty when there is none, or when the offsets are ported.
+std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key);
 // A quarantine holds against porting again only for the engine version that wrote it
 // (a record that names none holds for every engine).
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);

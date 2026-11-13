@@ -380,8 +380,18 @@ bool Host::QuarantineOnCrash() {
 // The runtime would not start on ported offsets: a required name came out empty (one
 // optional in another hook table, or one the old build lacked). Unlike real offsets
 // that is no final noSymbols: the ported offsets go, the build waits a day before it
-// is ported again, and Bloom retries until the real PDB is out.
+// is ported again, and Bloom retries until the real PDB is out. But when a module with
+// its real PDB lost a required name since an older build, the mod needs an update:
+// that stays noSymbols, and the ported offsets stay.
 int Host::PortedSymbolsFailed() {
+    for (auto& m : symbols_.modules) {
+        if (m.exit != addon::kExitOk || m.ported) continue;
+        std::wstring lost = LostRequiredName(dataDir_, exeDir_, m.key);
+        if (lost.empty()) continue;
+        Log(L"%ls no longer has the required %ls (its real PDB says so); not the ported offsets' fault",
+            m.module.c_str(), lost.c_str());
+        return addon::kExitNoSymbols;
+    }
     for (auto& k : RetractPorted(dataDir_, symbols_.PortedKeys(),
                                  L"the runtime found required symbols missing in the ported offsets", NowTicks()))
         Log(L"the runtime found required symbols missing in the ported offsets %ls; dropped them", k.c_str());
