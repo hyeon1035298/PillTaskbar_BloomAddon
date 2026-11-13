@@ -348,8 +348,12 @@ void TestDownloadMapping() {
           L"symbols: msdl binary key parsed back");
     // taskbar.dll 9549: SizeOfImage 0x308000, the file 3216656 bytes.
     Check(DllDownloadCap(0x308000) > 3216656 && DllDownloadCap(0x308000) < 6 * 1024 * 1024 &&
-              kMaxPdbBytes >= 10 * 50ull * 1024 * 1024 && kDownloadDeadlineMs >= 10 * 60 * 1000,
+              kMaxPdbBytes >= 10 * 50ull * 1024 * 1024,
           L"symbols: download caps leave room for the files measured");
+    // 128 kbps (16 KB/s) must pass the stall rule many times over.
+    Check(kDownloadWindowMs >= 60 * 1000 && kDownloadMinWindowBytes > 0 &&
+              kDownloadMinWindowBytes * 1000 / kDownloadWindowMs * 8 <= 16 * 1024,
+          L"symbols: only a stalled download is cut off, not a slow one");
     FileVersion a, b, c;
     Check(ParseFileVersion(L"10.0.26100.9818", a) && ParseFileVersion(L"10.0.26100.9974", b) &&
               ParseFileVersion(L"10.0.26300.7000", c) && a.Text() == L"10.0.26100.9818",

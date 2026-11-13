@@ -475,6 +475,8 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
         Handle out(CreateFileW(part.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!out) return Download::Failed;
         std::vector<char> buf(256 * 1024);
+        ULONGLONG windowStart = GetTickCount64();
+        uint64_t windowBytes = 0;
         while (true) {
             DWORD got = 0;
             if (!WinHttpReadData(req.h, buf.data(), (DWORD)buf.size(), &got)) {
@@ -489,11 +491,17 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
                 result = Download::Failed;
                 break;
             }
-            if (GetTickCount64() - start > kDownloadDeadlineMs) {
-                Log(L"%ls/%ls: not done after %llu minutes (%llu bytes); stopped", file.c_str(), key.c_str(),
-                    kDownloadDeadlineMs / 60000, bytes);
-                result = Download::Failed;
-                break;
+            windowBytes += got;
+            if (ULONGLONG now = GetTickCount64(); now - windowStart >= kDownloadWindowMs) {
+                if (windowBytes < kDownloadMinWindowBytes) {
+                    Log(L"%ls/%ls: %llu bytes in the last %llu s, after %llu s and %llu bytes; stalled, stopped",
+                        file.c_str(), key.c_str(), windowBytes, (now - windowStart) / 1000, (now - start) / 1000,
+                        bytes);
+                    result = Download::Failed;
+                    break;
+                }
+                windowStart = now;
+                windowBytes = 0;
             }
             DWORD written = 0;
             if (!WriteFile(out.get(), buf.data(), got, &written, nullptr) || written != got) {

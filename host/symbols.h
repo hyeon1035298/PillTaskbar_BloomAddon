@@ -114,12 +114,16 @@ constexpr uint64_t kMaxPdbBytes = 512ull << 20;
 inline uint64_t DllDownloadCap(DWORD sizeOfImage) {
     return (uint64_t)sizeOfImage + sizeOfImage / 4 + (1ull << 20);
 }
-// However the bytes trickle in, one file ends here (Failed).
-constexpr uint64_t kDownloadDeadlineMs = 30 * 60 * 1000;
+// A slow line is no failure, a stalled one is: a file is cut off (Failed) once a window
+// of kDownloadWindowMs brings in fewer than kDownloadMinWindowBytes, 1 KB/s. A line that
+// could fetch a PDB at all is far faster (128 kbps is 16 KB/s, a 50 MB PDB 53 minutes),
+// and the size cap bounds the whole.
+constexpr uint64_t kDownloadWindowMs = 5 * 60 * 1000;
+constexpr uint64_t kDownloadMinWindowBytes = 300 * 1024;
 // Gets <file>/<key>/<file> from msdl.microsoft.com into dest (through dest.part).
 // bytes: what this call received; progress sees doneBefore + bytes. A Content-Length
 // above maxBytes is refused before anything is written, a body that grows past it
-// or outlasts kDownloadDeadlineMs is cut off; both are Failed.
+// or stalls (kDownloadMinWindowBytes) is cut off; both are Failed.
 Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, const std::wstring& dest,
                             uint64_t maxBytes, uint64_t doneBefore, const ProgressFn& progress, uint64_t& bytes);
 // Windhawk's symbol store, which the host only ever reads.
