@@ -1327,6 +1327,12 @@ void Acceptor::Vftables() {
             continue;
         }
         int nk = (int)rtti + (int)refs + (int)slots;
+        // A table matched while propagating can end with no kind left (its slots no longer
+        // decide by now): it stands on nothing.
+        if (nk == 0) {
+            vd.evidence = L"no kind of evidence holds at the end";
+            continue;
+        }
         if (TemplateName(v) && nk < 2) {
             vd.evidence = L"R3 template class, one kind (" + kinds + L")";
             continue;
