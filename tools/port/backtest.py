@@ -96,6 +96,16 @@ def template_name(n):
     return marks(cls) or "<" in iface or "lambda" in iface
 
 
+# WIL's per-feature names, numbered or named (Feature_61276672__descriptor,
+# Feature_SystemLightTheme__descriptor, Feature_<id>__private_featureState, ...): the
+# engine must never port them (NeverPorted), so any that comes out ported is reported.
+WIL_FEATURE = re.compile(r"(?<![A-Za-z0-9_])Feature_[A-Za-z0-9_]+?(__descriptor|__private_[A-Za-z0-9_]+|_logged_traits)(?![A-Za-z0-9_])")
+
+
+def wil_feature_name(n):
+    return bool(WIL_FEATURE.search(n)) or "wil::details::FeatureImpl<" in n or "__WilFeatureTraits_" in n
+
+
 def build_dir(cache, module, build):
     """The first cache root that has this build; new downloads go to the first root."""
     for root in cache:
@@ -250,6 +260,7 @@ def score_pair(args, module, ob, nb, wanted_file, tag):
                           "evidence": r["evidence"]})
     rep["population"] = buckets
     rep["population_wrong"] = wrong
+    rep["wil_ported"] = [r["name"] for r in p["results"] if r["outcome"] == "ported" and wil_feature_name(r["name"])]
     return rep
 
 
@@ -272,7 +283,8 @@ def summary_line(rep):
     return (f"{rep['set']:8s} {rep['pair']:46s} wanted WRONG {wc.get('WRONG', 0) + wc.get('WRONG-gone', 0)} "
             f"recall {rep['wanted']['recall']:>6s} | non-template {ok_nt} ok / {nt} WRONG raw, "
             f"{nt - midl_nt} normalised | template {ok_t} ok / {tt} WRONG raw, {tt_norm} normalised | "
-            f"engine {rep['engine_ms']} ms | {addons}")
+            f"engine {rep['engine_ms']} ms | {addons}"
+            + (f" | WIL feature names ported {len(rep['wil_ported'])}" if rep.get("wil_ported") else ""))
 
 
 def main():
@@ -327,6 +339,8 @@ def main():
         for a, v in rep["addons"].items():
             for n in v["missing_required"]:
                 print(f"   {a} required, not ported: {n[:150]}")
+        for n in rep["wil_ported"]:
+            print(f"   WIL feature name ported: {n[:150]}")
     label = args.pairs.replace(",", "+") if len(args.pairs) < 30 else "adhoc"
     with open(os.path.join(args.out, f"backtest_{label}.json"), "w", encoding="utf-8") as f:
         json.dump(reps, f, indent=1)
