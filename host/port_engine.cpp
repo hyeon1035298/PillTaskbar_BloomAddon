@@ -1332,6 +1332,12 @@ void Acceptor::Vftables() {
             vd.evidence = L"R3 template class, one kind (" + kinds + L")";
             continue;
         }
+        // R8 for tables: code references alone, as for globals, need two independent roots
+        // or a seed's own reference; otherwise the table stands on one derived match.
+        if (nk == 1 && refs && !R8Roots(v, y)) {
+            vd.evidence = L"R8 one root of evidence (" + kinds + L")";
+            continue;
+        }
         // R4 for tables: one whose slots (or the shapes of its slot functions) repeat in
         // another table of either build needs more than its slot content.
         if (!refs && !rtti && (TableTwin(old_, so, oldSigs_) || TableTwin(new_, sn, newSigs_))) {
