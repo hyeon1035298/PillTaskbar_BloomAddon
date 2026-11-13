@@ -473,7 +473,11 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
     Download result = Download::Ok;
     {
         Handle out(CreateFileW(part.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!out) return Download::Failed;
+        if (!out) {
+            Log(L"%ls: could not create %ls (%zu characters) (%lu)", file.c_str(), part.c_str(), part.size(),
+                GetLastError());
+            return Download::Failed;
+        }
         std::vector<char> buf(256 * 1024);
         ULONGLONG windowStart = GetTickCount64();
         uint64_t windowBytes = 0;
@@ -505,6 +509,8 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
             }
             DWORD written = 0;
             if (!WriteFile(out.get(), buf.data(), got, &written, nullptr) || written != got) {
+                Log(L"%ls: could not write %ls after %llu bytes (%lu)", file.c_str(), part.c_str(), bytes,
+                    GetLastError());
                 result = Download::Failed;
                 break;
             }
@@ -519,9 +525,14 @@ Download DownloadSymbolFile(const std::wstring& file, const std::wstring& key, c
             result = Download::Failed;
         }
     }
-    if (result != Download::Ok || !MoveFileExW(part.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    if (result == Download::Ok && !MoveFileExW(part.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        Log(L"%ls: could not move it to %ls (%zu characters) (%lu)", file.c_str(), dest.c_str(), dest.size(),
+            GetLastError());
+        result = Download::Failed;
+    }
+    if (result != Download::Ok) {
         DeleteFileW(part.c_str());
-        return result == Download::Ok ? Download::Failed : result;
+        return result;
     }
     return Download::Ok;
 }
