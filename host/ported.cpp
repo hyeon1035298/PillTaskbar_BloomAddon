@@ -603,7 +603,8 @@ std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::
     return gone;
 }
 
-std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key) {
+std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key,
+                              const std::vector<std::wstring>& others) {
     std::wstring offsetsDir = JoinPath(dataDir, addon::kOffsetsDir);
     if (key.find_first_of(L"\\/:") != std::wstring::npos || FileExists(JoinPath(offsetsDir, key + kPortedExt)))
         return {};
@@ -620,6 +621,16 @@ std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& e
     std::unordered_set<std::wstring> wanted;
     for (size_t i = 0; i < empty.size(); i++)
         if (required[i]) wanted.insert(empty[i]);
+    for (auto& o : others) {
+        OffsetsFile other;
+        text.clear();
+        if (o == key || o.find_first_of(L"\\/:") != std::wstring::npos ||
+            !ReadFileBytes(JoinPath(offsetsDir, o + L".txt"), text) || !ParseOffsets(text, other) ||
+            other.module == cur.module)
+            continue;
+        for (auto& [n, rva] : other.entries)
+            if (rva) wanted.erase(n);
+    }
     if (wanted.empty()) return {};
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(JoinPath(offsetsDir, cur.module + L"_*.txt").c_str(), &fd);

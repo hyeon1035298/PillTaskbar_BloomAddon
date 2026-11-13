@@ -187,8 +187,12 @@ std::vector<std::wstring> RetractPorted(const std::wstring& dataDir, const std::
 // module had it: Microsoft took it out of that module, so the runtime's "symbols" may
 // be this module's, which porting another one cannot mend. Every offsets file lists
 // every name of symbols.txt, so only an older build of the module shows that a name is
-// its own. Empty when there is none, or when the offsets are ported.
-std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key);
+// its own. Even that is no proof for a name another module has too (a template or COMDAT
+// that both PDBs list, while only the other module's table hooks it): a name with an
+// address in the offsets of one of others (this run's other modules, real or ported)
+// does not count. Empty when there is none, or when the offsets are ported.
+std::wstring LostRequiredName(const std::wstring& dataDir, const std::wstring& exeDir, const std::wstring& key,
+                              const std::vector<std::wstring>& others = {});
 // A quarantine holds against porting again only for the engine version that wrote it
 // (a record that names none holds for every engine).
 bool QuarantineBlocks(const std::wstring& offsetsDir, const std::wstring& key, int engine);
