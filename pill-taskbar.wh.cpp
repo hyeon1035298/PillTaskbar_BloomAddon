@@ -1598,17 +1598,17 @@ bool Post(std::function<void()> work) {
     if (!g_queue) {
         return false;
     }
-    g_posted++;
-    bool queued = g_queue.TryEnqueue([work = std::move(work)] {
+    // Counted until the queue destroys the callable, after its run or when it
+    // isn't queued: that destructor runs module code too.
+    struct Pending {
+        Pending() { g_posted++; }
+        ~Pending() { g_posted--; }
+    };
+    return g_queue.TryEnqueue([work = std::move(work), pending = std::make_shared<Pending>()] {
         if (!g_unloading) {
             Guard(L"Posted work", work);
         }
-        g_posted--;
     });
-    if (!queued) {
-        g_posted--;
-    }
-    return queued;
 }
 
 void WaitForPosted() {
@@ -1966,6 +1966,10 @@ wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
             wuc::CompositionEffectSourceParameter(L"mask")});
 }
 
+// Glass brushes alive. XAML may hold one after the element lets go of it, and
+// its release runs this module's code: unload waits for none to be left.
+std::atomic<int> g_glassBrushes;
+
 class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
    public:
     // With `host` the owner sits in a window of its own (a popup), which has
@@ -1976,6 +1980,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
                   .Compositor()),
           m_owner(owner),
           m_host(host) {
+        g_glassBrushes++;
         static int counter;
         m_key = L"PillTaskbarTint" + std::to_wstring(++counter);
         try {
@@ -1985,7 +1990,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
                          std::wstring(theme::kTintResource) + L"}\"/>"))
                          .as<Media::SolidColorBrush>();
             owner.Resources().Insert(box_value(m_key), m_tint);
-            m_tint.RegisterPropertyChangedCallback(
+            m_tintWatch = m_tint.RegisterPropertyChangedCallback(
                 Media::SolidColorBrush::ColorProperty(),
                 [weak = get_weak()](auto&&, auto&&) {
                     if (auto self = weak.get()) {
@@ -2014,6 +2019,14 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
     }
 
     ~GlassBrush() {
+        // The tint may outlive this brush in XAML's hands; its callback is the module's.
+        if (m_tint) {  // registered whenever it is set
+            try {
+                m_tint.UnregisterPropertyChangedCallback(Media::SolidColorBrush::ColorProperty(),
+                                                         m_tintWatch);
+            } catch (...) {
+            }
+        }
         auto owner = m_owner.get();
         for (auto [brush, key] : {std::pair{m_tint, m_key}, std::pair{m_edge, m_key + L"Edge"}}) {
             if (owner && brush) {
@@ -2023,6 +2036,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
                 }
             }
         }
+        g_glassBrushes--;
     }
 
     // The Bloom style's outline, null in the others.
@@ -2088,9 +2102,26 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
     winrt::weak_ref<FrameworkElement> m_owner;
     bool m_host;
     Media::SolidColorBrush m_tint{nullptr};
+    int64_t m_tintWatch = 0;  // the tint's callback
     Media::SolidColorBrush m_edge{nullptr};
     std::wstring m_key;
 };
+
+// Wh_ModUninit, after RestoreAll took the brushes off: XAML may let go of them
+// only on a later frame. Not waited on for long.
+constexpr int kGlassWaitMs = 1000;
+
+void WaitForGlass() {
+    int waited = 0;
+    for (; g_glassBrushes > 0 && waited < kGlassWaitMs; waited += 10) {
+        Sleep(10);
+    }
+    if (g_glassBrushes > 0) {
+        Wh_Log(L"%d glass brushes still held at unload", g_glassBrushes.load());
+    } else if (waited > 0) {
+        Sleep(20);  // the last release returning from its destructor
+    }
+}
 
 // ---- pieces -------------------------------------------------------------------
 
@@ -22516,15 +22547,19 @@ bool IsWeb(std::wstring_view url) {
     return url.starts_with(L"https://") || url.starts_with(L"http://");
 }
 
-// A link opens in the default browser, off the taskbar thread.
+// A link opens in the default browser, off the taskbar thread. Its handler is
+// revoked with the popup's: XAML may hold the link after the popup is gone,
+// and after the module is.
 Documents::Hyperlink Link(std::wstring const& url) {
     Documents::Hyperlink link;
     link.Foreground(Brush(C().accentText));
-    link.Click([url](auto&&, auto&&) {
-        core::Guard(L"Usage chat link", [&] {
-            folders::StartJob([url] { ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL); });
-        });
-    });
+    if (folders::g_popup) {
+        folders::Keep(*folders::g_popup, link.Click(winrt::auto_revoke, [url](auto&&, auto&&) {
+            core::Guard(L"Usage chat link", [&] {
+                folders::StartJob([url] { ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL); });
+            });
+        }));
+    }
     return link;
 }
 
@@ -27216,6 +27251,7 @@ void Wh_ModUninit() {
     }
     size::WaitForHooks();
     core::WaitForPosted();
+    pill::WaitForGlass();
     autohide::UnhookLeftover();
 }
 
