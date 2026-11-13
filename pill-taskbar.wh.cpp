@@ -1599,12 +1599,13 @@ bool Post(std::function<void()> work) {
         return false;
     }
     // Counted until the queue destroys the callable, after its run or when it
-    // isn't queued: that destructor runs module code too.
+    // isn't queued: that destructor runs module code too. Captured first, so it is
+    // destroyed last, after work's captures.
     struct Pending {
         Pending() { g_posted++; }
         ~Pending() { g_posted--; }
     };
-    return g_queue.TryEnqueue([work = std::move(work), pending = std::make_shared<Pending>()] {
+    return g_queue.TryEnqueue([pending = std::make_shared<Pending>(), work = std::move(work)] {
         if (!g_unloading) {
             Guard(L"Posted work", work);
         }
@@ -14113,13 +14114,14 @@ bool RunOnTaskbar(std::function<void()> work, bool evenUnloading = false,
     ReleaseSRWLockShared(&g_lock);
     if (!queue) return false;
     // Counts the call until its callable is destroyed: that destructor runs module code too.
+    // Captured first, so it is destroyed last, after work's captures.
     struct Pending {
         Pending() { g_taskbarWork++; }
         ~Pending() { g_taskbarWork--; }
     };
     try {
         return queue.TryEnqueue(
-            priority, [work = std::move(work), evenUnloading, pending = std::make_shared<Pending>()] {
+            priority, [pending = std::make_shared<Pending>(), work = std::move(work), evenUnloading] {
                 try {
                     if (evenUnloading || !g_unloading) work();
                 } catch (...) {
