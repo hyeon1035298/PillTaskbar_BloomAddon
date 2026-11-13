@@ -1064,20 +1064,32 @@ std::wstring FunctionClass(const std::wstring& n) {
     return last == std::wstring::npos ? std::wstring() : head.substr(0, last);
 }
 
-// "Feature_<number>_" in a name: WIL's per-feature globals and helpers
-// (Feature_<n>__descriptor, Feature_<n>__private_cppFeatureState, ...).
+// WIL's per-feature globals and helpers: an identifier "Feature_<id>" plus one of WIL's
+// suffixes, whether the id is a number or a name (Feature_61276672__descriptor,
+// Feature_SystemLightTheme__descriptor, Feature_<id>__private_featureState,
+// Feature_<id>__private_IsEnabledDeviceUsageNoInline, Feature_<id>_logged_traits).
 bool PerFeatureName(const std::wstring& n) {
+    auto idChar = [](wchar_t c) { return iswalnum(c) || c == L'_'; };
+    auto endsWith = [](const std::wstring& s, const wchar_t* t) {
+        size_t k = wcslen(t);
+        return s.size() >= k && s.compare(s.size() - k, k, t) == 0;
+    };
     for (size_t p = n.find(L"Feature_"); p != std::wstring::npos; p = n.find(L"Feature_", p + 1)) {
-        size_t e = p + 8;
-        while (e < n.size() && n[e] >= L'0' && n[e] <= L'9') e++;
-        if (e > p + 8 && e < n.size() && n[e] == L'_') return true;
+        if (p > 0 && idChar(n[p - 1])) continue;  // part of a longer identifier
+        size_t e = p;
+        while (e < n.size() && idChar(n[e])) e++;
+        std::wstring id = n.substr(p + 8, e - p - 8);  // what follows "Feature_"
+        for (const wchar_t* suffix : {L"__descriptor", L"_logged_traits"})
+            if (endsWith(id, suffix) && id.size() > wcslen(suffix)) return true;
+        size_t priv = id.find(L"__private_");
+        if (priv != std::wstring::npos && priv > 0 && priv + 10 < id.size()) return true;
     }
     return false;
 }
 
 // WIL feature state (wil::details::FeatureImpl<__WilFeatureTraits_...> and the
-// Feature_<n>_ names): one instance of the same code and data per feature, so references
-// cannot tell one feature from another.
+// Feature_<id>__ names): one instance of the same code and data per feature, so
+// references cannot tell one feature from another.
 bool NeverPorted(const std::wstring& n) {
     return n.find(L"wil::details::FeatureImpl<") != std::wstring::npos ||
            n.find(L"__WilFeatureTraits_") != std::wstring::npos || PerFeatureName(n);
