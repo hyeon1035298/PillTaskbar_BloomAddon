@@ -18,7 +18,9 @@
 //      refs      the target at the same slot of an identical anchor
 //      vtslot    the slots of a mapped vftable (same length, no disagreeing known slot)
 //      referrer  x maps to x', x is used only by T and x' only by T' (similar bodies)
-//    and vftables by RTTI, by slot content or by code references (all must agree).
+//    and vftables by RTTI, by slot content or by code references (all must agree);
+//    slot content alone decides only when every slot that is not common is known or a
+//    known slot holds a function of the table's own.
 //    Derived pairs with an identical body become anchors.
 // 4. Validation: a changed body whose strings, imports or GUIDs were swapped (some only in
 //    OLD, some only in NEW) bans the sources that produced it, and propagation reruns.
@@ -654,7 +656,10 @@ public:
     }
     // RTTI (method d), and slot content (d2).
     bool ByRtti(uint32_t v, uint32_t& to) const;
-    bool BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* known = nullptr) const;
+    // decisive: every slot but the common ones is known, or a known one holds a
+    // function no other OLD slot holds. Only such a match may stand on slots alone (no
+    // code references, no RTTI).
+    bool BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* known = nullptr, bool* decisive = nullptr) const;
 
 private:
     const Build& old_;
@@ -722,18 +727,24 @@ bool Engine::ByRtti(uint32_t v, uint32_t& to) const {
 // A slot target held by more data slots than this says nothing about one table.
 constexpr size_t kCommonSlot = 8;
 
-bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) const {
+bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut, bool* decisive) const {
     const auto& so = old_.VtSlots(v);
+    if (decisive) *decisive = false;
     if (so.size() < 2) return false;
     // Known slots, without the ones every table shares (_purecall, common thunks): those
     // match any table of the right length.
     std::vector<std::pair<uint32_t, uint32_t>> known;
+    size_t uncommon = 0;
+    bool ownKnown = false;  // a known slot holds a function only this table holds
     for (uint32_t k = 0; k < so.size(); k++) {
         uint32_t y;
         uint8_t t;
         auto users = old_.ptrAt.find(so[k]);
         if (users != old_.ptrAt.end() && users->second.size() > kCommonSlot) continue;
-        if (Single(so[k], y, t)) known.emplace_back(k, y);
+        uncommon++;
+        if (!Single(so[k], y, t)) continue;
+        known.emplace_back(k, y);
+        ownKnown = ownKnown || (users != old_.ptrAt.end() && users->second.size() == 1);
     }
     if (known.size() < 2) return false;
     // Every NEW table that agrees with each known slot inside its own length. One of the
@@ -766,6 +777,14 @@ bool Engine::BySlots(uint32_t v, uint32_t& to, std::vector<uint32_t>* knownOut) 
         }
     if (cands.size() != 1 || rival) return false;
     to = *cands.begin();
+    // A real table of the same length that overrides an inherited slot, or that shifted
+    // its slots, is neither a candidate nor a rival: its overriding slot does not match
+    // the known one, and a shifted table does not hold the first known target where it
+    // is looked for. When every known slot is inherited, a base table that kept them is
+    // then the only candidate. A known slot of the table's own (its function in no other
+    // OLD slot) is not in a base table, and when every slot is known no slot is left for
+    // such an override.
+    if (decisive) *decisive = ownKnown || known.size() == uncommon;
     if (knownOut)
         for (auto& [k, y] : known) knownOut->push_back(so[k]);
     return true;
@@ -848,7 +867,9 @@ void Engine::Propagate(const std::unordered_map<uint32_t, uint32_t>& seedMap) {
                 m.refs = true;
             }
             std::vector<uint32_t> known;
-            if (BySlots(v, to, &known)) c.insert(to), m.slots = true;
+            bool decisive = false;
+            // Slots alone decide only when they are decisive.
+            if (BySlots(v, to, &known, &decisive) && (decisive || m.refs || m.rtti)) c.insert(to), m.slots = true;
             if (c.size() == 1) {
                 m.to = *c.begin();
                 vtMap[v] = m;
@@ -1250,11 +1271,13 @@ void Acceptor::Vftables() {
         std::set<uint32_t> c{m.to};
         uint32_t toR = 0, toS = 0;
         std::vector<uint32_t> known;
-        bool rtti = eng_.ByRtti(v, toR), slots = eng_.BySlots(v, toS, &known);
-        if (rtti) c.insert(toR);
-        if (slots) c.insert(toS);
+        bool decisive = false;
+        bool rtti = eng_.ByRtti(v, toR), slots = eng_.BySlots(v, toS, &known, &decisive);
         auto it = eng_.ev.find(v);
         bool refs = it != eng_.ev.end();
+        slots = slots && (decisive || refs || rtti);  // as in Propagate
+        if (rtti) c.insert(toR);
+        if (slots) c.insert(toS);
         if (refs)
             for (auto& [y, t] : it->second.ys) c.insert(y);
         std::wstring kinds;
