@@ -218,9 +218,10 @@ Bloom은 종료 코드 10–13과 15 뒤에는 스스로 다시 띄우지 않는
 ### 내리기
 
 1. 호스트가 `Local\PillTaskbar.Unload.<pid>`를 켠다.
-2. 런타임 제어 스레드: `Wh_ModBeforeUninit`, 모든 훅 끄기(실패하면 한 번 더), `Wh_ModUninit`, 스레드 기다리기, 훅 지우기(실패하면 한 번 더), 모드 DLL `FreeLibrary`(이미지가 실제로 내려가기를 1초까지 봄), MinHook 정리, `runtime-state: stopped`, 로그 닫기, `Loaded` 끄기, 런타임 뮤텍스 놓기, `Unloaded` 켜기, `FreeLibraryAndExitThread`.
+2. 런타임 제어 스레드: `Wh_ModBeforeUninit`, 모든 훅 끄기(실패하면 한 번 더), `Wh_ModUninit`, 모드 객체 기다리기, 스레드 기다리기, 훅 지우기(실패하면 한 번 더), 모드 DLL `FreeLibrary`(이미지가 실제로 내려가기를 1초까지 봄), MinHook 정리, `runtime-state: stopped`, 로그 닫기, `Loaded` 끄기, 런타임 뮤텍스 놓기, `Unloaded` 켜기, `FreeLibraryAndExitThread`.
+   - 모드 객체 기다리기: 모드 DLL이 C++/WinRT로 만든 객체(대리자, `implements<>` 객체, 코루틴)의 수를 `PillAddonCallbacks::liveObjects`(C++/WinRT 모듈 잠금)로 10 ms마다 읽어 0이 되기를 2초까지 기다린다. XAML은 트리에서 뺀 요소와 모드가 단 처리기를 패널의 내리기 전환이 끝날 때까지 쥐고 있다가(`AddDeleteThemeTransition`은 0.45초) 그 vtable로 `Release`를 부른다. 0이면 기다리지 않는다. 2초 뒤에도 남으면 그 수를 로그에 남기고 전처럼 내린다.
    - 스레드 기다리기: 다른 스레드를 하나씩 잠깐 멈춰 레지스터와 스택(RSP부터 최대 1 MB)을 복사하고 바로 다시 돌린 뒤, RIP나 스택 값 가운데 모드 DLL의 코드 구역이나 MinHook 트램펄린 칸을 가리키면서 바로 앞 바이트가 호출 명령(`E8 rel32`, `FF /2`)인 것이 있는지 본다. 있으면 400 ms마다 다시 본다. 멈춘 동안에는 시스템 호출만 하고 할당이나 잠금은 하지 않는다. 오래된 스택 값이 우연히 맞으면 더 기다릴 뿐이다.
-   - 시간: `Unload`를 본 때부터 모드 콜백과 스레드 기다리기를 합쳐 8초(`kRuntimeUnloadMs`), 이미지가 내려가기를 보는 데 1초(`kRuntimeUnmapMs`)까지 쓴다. `values.json`의 `$unloadWaitMs`(시험용)는 이 8초를 줄이기만 한다.
+   - 시간: `Unload`를 본 때부터 모드 콜백, 모드 객체 기다리기, 스레드 기다리기를 합쳐 8초(`kRuntimeUnloadMs`), 이미지가 내려가기를 보는 데 1초(`kRuntimeUnmapMs`)까지 쓴다. `values.json`의 `$unloadWaitMs`(시험용)는 이 8초를 줄이기만 한다.
    - 기한 안에 스레드가 빠지지 않거나 훅을 끄거나 지울 수 없으면 모드 DLL `FreeLibrary`도 MinHook 정리도 하지 않고 이미지를 남긴다(충돌보다 누수). `runtime-state`는 `stopped`/`leaked`이고, 그 explorer에는 다시 시작할 때까지 모드를 올리지 않는다. 설정 변경으로 다시 올리다 이렇게 되면 `refused`/`restart`로 남는다.
    - `refused`나 시작 때의 `initFailed`로 기다리던 런타임은 상태를 덮지 않고 끝난다.
 3. 호스트는 `Unloaded`를 10초(`kUnloadWaitMs`)까지 기다린다. 런타임 쪽 예산(8초 + 1초)은 이보다 짧다. 다만 모드 자체의 `Wh_ModUninit`이 그보다 오래 걸리면 넘길 수 있다. 안 오면 explorer를 건드리지 않고 `reason: unloadTimeout`을 남긴다.

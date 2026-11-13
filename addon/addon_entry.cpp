@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Built into the add-on's mod DLL next to the unchanged mod source. Hands the runtime
-// the mod's five Windhawk callbacks and its setting defaults through one C export, so
-// the runtime never looks up compiler-specific (decorated) names.
+// the mod's five Windhawk callbacks, its setting defaults and its count of live
+// objects through one C export, so the runtime never looks up compiler-specific
+// (decorated) names.
 
 #include <windows.h>
+
+#include <winrt/base.h>  // winrt::get_module_lock: one counter for the whole DLL
 
 #include "pill_runtime_api.h"
 #include "settings_defaults.h"
@@ -41,6 +44,11 @@ void Uninit() {
 BOOL SettingsChanged(BOOL* reload) {
     return Wh_ModSettingsChanged(reload);
 }
+// C++/WinRT counts every delegate and implements<> object of this DLL in its module
+// lock (what DllCanUnloadNow would read). Always 0 for a mod without C++/WinRT.
+DWORD LiveObjects() {
+    return winrt::get_module_lock();
+}
 
 const PillAddonCallbacks kCallbacks = {
     sizeof(PillAddonCallbacks),
@@ -54,6 +62,7 @@ const PillAddonCallbacks kCallbacks = {
     SettingsChanged,
     kSettingDefaults,
     sizeof(kSettingDefaults) / sizeof(kSettingDefaults[0]),
+    LiveObjects,
 };
 
 }  // namespace

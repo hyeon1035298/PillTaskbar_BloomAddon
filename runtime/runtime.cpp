@@ -35,6 +35,10 @@ constexpr int kRereads = 10;
 constexpr DWORD kRereadMs = 1000;
 // How often values.json is read while the data folder cannot be watched.
 constexpr DWORD kPollMs = 5000;
+// How long an unload waits for the mod's objects to go, within its budget, and how
+// often it looks (WaitForObjects).
+constexpr DWORD kObjectWaitMs = 2000;
+constexpr DWORD kObjectPollMs = 10;
 
 HANDLE g_unload;
 HANDLE g_loaded;
@@ -193,11 +197,43 @@ ULONGLONG UnloadDeadline() {
     return GetTickCount64() + (ULONGLONG)std::max(budget, 0);
 }
 
+// XAML can keep an element the mod took out of the tree, with the handlers the mod
+// gave it, until the panel's unload transition ends (0.45 s, 27 frames, for
+// AddDeleteThemeTransition); their last Release runs the mod's code. So the image stays
+// until C++/WinRT counts none of the mod's objects alive. A wait of a frame or two, or
+// of a fixed time, misses such a transition or slows every unload. Pinning the image
+// would keep it, and through its imports this runtime, mapped for good: each reload
+// would map a copy, and the next version's runtime would refuse to start beside this
+// one. The count is polled on this thread, never through a UI thread, so a busy or
+// stuck one only uses up the wait. An object alive after kObjectWaitMs has a holder
+// that does not let go by itself (a handler on a long-lived element, a global of the
+// mod's): the image then goes as it did before this wait, and the log says how many
+// were left.
+void WaitForObjects(ULONGLONG deadline) {
+    DWORD (*live)() = g_mod.callbacks ? g_mod.callbacks->liveObjects : nullptr;
+    DWORD first = live ? live() : 0;
+    if (!first) {
+        return;
+    }
+    ULONGLONG start = GetTickCount64();
+    ULONGLONG end = std::min(deadline, start + kObjectWaitMs);
+    DWORD left = first;
+    while (left && GetTickCount64() < end) {
+        Sleep(kObjectPollMs);
+        left = live();
+    }
+    log::Line(L"waited %llu ms for %u objects of the mod: %u left", GetTickCount64() - start, first, left);
+}
+
 // Frees the mod DLL once no thread can still be in its code or in a trampoline. When
 // that cannot be shown (a hook still on, a thread still inside at the deadline, a
 // hook that will not go), the image, its trampolines and MinHook stay as they are:
 // a leak rather than a crash. False then.
 bool ReleaseMod(bool hooksOff, ULONGLONG deadline) {
+    if (hooksOff) {
+        // Before the thread check: an object's last Release runs the mod's code.
+        WaitForObjects(deadline);
+    }
     std::vector<CodeRange> code;
     threads::AddImageCode(g_mod.module, code);
     hooks::AddTrampolines(code);
