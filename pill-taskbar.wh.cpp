@@ -7671,7 +7671,12 @@ struct Ui {
 
 [[clang::no_destroy]] std::list<Ui> g_uis;
 std::vector<HWND> g_taskbars;  // applied, between Apply and Restore
-std::shared_ptr<const Model> g_model;
+// The file as read, and the accounts of it that are shown: everything draws g_model.
+std::shared_ptr<const Model> g_file, g_model;
+// Ids of the accounts taken off the meter in its details, kept in the add-on's
+// prefs.json (ReadHidden, with the file's other readers further down).
+[[clang::no_destroy]] std::unordered_set<std::wstring> g_hidden;
+void ReadHidden();
 // The island (F8) draws the same model; set between its Apply and Restore.
 void (*g_onModel)() = nullptr;
 
@@ -8082,17 +8087,40 @@ void Render() {
     }
 }
 
-void OnModel(std::shared_ptr<const Model> model) {
-    if (g_model && model && g_model->left != model->left) {
-        g_leftFlip.reset();  // Bloom's own choice changed: it shows again
+bool Shown(Account const& a) {
+    return !g_hidden.contains(a.id);
+}
+
+// g_model from g_file without the hidden accounts; the file's model itself when
+// none is hidden, or when all are, so the meter and its details stay in reach.
+void PickShown() {
+    if (!g_file || std::ranges::all_of(g_file->accounts, Shown) ||
+        std::ranges::none_of(g_file->accounts, Shown)) {
+        g_model = g_file;
+        return;
     }
-    g_model = std::move(model);
+    auto shown = std::make_shared<Model>(*g_file);
+    std::erase_if(shown->accounts, [](Account const& a) { return !Shown(a); });
+    g_model = std::move(shown);
+}
+
+// Draws g_file again everywhere, its hidden accounts left out.
+void Show() {
+    PickShown();
     SyncIcons(g_model.get());
     Render();
     if (g_onModel) {
         core::Guard(L"Usage island", g_onModel);
     }
     core::Guard(L"Usage details", usage_detail::Refresh);
+}
+
+void OnModel(std::shared_ptr<const Model> model) {
+    if (g_file && model && g_file->left != model->left) {
+        g_leftFlip.reset();  // Bloom's own choice changed: it shows again
+    }
+    g_file = std::move(model);
+    Show();
 }
 
 // ---- lifecycle -------------------------------------------------------------------------
@@ -8134,10 +8162,12 @@ void Apply(HWND hwnd) {
         return;
     }
     g_taskbars.push_back(hwnd);
+    ReadHidden();
+    PickShown();
     // In an explorer that is starting up the watcher read the file before there
     // was a taskbar thread to hand it to; read it here once rather than wait for
     // Bloom's next write.
-    if (!g_model && g_pathsReady) {
+    if (!g_file && g_pathsReady) {
         std::string bytes;
         auto model = std::make_shared<Model>();
         if (ReadBytes(bytes) == Read::kOk && Parse(Widen(bytes), *model)) {
@@ -9072,7 +9102,7 @@ bool WritePrefs(wdj::JsonObject const& root) {
         return true;
     }
     DeleteFileW(temp.c_str());
-    Wh_Log(L"Island place not saved: %u", GetLastError());
+    Wh_Log(L"prefs.json not saved: %u", GetLastError());
     return false;
 }
 
@@ -20550,6 +20580,55 @@ std::wstring StartCodex(NewSession const& s, std::function<void(std::wstring)> c
 
 }  // namespace app_drive
 
+namespace usage {
+// The accounts taken off the meter, as "usageHidden": [<account id>, ...] in the
+// prefs.json the island keeps its places in. An id whose account is gone from
+// Bloom's file stays, should the account come back.
+
+constexpr PCWSTR kHiddenField = L"usageHidden";
+
+void ReadHidden() {
+    g_hidden.clear();
+    if (!island::PrefsDir()) {
+        return;
+    }
+    auto ids = Field(island::ReadPrefs(), kHiddenField, wdj::JsonValueType::Array);
+    for (auto const& id : ids ? ids.GetArray() : wdj::JsonArray()) {
+        if (id.ValueType() == wdj::JsonValueType::String && !id.GetString().empty()) {
+            g_hidden.insert(std::wstring(id.GetString()));
+        }
+    }
+}
+
+// Shows or hides the account everywhere and keeps that in the file.
+void SetHidden(std::wstring const& id, bool hidden) {
+    // Ids that hid every account of the file hid none (PickShown): they go.
+    if (g_file && std::ranges::none_of(g_file->accounts, Shown)) {
+        for (auto const& a : g_file->accounts) {
+            g_hidden.erase(a.id);
+        }
+    }
+    if (hidden) {
+        g_hidden.insert(id);
+    } else {
+        g_hidden.erase(id);
+    }
+    if (island::PrefsDir()) {
+        std::vector<std::wstring> sorted(g_hidden.begin(), g_hidden.end());
+        std::ranges::sort(sorted);
+        wdj::JsonArray list;
+        for (auto const& each : sorted) {
+            list.Append(wdj::JsonValue::CreateStringValue(each));
+        }
+        auto root = island::ReadPrefs();
+        root.Insert(kHiddenField, list);
+        island::WritePrefs(root);
+    }
+    Show();
+}
+
+}  // namespace usage
+
 // ============================================================================
 namespace usage_detail {
 // ============================================================================
@@ -21079,14 +21158,55 @@ std::wstring Status(usage::Model const& m, usage::Account const& a, int64_t now)
     return usage::Duration(usage::Age(a, now)) + L" 전";
 }
 
-// Bloom's home card: [mark][name][plan] … [when], then the limits; a signed-out
-// account says so instead. Old numbers are dimmed.
+// The eye at the end of an account's head: a click takes the account off the
+// meter and the island, or puts it back. The last account shown stays.
+FrameworkElement ShowToggle(usage::Account const& a, bool hidden, bool last) {
+    Controls::Border button;
+    button.Width(22);
+    button.Height(20);
+    button.Margin({6, 0, -4, 0});
+    button.CornerRadius(CornerRadiusHelper::FromUniformRadius(5));
+    button.Background(Brush(0));  // the whole box takes the pointer
+    button.VerticalAlignment(VerticalAlignment::Center);
+    auto eye = Text(hidden ? L"\xED1A" : L"\xE890", 12, hidden ? C().faint : C().dim);
+    eye.FontFamily(Media::FontFamily{kIconFont});
+    eye.HorizontalAlignment(HorizontalAlignment::Center);
+    eye.VerticalAlignment(VerticalAlignment::Center);
+    button.Child(eye);
+    std::wstring tip = last     ? L"보이는 계정이 하나뿐이라 숨길 수 없습니다"
+                       : hidden ? L"작업표시줄에 보이기"
+                                : L"작업표시줄에서 숨기기";
+    Controls::ToolTipService::SetToolTip(button, winrt::box_value(winrt::hstring(tip)));
+    Automation::AutomationProperties::SetName(button, tip);
+    if (last) {
+        button.Opacity(0.4);
+        return button;
+    }
+    button.PointerEntered([](auto const& sender, auto&&) {
+        sender.template as<Controls::Border>().Background(Brush(C().tile));
+    });
+    button.PointerExited([](auto const& sender, auto&&) {
+        sender.template as<Controls::Border>().Background(Brush(0));
+    });
+    // The card is made again by the change, so the change waits for the click to end.
+    button.Tapped([id = a.id, hidden](auto&&, Input::TappedRoutedEventArgs const& e) {
+        e.Handled(true);
+        core::Post([id, hidden] {
+            core::Guard(L"Usage account shown", [&] { usage::SetHidden(id, !hidden); });
+        });
+    });
+    return button;
+}
+
+// Bloom's home card: [mark][name][plan] … [when][eye], then the limits; a
+// signed-out account says so instead. Old numbers are dimmed, and the whole of
+// an account taken off the meter.
 FrameworkElement AccountCard(usage::Model const& m, usage::Account const& a,
-                             usage::Label const& label, int64_t now) {
+                             usage::Label const& label, int64_t now, bool hidden, bool last) {
     Controls::StackPanel stack;
     Controls::Grid head;
     head.Margin({0, 0, 0, 5});
-    for (int c = 0; c < 4; c++) {
+    for (int c = 0; c < 5; c++) {
         Controls::ColumnDefinition column;
         column.Width(c == 1 ? GridLength{1, GridUnitType::Star} : GridLengthHelper::Auto());
         head.ColumnDefinitions().Append(column);
@@ -21117,6 +21237,11 @@ FrameworkElement AccountCard(usage::Model const& m, usage::Account const& a,
         Controls::Grid::SetColumn(when, 3);
         head.Children().Append(when);
     }
+    if (!a.id.empty()) {
+        auto toggle = ShowToggle(a, hidden, last);
+        Controls::Grid::SetColumn(toggle, 4);
+        head.Children().Append(toggle);
+    }
     stack.Children().Append(head);
     if (a.signedOut) {
         auto need = Text(L"로그인이 풀려 사용량을 받지 못했습니다", kSmallSize, C().dim);
@@ -21132,6 +21257,16 @@ FrameworkElement AccountCard(usage::Model const& m, usage::Account const& a,
             rows.Children().Append(Text(L"받은 한도가 없습니다", kSmallSize, C().dim));
         }
         stack.Children().Append(rows);
+    }
+    if (hidden) {  // all but the eye
+        for (uint32_t i = 1; i < stack.Children().Size(); i++) {
+            stack.Children().GetAt(i).Opacity(0.45);
+        }
+        for (auto const& part : head.Children()) {
+            if (Controls::Grid::GetColumn(part.as<FrameworkElement>()) != 4) {
+                part.Opacity(0.45);
+            }
+        }
     }
     return Surface(stack, C().card, kCardRadius, {kCardPadX, kCardPadY, kCardPadX, kCardPadY});
 }
@@ -24486,7 +24621,8 @@ void Fill(Controls::StackPanel const& body) {
     body.Children().Clear();
     g_open->sessionsSummary = nullptr;
     g_open->sessionsList = nullptr;
-    auto model = usage::g_model;
+    // Every account of the file, the hidden ones too, so they can be put back.
+    auto model = usage::g_file;
     int64_t now = usage::Now();
 
     auto head = Text(L"AI 사용량", kTitleSize, C().text, Semi());
@@ -24499,8 +24635,13 @@ void Fill(Controls::StackPanel const& body) {
         body.Children().Append(none);
     }
     auto labels = model ? usage::Labels(*model) : std::vector<usage::Label>{};
+    // What the meter shows: a hidden account's card says it isn't there.
+    static const std::vector<usage::Account> kNone;
+    auto const& shown = usage::g_model ? usage::g_model->accounts : kNone;
     for (size_t i = 0; model && i < model->accounts.size(); i++) {
-        auto card = AccountCard(*model, model->accounts[i], labels[i], now);
+        auto const& a = model->accounts[i];
+        bool hidden = std::ranges::find(shown, a.id, &usage::Account::id) == shown.end();
+        auto card = AccountCard(*model, a, labels[i], now, hidden, !hidden && shown.size() == 1);
         card.Margin({0, kGap, 0, 0});
         body.Children().Append(card);
     }
