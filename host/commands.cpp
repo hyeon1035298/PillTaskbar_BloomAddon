@@ -109,7 +109,8 @@ int RunResolveSymbols(const Args& a) {
     std::wstring reason = r == addon::kExitOk ? L"" : !rep.reason.empty() ? rep.reason : ExitReason(r);
     Print(Format(L"symbols: exit %d%ls%ls", r, reason.empty() ? L"" : L", ", reason.c_str()));
     // Not a running host: no explorer uses these offsets yet, so the guard stays as it is.
-    state.state().symbolsSource = r == addon::kExitOk ? (rep.PortedKeys().empty() ? L"pdb" : L"ported") : L"";
+    state.state().symbolsSource =
+        r != addon::kExitOk || rep.modules.empty() ? L"" : rep.PortedKeys().empty() ? L"pdb" : L"ported";
     state.state().portedFrom = r == addon::kExitOk ? rep.PortedFrom() : L"";
     state.SetPhase(r == addon::kExitOk ? L"stopped" : L"failed", reason);
     return r;

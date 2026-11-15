@@ -18,6 +18,8 @@ LINE = re.compile(r'^([A-Z][A-Z0-9_]*)="([^"\\$`]*)"\s*(#.*)?$')
 REQUIRED = ["ADDON_ID", "ADDON_NAME", "ADDON_VERSION", "ADDON_MOD_SRC", "ADDON_WINDHAWK_MODS",
             "ADDON_SYMBOL_MODULES", "ADDON_NAME_KO", "ADDON_NAME_EN", "ADDON_LICENSE", "ADDON_MIN_BLOOM",
             "ADDON_THIRD_PARTY"]
+# Set, but may be empty: an add-on that hooks no symbols names no modules.
+MAY_BE_EMPTY = {"ADDON_SYMBOL_MODULES"}
 
 
 def read_conf(path):
@@ -33,7 +35,7 @@ def read_conf(path):
             if m.group(1) in conf:
                 raise SystemExit(f"{path}:{n}: {m.group(1)} set twice")
             conf[m.group(1)] = m.group(2)
-    missing = [k for k in REQUIRED if not conf.get(k)]
+    missing = [k for k in REQUIRED if k not in conf or not (conf[k] or k in MAY_BE_EMPTY)]
     if missing:
         raise SystemExit(f"{path}: missing {', '.join(missing)}")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", conf["ADDON_ID"]):

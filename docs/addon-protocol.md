@@ -13,7 +13,7 @@
 | `ADDON_VERSION` | `kVersion`, addon.json `version` |
 | `ADDON_MOD_SRC`, `ADDON_MOD_VERSION` | 모드 소스(conf 기준 경로), `WH_MOD_VERSION` |
 | `ADDON_WINDHAWK_MODS` | 거절 검사에 쓰는 Windhawk 모드 id(3절 코드 12) |
-| `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32 |
+| `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32. 기호를 훅하지 않는 애드온은 빈 값(`""`)으로 둔다. 그러면 호스트는 기호 준비(모듈 확인, PDB 찾기와 받기)를 통째로 건너뛰고 바로 넣는다. `symbols.txt`에 이름이 하나도 없을 때도 같다 |
 | `ADDON_SCHEMA`, `ADDON_VALUES_DEFAULTS` | `settings.schema.json`을 싣는지, 모드 YAML 기본값을 덮는 JSON |
 | `ADDON_EASY` | 스키마에 합칠 `settings.easy.json`(6절, conf 기준 경로, 비우면 없음) |
 | `ADDON_THIRD_PARTY`, `ADDON_NAME_KO/EN`, `ADDON_ABOUT_KO/EN`, `ADDON_LICENSE`, `ADDON_SOURCE`, `ADDON_MIN_BLOOM`, `ADDON_NEEDS` | 묶음의 고지 파일과 addon.json |

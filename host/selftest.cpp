@@ -934,6 +934,30 @@ void TestPrepare() {
     RemoveTree(data);
 }
 
+// An add-on that hooks no symbols: no modules, or a symbols.txt with no names, is ok
+// at once, without looking at a module (gone.dll is never read) or the offsets folder.
+void TestPrepareNothing() {
+    std::wstring data = TestDir(L"prepare-none");
+    std::wstring exe = JoinPath(data, L"exe");
+    std::wstring off = JoinPath(data, addon::kOffsetsDir);
+    SymbolOptions o;
+    o.dataDir = data;
+    o.symbolList = JoinPath(exe, addon::kSymbolList);
+    o.noDownload = true;
+    o.noWindhawkCache = true;
+    SymbolReport rep;
+    rep.modules.push_back({});
+    Check(PrepareSymbols(o, &rep) == addon::kExitOk && rep.modules.empty(),
+          L"prepare: no modules is ok, even without symbols.txt");
+    o.modules = {{L"gone.dll", JoinPath(data, L"gone.dll")}};
+    Check(PrepareSymbols(o, &rep) == addon::kExitError, L"prepare: a missing symbols.txt still fails");
+    WriteText(o.symbolList, "\n");
+    Check(PrepareSymbols(o, &rep) == addon::kExitOk && rep.modules.empty() &&
+              GetFileAttributesW(off.c_str()) == INVALID_FILE_ATTRIBUTES,
+          L"prepare: no names is ok and touches no module");
+    RemoveTree(data);
+}
+
 }  // namespace
 
 int RunSelfTest() {
@@ -957,6 +981,7 @@ int RunSelfTest() {
     TestWorker();
     TestPortIdentity();
     TestPrepare();
+    TestPrepareNothing();
     Print(Format(L"self-test: %d checks, %d failed", g_checks, g_failures));
     return g_failures;
 }

@@ -12,6 +12,8 @@
 
 #include <windows.h>
 
+#include <initializer_list>
+
 #include "addon_identity.h"
 
 namespace addon {
@@ -57,12 +59,14 @@ constexpr wchar_t kRuntimeMutex[] = L"Local\\" ADDON_NAME L".Runtime.%u";
 constexpr const wchar_t* kWindhawkMods[] = {ADDON_WINDHAWK_MODS};
 
 // The modules the host resolves symbols.txt in. inPackage: the Client.Core package
-// folder, where a copy explorer has loaded wins; otherwise System32.
+// folder, where a copy explorer has loaded wins; otherwise System32. An add-on that
+// hooks no symbols names none (ADDON_SYMBOL_MODULES=""), which an array cannot hold;
+// the host then prepares no symbols at all.
 struct SymbolModuleName {
     const wchar_t* name;
     bool inPackage;
 };
-constexpr SymbolModuleName kSymbolModules[] = {ADDON_SYMBOL_MODULES};
+constexpr std::initializer_list<SymbolModuleName> kSymbolModules = {ADDON_SYMBOL_MODULES};
 
 // The runtime export the host passes to SetWindowsHookEx(WH_GETMESSAGE).
 constexpr char kHookProcName[] = "PillTaskbarHookProc";

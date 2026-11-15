@@ -473,7 +473,8 @@ int Host::StartExplorer(const Taskbar& t) {
         return symbols_.reason.empty() ? r : Finish(r, symbols_.reason);
     }
     std::vector<std::wstring> ported = symbols_.PortedKeys();
-    hs.symbolsSource = ported.empty() ? L"pdb" : L"ported";
+    // No modules in the report: the add-on hooks no symbols, so there is no source.
+    hs.symbolsSource = symbols_.modules.empty() ? L"" : ported.empty() ? L"pdb" : L"ported";
     hs.portedFrom = symbols_.PortedFrom();
     // Armed before ported offsets reach explorer, and kept until none are left.
     if (!SetGuard(dataDir_, ported, NowTicks()) && !ported.empty()) {

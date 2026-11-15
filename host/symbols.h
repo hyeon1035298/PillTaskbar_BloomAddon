@@ -93,6 +93,7 @@ struct SymbolModule {
 // explorer's loaded modules when given, else the usual System32 / SystemApps locations.
 std::vector<SymbolModule> AddonModules(const std::vector<std::wstring>& explorerModules);
 
+// False only when the file cannot be read; an empty list is no error.
 bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names);
 
 // Returns false to stop (the host was asked to stop).
@@ -162,7 +163,8 @@ struct SymbolReport {
 
 // Every module is tried; the result is the worst of theirs (WorstExit): kExitOk,
 // kExitDownload, kExitNoSymbols (a module or its RSDS is missing) or kExitError, or
-// kSymbolsStopped at once when progress asked to stop.
+// kSymbolsStopped at once when progress asked to stop. No modules, or a symbols.txt
+// with no names, is kExitOk at once with no modules in the report.
 constexpr int kSymbolsStopped = -1;
 int PrepareSymbols(const SymbolOptions& opt, SymbolReport* report = nullptr);
 // Which of two module results decides the exit code.

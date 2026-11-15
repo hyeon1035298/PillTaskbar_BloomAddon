@@ -261,7 +261,7 @@ bool ReadSymbolList(const std::wstring& path, std::vector<std::wstring>& names) 
         if (p == std::wstring::npos) break;
         start = p + 1;
     }
-    return !names.empty();
+    return true;
 }
 
 // --- dbghelp ---
@@ -836,10 +836,20 @@ int PrepareSymbols(const SymbolOptions& opt, SymbolReport* report) {
     SymbolReport local;
     SymbolReport& rep = report ? *report : local;
     rep = SymbolReport{};
+    // An add-on that hooks no symbols names no modules or lists no names: nothing to
+    // look up, download or write, and the report stays empty.
+    if (opt.modules.empty()) {
+        Log(L"no symbol modules; symbols skipped");
+        return addon::kExitOk;
+    }
     std::vector<std::wstring> names;
     if (!ReadSymbolList(opt.symbolList, names)) {
-        Log(L"%ls is missing or empty", addon::kSymbolList);
+        Log(L"%ls is missing", addon::kSymbolList);
         return addon::kExitError;
+    }
+    if (names.empty()) {
+        Log(L"%ls lists no symbols; symbols skipped", addon::kSymbolList);
+        return addon::kExitOk;
     }
     if (!CreateDirs(JoinPath(opt.dataDir, addon::kOffsetsDir))) {
         Log(L"could not create the offsets folder (%lu)", GetLastError());
