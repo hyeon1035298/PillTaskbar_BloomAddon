@@ -1338,14 +1338,19 @@ FrameworkElement TaskbarElement(HWND hwnd) {
 
     // 48:83EC 28 | sub rsp,28
     // 48:83C1 48 | add rcx,48   <- offset of the element in TaskbarHost
-    size_t offset = 0x10;
+    // Any other prologue (another mod's hook, a reordered build) leaves the offset
+    // unknown; guessing one would AddRef whatever sits there, so there is no element.
     const BYTE* b = (const BYTE*)TaskbarHost_FrameHeight_Original;
-    if (b[0] == 0x48 && b[1] == 0x83 && b[2] == 0xEC && b[4] == 0x48 &&
-        b[5] == 0x83 && b[6] == 0xC1 && b[7] <= 0x7F) {
-        offset = b[7];
-    } else {
-        Wh_Log(L"Unsupported TaskbarHost::FrameHeight");
+    if (!(b[0] == 0x48 && b[1] == 0x83 && b[2] == 0xEC && b[4] == 0x48 &&
+          b[5] == 0x83 && b[6] == 0xC1 && b[7] <= 0x7F)) {
+        static bool logged = false;
+        if (!std::exchange(logged, true)) {
+            Wh_Log(L"Unsupported TaskbarHost::FrameHeight");
+        }
+        std__Ref_count_base__Decref_Original(host[1]);
+        return nullptr;
     }
+    size_t offset = b[7];
 
     auto element = FromAbi(*(IUnknown**)((BYTE*)host[0] + offset));
     std__Ref_count_base__Decref_Original(host[1]);
@@ -1911,16 +1916,18 @@ wuc::CompositionGradientBrush Sheen(wuc::Compositor const& compositor) {
 
 // The glass over the "backdrop" source: a blur if `blur` is set, saturation
 // and the "sheen" source on top with `sheen`, and the tint; with `masked` it is
-// cut to the alpha of the "mask" source.
+// cut to the alpha of the "mask" source. An opaque tint hides the backdrop, so
+// then there is none: nothing behind is fetched or blurred.
 wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
                                  winrt::Windows::UI::Color tint,
                                  bool sheen,
                                  bool masked) {
     auto pv = [](auto v) { return wf::PropertyValue::CreateSingle(v); };
 
+    bool seeThrough = tint.A < 255;
     wge::IGraphicsEffectSource backdrop =
         wuc::CompositionEffectSourceParameter(L"backdrop");
-    if (blur) {
+    if (blur && seeThrough) {
         // A hard border extends the edge pixels instead of fading into
         // transparency: each pill piece blurs only its own backdrop, and two
         // soft edges meeting at the joint would show as a seam.
@@ -1939,7 +1946,7 @@ wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
             {tint.R / 255.0f, tint.G / 255.0f, tint.B / 255.0f,
              tint.A / 255.0f})},
         std::vector<wge::IGraphicsEffectSource>{});
-    if (sheen) {
+    if (sheen && seeThrough) {
         // Glass shows what's behind it a little richer than it is.
         backdrop = winrt::make<Effect>(
                        L"Saturation", CLSID_D2D1Saturation,
@@ -1947,8 +1954,11 @@ wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
                        std::vector<wge::IGraphicsEffectSource>{backdrop})
                        .as<wge::IGraphicsEffectSource>();
     }
-    std::vector<wge::IGraphicsEffectSource> layers{
-        backdrop, flood.as<wge::IGraphicsEffectSource>()};
+    std::vector<wge::IGraphicsEffectSource> layers;
+    if (seeThrough) {
+        layers.push_back(backdrop);
+    }
+    layers.push_back(flood.as<wge::IGraphicsEffectSource>());
     if (sheen) {
         layers.push_back(wuc::CompositionEffectSourceParameter(L"sheen"));
     }
@@ -2057,7 +2067,8 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
             core::Guard(L"Glass brush",
                         [&] { CompositionBrush(CreateBlur(tint, true)); });
         }
-        if (glass && !CompositionBrush()) {
+        // An opaque tint is the whole fill whatever is behind it: the plain brush.
+        if (glass && tint.A < 255 && !CompositionBrush()) {
             core::Guard(L"Blur brush",
                         [&] { CompositionBrush(CreateBlur(tint, false)); });
         }
@@ -2078,14 +2089,19 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
 
    private:
     wuc::CompositionBrush CreateBlur(winrt::Windows::UI::Color tint, bool sheen) {
+        // A blur of 0 is no blur: the pass is left out, not run at radius 0.
+        float amount = settings::g.pill.blur;
         auto brush =
             m_compositor
-                .CreateEffectFactory(
-                    GlassEffect(settings::g.pill.blur, tint, sheen, false))
+                .CreateEffectFactory(GlassEffect(
+                    amount > 0 ? std::optional<float>(amount) : std::nullopt,
+                    tint, sheen, false))
                 .CreateBrush();
-        brush.SetSourceParameter(L"backdrop",
-                                 m_host ? m_compositor.CreateHostBackdropBrush()
-                                        : m_compositor.CreateBackdropBrush());
+        if (tint.A < 255) {  // GlassEffect has a backdrop only then
+            brush.SetSourceParameter(
+                L"backdrop", m_host ? m_compositor.CreateHostBackdropBrush()
+                                    : m_compositor.CreateBackdropBrush());
+        }
         if (sheen) {
             brush.SetSourceParameter(L"sheen", Sheen(m_compositor));
         }
@@ -9162,8 +9178,23 @@ void OnPrefsChanged() {
     SyncAll();
 }
 
+void UnwatchPlaces();
+
+// Set when the watch can't be re-armed, until a new one is set up.
+std::atomic<bool> g_prefsWatchFailed;
+
+// Thread pool. When the folder goes away the handle can't be re-armed and stays
+// signaled, so this would run without end; the watch is dropped on the taskbar
+// thread instead (unregistering it here would wait on this very callback), and
+// the islands' next layout looks for the folder once more.
 void CALLBACK OnPrefsFolderChanged(void*, BOOLEAN) {
-    FindNextChangeNotification(g_prefsChange);
+    if (g_prefsWatchFailed) {
+        return;
+    }
+    if (!FindNextChangeNotification(g_prefsChange)) {
+        g_prefsWatchFailed = true;
+        core::Post(UnwatchPlaces);
+    }
     core::Post(OnPrefsChanged);
 }
 
@@ -9181,6 +9212,7 @@ void WatchPlaces() {
         g_prefsChange = nullptr;
         return;
     }
+    g_prefsWatchFailed = false;
     if (!RegisterWaitForSingleObject(&g_prefsWait, g_prefsChange, OnPrefsFolderChanged,
                                      nullptr, INFINITE, WT_EXECUTEDEFAULT)) {
         g_prefsWait = nullptr;
@@ -18456,9 +18488,9 @@ std::vector<Found> FindClaude(int64_t now) {
 
 std::wstring CodexId(std::wstring const& path);
 
-// sessions\YYYY\MM\DD\rollout-*.jsonl; a session started days ago may still run,
-// so every day's folder is listed, newest first, until a day has nothing recent.
-// The one asked for comes too.
+// sessions\YYYY\MM\DD\rollout-*.jsonl; a session started days ago may still run
+// (Codex keeps writing to the file in the folder of the day it began), so every
+// day's folder is listed. The one asked for comes too.
 std::vector<Found> FindCodex(int64_t now) {
     std::vector<Found> all;
     std::wstring home = CodexHome();
@@ -27380,6 +27412,9 @@ void Wh_ModBeforeUninit() {
     bloom_link::Stop();
     changes::Stop();
     core::g_unloading = true;
+    // The usage details and Bloom's link use the folders' workers and taskbar calls
+    // with the feature off as well, so these stop taking new work either way.
+    folders::g_unloading = true;
     if (hooks::g_features.folders) {
         folders::Stop();
     }
@@ -27411,9 +27446,7 @@ void Wh_ModUninit() {
     if (g_shellHost) {
         return;
     }
-    if (hooks::g_features.folders) {
-        folders::WaitForWork();
-    }
+    folders::WaitForWork();  // their workers run for the usage details too
     size::WaitForHooks();
     core::WaitForPosted();
     pill::WaitForGlass();
