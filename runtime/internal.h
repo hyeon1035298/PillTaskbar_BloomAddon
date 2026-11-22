@@ -91,10 +91,12 @@ void Uninitialize();
 // ApplyHookOperations. False when hooks of an earlier mod load are still there.
 bool BeginMod();
 // After Init returned TRUE: applies what Init queued and allows ApplyHookOperations.
-void EndInit();
-// After BeforeUninit: refuses new hooks and switches every hook off. False when a
-// hook could not be switched off even on a second try.
-bool DisableAll();
+// False when the queued hooks could not be applied.
+bool EndInit();
+// After BeforeUninit: refuses new hooks and switches every hook off, waiting up to
+// waitMs for SuspendLock. False when a hook could not be switched off even on a
+// second try, or the lock did not come.
+bool DisableAll(DWORD waitMs);
 // After the threads have left the mod: frees the trampolines of every hook the mod
 // made. False when one could not be removed even on a second try.
 bool RemoveAll();
@@ -108,11 +110,36 @@ std::vector<std::wstring> Degraded();
 }  // namespace hooks
 
 namespace threads {
+// Held while this runtime suspends other threads of the process: each check of
+// WaitUntilOut, and each MinHook call that can switch a hook on or off (MinHook stops
+// every other thread around the patch). Every add-on's runtime in this process takes
+// the same mutex (addon::kSuspendMutex), so two of them never suspend each other at
+// the same time and both stay stopped. Only ever held around those calls, never
+// around mod code or a wait. One left by a thread that died holding it counts as
+// taken. Held() is false when it could not be had within timeoutMs; the caller then
+// suspends nothing.
+class SuspendLock {
+   public:
+    explicit SuspendLock(DWORD timeoutMs);
+    ~SuspendLock();
+    SuspendLock(const SuspendLock&) = delete;
+    SuspendLock& operator=(const SuspendLock&) = delete;
+    bool Held() const { return m_held; }
+
+   private:
+    HANDLE m_mutex = nullptr;
+    bool m_held = false;
+};
+// How long a hook operation waits for it. Another runtime holds it for one MinHook
+// patch or one look at the threads, which take milliseconds.
+constexpr DWORD kSuspendWaitMs = 2000;
+
 // The executable sections of a mapped image.
 void AddImageCode(HMODULE module, std::vector<CodeRange>& out);
 // Waits until no other thread of this process runs in the ranges or has a return
 // address into them on its stack, checking every 400 ms. False when one still does
-// at the deadline (GetTickCount64), or when the check itself could not run.
+// at the deadline (GetTickCount64), or when the check itself could not run (also when
+// another runtime kept SuspendLock until then).
 bool WaitUntilOut(const std::vector<CodeRange>& ranges, ULONGLONG deadline);
 }  // namespace threads
 

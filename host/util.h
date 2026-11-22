@@ -42,6 +42,8 @@ uint64_t NowTicks();
 uint64_t ToTicks(const FILETIME& ft);
 std::wstring IsoTime(uint64_t ticks, bool millis = false);  // 2026-01-01T00:00:00Z
 bool ParseIsoTime(const std::wstring& s, uint64_t& ticks);
+// Milliseconds from now to deadline (GetTickCount64), 0 once it has passed.
+DWORD MsUntil(ULONGLONG deadline);
 
 // --- output ---
 // Console output for the check modes. Uses the inherited stdout (a pipe or file)

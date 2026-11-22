@@ -142,6 +142,11 @@ uint64_t NowTicks() {
     return ToTicks(ft);
 }
 
+DWORD MsUntil(ULONGLONG deadline) {
+    ULONGLONG now = GetTickCount64();
+    return now >= deadline ? 0 : (DWORD)(deadline - now);
+}
+
 std::wstring IsoTime(uint64_t ticks, bool millis) {
     FILETIME ft{(DWORD)ticks, (DWORD)(ticks >> 32)};
     SYSTEMTIME st{};

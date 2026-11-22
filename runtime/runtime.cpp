@@ -241,12 +241,14 @@ bool UiThreadAnswers(HWND& window) {
 // An object alive after kObjectWaitMs of a UI thread that answers has a holder that
 // does not let go by itself (a handler on a long-lived element, a global of the
 // mod's): the image then goes as it did before this wait, and the log says how many
-// were left.
-void WaitForObjects(ULONGLONG deadline) {
+// were left. One still alive when the deadline comes first, the UI thread having
+// answered for less, may yet be released into the image: false then, and the image
+// stays (ReleaseMod's leak path).
+bool WaitForObjects(ULONGLONG deadline) {
     DWORD (*live)() = g_mod.callbacks ? g_mod.callbacks->liveObjects : nullptr;
     DWORD first = live ? live() : 0;
     if (!first) {
-        return;
+        return true;
     }
     ULONGLONG start = GetTickCount64();
     ULONGLONG last = start;
@@ -267,23 +269,24 @@ void WaitForObjects(ULONGLONG deadline) {
     log::Line(L"waited %llu ms (%llu of them for a UI thread that did not answer) for %u objects of the mod: "
               L"%u left",
               GetTickCount64() - start, silent, first, left);
+    return !left || answered >= kObjectWaitMs;
 }
 
 // Frees the mod DLL once no thread can still be in its code or in a trampoline. When
-// that cannot be shown (a hook still on, a thread still inside at the deadline, a
-// hook that will not go), the image, its trampolines and MinHook stay as they are:
-// a leak rather than a crash. False then.
+// that cannot be shown (a hook still on, an object or a thread still inside at the
+// deadline, a hook that will not go), the image, its trampolines and MinHook stay as
+// they are: a leak rather than a crash. False then.
 bool ReleaseMod(bool hooksOff, ULONGLONG deadline) {
-    if (hooksOff) {
-        // Before the thread check: an object's last Release runs the mod's code.
-        WaitForObjects(deadline);
-    }
+    // Before the thread check: an object's last Release runs the mod's code.
+    bool objectsDone = hooksOff && WaitForObjects(deadline);
     std::vector<CodeRange> code;
     threads::AddImageCode(g_mod.module, code);
     hooks::AddTrampolines(code);
     PCWSTR why = nullptr;
     if (!hooksOff) {
         why = L"a hook could not be switched off";
+    } else if (!objectsDone) {
+        why = L"objects of the mod are still alive";
     } else if (!threads::WaitUntilOut(code, deadline)) {
         why = L"a thread may still be in its code";
     } else if (!hooks::RemoveAll()) {
@@ -356,9 +359,10 @@ bool LoadMod() {
         WriteState(L"initFailed", hooks::g_symbolsFailed ? L"symbols" : L"init");
         return false;
     }
-    hooks::EndInit();
     g_mod.running = true;
-    if (!CallMod(L"Wh_ModAfterInit", [&] { callbacks->afterInit(); })) {
+    // Init's hooks failing to go live leaves the mod half started too; it then gets no
+    // AfterInit.
+    if (!hooks::EndInit() || !CallMod(L"Wh_ModAfterInit", [&] { callbacks->afterInit(); })) {
         // Half started: taken out again through its Uninit, and the start counts as failed.
         if (UnloadMod(UnloadDeadline())) {
             WriteState(L"initFailed", L"init");
@@ -382,10 +386,18 @@ bool UnloadMod(ULONGLONG deadline) {
         // that nothing is left in the mod's code before it is freed.
         const PillAddonCallbacks* callbacks = g_mod.callbacks;
         CallMod(L"Wh_ModBeforeUninit", [&] { callbacks->beforeUninit(); });
-        hooksOff = hooks::DisableAll();
+        // Another runtime may hold SuspendLock for a while when every add-on unloads
+        // at once: the whole budget is worth waiting for it.
+        ULONGLONG now = GetTickCount64();
+        hooksOff = hooks::DisableAll(now < deadline ? (DWORD)(deadline - now) : 0);
         // The mod's Uninit waits for calls still inside its hooks, which needs the
-        // hooks off first.
-        CallMod(L"Wh_ModUninit", [&] { callbacks->uninit(); });
+        // hooks off first. With a hook still on, its detours go on using what Uninit
+        // would free: the mod is left as it is, mapped.
+        if (hooksOff) {
+            CallMod(L"Wh_ModUninit", [&] { callbacks->uninit(); });
+        } else {
+            log::Line(L"Wh_ModUninit skipped: a hook is still on");
+        }
     }
     return ReleaseMod(hooksOff, deadline);
 }
@@ -690,11 +702,13 @@ bool UsableDataDir(PCWSTR dir) {
 }
 
 // On the taskbar thread, inside its message retrieval: only copy the host's
-// configuration, keep this DLL loaded and start the control thread.
+// configuration, keep this DLL loaded and start the control thread. Every way out
+// that starts no thread clears g_started, so a later hook call tries again.
 void Begin() {
     g_uiThread = GetCurrentThreadId();
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, NamedObject(addon::kConfigMapping).c_str());
     if (!mapping) {
+        g_started = false;
         return;  // not loaded by our host
     }
     auto* view = static_cast<const BYTE*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
@@ -721,6 +735,7 @@ void Begin() {
     }
     CloseHandle(mapping);
     if (!ok && !report) {
+        g_started = false;
         return;
     }
     if (!ok) {
@@ -728,13 +743,16 @@ void Begin() {
         g_refusal = L"protocol";
     }
     HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Begin), &self)) {
-        return;
+    HANDLE thread = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Begin), &self)) {
+        thread = CreateThread(nullptr, 0, ControlThread, nullptr, 0, nullptr);
+        if (!thread) {
+            FreeLibrary(self);
+        }
     }
-    HANDLE thread = CreateThread(nullptr, 0, ControlThread, nullptr, 0, nullptr);
     if (!thread) {
         g_refusal = nullptr;
-        FreeLibrary(self);
+        g_started = false;
         return;
     }
     CloseHandle(thread);

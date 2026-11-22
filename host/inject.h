@@ -54,5 +54,8 @@ HookResult HookUntilLoaded(Explorer& e, const std::wstring& runtimePath, const W
 
 // Sets Unload and waits for Unloaded. False on timeout; explorer is left alone.
 bool UnloadRuntime(Explorer& e, DWORD timeoutMs, const WaitFn& wait);
+// Only sets Unload, so that two runtimes go at the same time; UnloadRuntime then waits
+// for each.
+void AskUnload(Explorer& e);
 
 }  // namespace host

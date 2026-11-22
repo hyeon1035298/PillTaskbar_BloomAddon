@@ -124,7 +124,7 @@ private:
     bool FaultInAddon(const AppCrash& c) const;
     void StartPanel();
     void OnPanelExit();
-    void StopPanel();
+    void StopPanel(DWORD timeoutMs = addon::kUnloadWaitMs);
     bool TaskbarReady(const Taskbar& t);
     bool TakeOverBloom(DWORD pid, const std::wstring& exe);
     addon::Config MakeConfig() const;
@@ -332,8 +332,15 @@ int Host::Shutdown(int code) {
         Wait({ex_.loaded.get()}, 500, false) == 0)
         ex_.runtimeIn = true;
     if (!ex_.runtimeIn) state_.state().loaded.reset();
-    if (haveExplorer_ && ex_.runtimeIn) {
-        if (UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter())) {
+    // Explorer's runtime and ShellHost's are asked at once and share one budget: Bloom
+    // kills a host that has not ended soon after kUnloadWaitMs, and waiting for one
+    // after the other could leave the ShellHost runtime without a host.
+    ULONGLONG deadline = GetTickCount64() + addon::kUnloadWaitMs;
+    bool inExplorer = haveExplorer_ && ex_.runtimeIn;
+    if (inExplorer) AskUnload(ex_);
+    if (havePanel_ && panel_.runtimeIn) AskUnload(panel_);
+    if (inExplorer) {
+        if (UnloadRuntime(ex_, MsUntil(deadline), Waiter())) {
             Log(L"runtime unloaded");
             state_.state().loaded.reset();
         } else {
@@ -342,6 +349,7 @@ int Host::Shutdown(int code) {
             reason = L"unloadTimeout";
         }
     }
+    StopPanel(MsUntil(deadline));
     if (safeModeAsked_) return Finish(addon::kExitCrashes, reason);
     return Finish(code, reason);
 }
@@ -667,9 +675,10 @@ bool Host::FaultInAddon(const AppCrash& c) const {
     return in;
 }
 
-// Puts the runtime into ShellHost once explorer's runs. Quick Settings is all it
-// places, so whatever goes wrong here only turns this off for the host run (logged);
-// explorer's runtime and the exit code stay as they are.
+// Puts the runtime into ShellHost once explorer's runs, for an add-on that lists
+// ShellHost.exe in ADDON_TARGETS. Quick Settings is all it places, so whatever goes
+// wrong here only turns this off for the host run (logged); explorer's runtime and the
+// exit code stay as they are.
 void Host::StartPanel() {
     Taskbar t;
     if (!FindShellHost(t)) return;  // not running now: looked for again later
@@ -771,14 +780,16 @@ void Host::OnPanelExit() {
     }
 }
 
-void Host::StopPanel() {
+// timeoutMs: less than kUnloadWaitMs when Shutdown asked this runtime together with
+// explorer's and part of the budget is gone.
+void Host::StopPanel(DWORD timeoutMs) {
     if (!havePanel_) return;
     havePanel_ = false;
     if (panel_.runtimeIn) {
-        if (UnloadRuntime(panel_, addon::kUnloadWaitMs, Waiter()))
+        if (UnloadRuntime(panel_, timeoutMs, Waiter()))
             Log(L"runtime unloaded from ShellHost");
         else
-            Log(L"the runtime in ShellHost did not unload within %lu ms", addon::kUnloadWaitMs);
+            Log(L"the runtime in ShellHost did not unload within %lu ms", timeoutMs);
     }
     panel_ = Explorer{};
 }
@@ -886,8 +897,9 @@ int Host::Run() {
             }
         }
 
-        if (!havePanel_ && !panelOff_ && haveExplorer_ && ex_.runtimeIn && !args_.mod.empty() &&
-            state_.state().phase == L"running" && GetTickCount64() - panelTriedAt_ >= kWindhawkPollMs) {
+        if (addon::kInShellHost && !havePanel_ && !panelOff_ && haveExplorer_ && ex_.runtimeIn &&
+            !args_.mod.empty() && state_.state().phase == L"running" &&
+            GetTickCount64() - panelTriedAt_ >= kWindhawkPollMs) {
             panelTriedAt_ = GetTickCount64();
             StartPanel();
         }
@@ -994,12 +1006,15 @@ int Host::DryRun() {
                                                                          : L"no conflict"));
     for (auto& m : AddonModules(mods)) Print(L"module " + m.name + L": " + m.path);
     Taskbar shellHost;
-    Print(FindShellHost(shellHost)
-              ? Format(L"ShellHost: pid %lu, window %p, thread %lu, Loaded event %ls; a real start puts the "
-                       L"runtime in it too once explorer's runs",
-                       shellHost.pid, (void*)shellHost.tray, shellHost.tid,
-                       RuntimeLoadedIn(shellHost.pid) ? L"set" : L"not set")
-              : std::wstring(L"ShellHost: not running; a real start looks for it every 5 s"));
+    if (!addon::kInShellHost)
+        Print(L"ShellHost: not in ADDON_TARGETS; a real start leaves it alone");
+    else
+        Print(FindShellHost(shellHost)
+                  ? Format(L"ShellHost: pid %lu, window %p, thread %lu, Loaded event %ls; a real start puts the "
+                           L"runtime in it too once explorer's runs",
+                           shellHost.pid, (void*)shellHost.tray, shellHost.tid,
+                           RuntimeLoadedIn(shellHost.pid) ? L"set" : L"not set")
+                  : std::wstring(L"ShellHost: not running; a real start looks for it every 5 s"));
 
     ULONGLONG t0 = GetTickCount64();
     int r = Symbols(mods, true);

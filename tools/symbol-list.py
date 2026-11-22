@@ -3,8 +3,8 @@
 and next to it symbols-meta.txt: the same names with <TAB>req or <TAB>opt.
 
 The mod writes each name as a raw string literal LR"(...)" and uses raw strings for
-nothing else, so the list is every such literal in the source, in source order,
-without repeats. A mod that includes another mod file of its folder
+nothing else, so the list is every such literal in the source outside comments, in
+source order, without repeats. A mod that includes another mod file of its folder
 (#include "<name>.wh.cpp") has that file's names at the include. The host resolves
 all of them in each taskbar module; which ones are required is decided in explorer
 by the mod's own hook tables.
@@ -30,7 +30,6 @@ import re
 import sys
 
 INCLUDE = re.compile(r'^#include "([^"/\\]+\.wh\.cpp)"[ \t]*$', re.M)
-RAW = re.compile(r'LR"\((.*?)\)"', re.S)
 
 
 def read(path, seen=()):
@@ -44,8 +43,11 @@ def read(path, seen=()):
 
 
 def names(source):
+    """The raw symbol strings in source order, read past comments and other literals as
+    flags() reads them, so a name in a comment (an example, a hook taken out) is not
+    listed."""
     seen = []
-    for name in RAW.findall(source):
+    for _, _, name in code_marks(source)[1]:
         if "\n" in name or "#" in name:
             raise SystemExit(f"not a symbol name: {name[:80]!r}")
         if name not in seen:

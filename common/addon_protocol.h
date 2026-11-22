@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <initializer_list>
+#include <string_view>
 
 #include "addon_identity.h"
 
@@ -52,6 +53,23 @@ constexpr wchar_t kLoadedEvent[] = L"Local\\" ADDON_NAME L".Loaded.%u";
 constexpr wchar_t kUnloadEvent[] = L"Local\\" ADDON_NAME L".Unload.%u";
 constexpr wchar_t kUnloadedEvent[] = L"Local\\" ADDON_NAME L".Unloaded.%u";
 constexpr wchar_t kRuntimeMutex[] = L"Local\\" ADDON_NAME L".Runtime.%u";
+// The one name every add-on's runtime shares, not only this add-on's: held while a
+// runtime suspends the other threads of its process (a MinHook patch, a check for
+// threads in the mod's code). Two runtimes suspending at once can each stop the other
+// and both stay stopped. Only runtimes use it.
+constexpr wchar_t kSuspendMutex[] = L"Local\\Bloom.Addon.Suspend.%u";
+
+// The processes the host puts the runtime into (ADDON_TARGETS): explorer.exe always,
+// ShellHost.exe (docs/addon-protocol.md section 4, "ShellHost") only when listed.
+// tools/make-identity.py spells each name as written here.
+constexpr const wchar_t* kTargets[] = {ADDON_TARGETS};
+constexpr bool IsTarget(std::wstring_view exe) {
+    for (std::wstring_view target : kTargets) {
+        if (target == exe) return true;
+    }
+    return false;
+}
+constexpr bool kInShellHost = IsTarget(L"ShellHost.exe");
 
 // The Windhawk mod ids of the same mod: while one is on in Windhawk the host exits
 // kExitWindhawk and the runtime refuses. Windhawk names the loaded DLL

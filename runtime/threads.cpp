@@ -8,9 +8,12 @@
 // is then searched for return addresses into the mod: values that point into its
 // code right after a call instruction. A stale value left in an uninitialized stack
 // slot can look the same; that only makes the wait longer, or keeps the mod mapped.
+// Each look at the threads holds SuspendLock, so another add-on's runtime is never
+// suspending threads (this one among them) at the same time.
 
 #include "internal.h"
 
+#include <stdio.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -178,6 +181,24 @@ class Scanner {
 
 }  // namespace
 
+SuspendLock::SuspendLock(DWORD timeoutMs) {
+    // Made before any thread is stopped: creating it may take locks of its own.
+    wchar_t name[64];
+    swprintf(name, 64, addon::kSuspendMutex, GetCurrentProcessId());
+    m_mutex = CreateMutexW(nullptr, FALSE, name);
+    DWORD result = m_mutex ? WaitForSingleObject(m_mutex, timeoutMs) : WAIT_FAILED;
+    m_held = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
+}
+
+SuspendLock::~SuspendLock() {
+    if (m_held) {
+        ReleaseMutex(m_mutex);
+    }
+    if (m_mutex) {
+        CloseHandle(m_mutex);
+    }
+}
+
 void AddImageCode(HMODULE module, std::vector<CodeRange>& out) {
     auto* base = reinterpret_cast<const BYTE*>(module);
     auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
@@ -198,25 +219,44 @@ bool WaitUntilOut(const std::vector<CodeRange>& ranges, ULONGLONG deadline) {
         return false;
     }
     DWORD reported = 0;
+    bool lockedOut = false;
     for (;;) {
-        bool failed = false;
-        DWORD busy = scanner.FindBusy(ranges, &failed);
+        bool failed = false, checked = false;
+        DWORD busy = 0, error = 0;
+        {
+            ULONGLONG now = GetTickCount64();
+            SuspendLock suspend((DWORD)std::min<ULONGLONG>(kSuspendWaitMs, deadline > now ? deadline - now : 0));
+            if (suspend.Held()) {
+                busy = scanner.FindBusy(ranges, &failed);
+                error = GetLastError();  // before the lock's release can change it
+                checked = true;
+            }
+        }
         if (failed) {
-            log::Line(L"cannot list the threads (%u)", GetLastError());
+            log::Line(L"cannot list the threads (%u)", error);
             return false;
         }
-        if (!busy) {
-            if (reported) {
+        if (checked && !busy) {
+            if (reported || lockedOut) {
                 log::Line(L"the threads have left the mod's code");
             }
             return true;
         }
         ULONGLONG now = GetTickCount64();
         if (now >= deadline) {
-            log::Line(L"thread %u is still in the mod's code", busy);
+            if (checked) {
+                log::Line(L"thread %u is still in the mod's code", busy);
+            } else {
+                log::Line(L"the threads could not be checked: another runtime kept them suspended");
+            }
             return false;
         }
-        if (busy != reported) {
+        // Not checked: another add-on's runtime is suspending threads, which counts as
+        // a thread still inside until it is done.
+        if (!checked && !lockedOut) {
+            log::Line(L"waiting for another runtime to finish suspending threads");
+            lockedOut = true;
+        } else if (checked && busy != reported) {
             log::Line(L"waiting for thread %u to leave the mod's code", busy);
             reported = busy;
         }

@@ -57,16 +57,20 @@ c_obj() {
 }
 
 build_runtime() {
+    # A section per function and datum, as for the host, so the link drops what neither
+    # an export nor DllMain reaches. The objects carry an rt_ prefix because c_obj goes
+    # by date only and must not reuse ones built before without the sections.
     local mh="$root/third_party/minhook" zy="$root/third_party/zydis" objs=()
+    local gc=(-ffunction-sections -fdata-sections)
     for f in buffer hook trampoline; do
-        objs+=("$(c_obj "$mh/src/$f.c" "mh_$f" -I"$mh/include")")
+        objs+=("$(c_obj "$mh/src/$f.c" "rt_mh_$f" -I"$mh/include" "${gc[@]}")")
     done
-    objs+=("$(c_obj "$mh/src/hde/hde64.c" mh_hde64 -I"$mh/include")")
-    objs+=("$(c_obj "$zy/Zydis.c" zydis -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD)")
-    "$cxx" "${cxxflags[@]}" -shared "${static[@]}" "${strip[@]}" \
+    objs+=("$(c_obj "$mh/src/hde/hde64.c" rt_mh_hde64 -I"$mh/include" "${gc[@]}")")
+    objs+=("$(c_obj "$zy/Zydis.c" rt_zydis -I"$zy" -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD "${gc[@]}")")
+    "$cxx" "${cxxflags[@]}" "${gc[@]}" -shared "${static[@]}" "${strip[@]}" \
         -I"$root/runtime/include" -I"$root/common" -I"$gen" -I"$mh/include" -I"$zy" \
         -DZYDIS_STATIC_BUILD -DZYCORE_STATIC_BUILD \
-        "$root"/runtime/*.cpp "${objs[@]}" \
+        "$root"/runtime/*.cpp "${objs[@]}" -Wl,--gc-sections \
         -Wl,--out-implib,"$obj/lib${name}Runtime.dll.a" \
         -o "$out/${name}Runtime.dll" -luser32 -ladvapi32 -lshlwapi
     echo "built $out/${name}Runtime.dll"

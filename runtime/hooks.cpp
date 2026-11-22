@@ -5,6 +5,11 @@
 // after Wh_ModInit returns or when the mod calls Wh_ApplyHookOperations, which is
 // refused before that and while unloading. HookSymbols reads the offset table the
 // host built outside explorer instead of reading PDBs in here.
+//
+// MinHook stops every other thread of the process while it switches a hook on or off.
+// The calls that can do so (applying the queue, switching all off, removing hooks
+// another thread may have switched on) run under threads::SuspendLock; without it
+// they do nothing and fail. The other MinHook calls here never meet a hook that is on.
 
 #include "internal.h"
 
@@ -43,6 +48,9 @@ std::vector<Hook> g_hooks;      // every hook the current mod made
 std::vector<void*> g_toRemove;  // queued off by Wh_RemoveFunctionHook
 std::atomic<bool> g_initialized;
 std::atomic<bool> g_unloading;
+// A queue of this mod load was handed to MinHook, so a hook may be on. Until then
+// switching them off stops no thread and needs no SuspendLock.
+std::atomic<bool> g_applied;
 // MinHook's own lock is not reentrant: a hook op reached again on the same thread
 // (through a hooked call made while patching) must fail instead of hanging.
 thread_local bool t_busy;
@@ -58,6 +66,15 @@ struct Busy {
 };
 
 bool ApplyLocked() {
+    if (g_hooks.empty()) {
+        return true;  // nothing queued either: no thread to stop
+    }
+    threads::SuspendLock suspend(threads::kSuspendWaitMs);
+    if (!suspend.Held()) {
+        log::Line(L"hooks not applied: another runtime kept the threads suspended");
+        return false;  // the queue stays as it is
+    }
+    g_applied = true;
     MH_STATUS status = MH_ApplyQueued();
     if (status != MH_OK && status != MH_ERROR_NOT_CREATED) {
         log::Line(L"MH_ApplyQueued: %S", MH_StatusToString(status));
@@ -124,6 +141,7 @@ bool BeginMod() {
     }
     g_toRemove.clear();
     g_initialized = false;
+    g_applied = false;
     g_symbolsFailed = false;
     AcquireSRWLockExclusive(&g_degradedLock);
     g_degraded.clear();
@@ -133,24 +151,32 @@ bool BeginMod() {
     return ok;
 }
 
-void EndInit() {
+bool EndInit() {
     AcquireSRWLockExclusive(&g_lock);
     Busy busy;
-    ApplyLocked();
+    bool ok = ApplyLocked();
     g_initialized = true;
     ReleaseSRWLockExclusive(&g_lock);
+    return ok;
 }
 
-bool DisableAll() {
+bool DisableAll(DWORD waitMs) {
     g_unloading = true;
     AcquireSRWLockExclusive(&g_lock);
     Busy busy;
-    bool ok = false;
-    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
-        MH_STATUS status = MH_DisableHook(MH_ALL_HOOKS);
-        ok = status == MH_OK || status == MH_ERROR_NOT_CREATED;
-        if (!ok) {
-            log::Line(L"MH_DisableHook: %S", MH_StatusToString(status));
+    bool ok = g_hooks.empty() || !g_applied;
+    if (!ok) {
+        // Without the lock the hooks stay on, and the unload leaves the mod mapped.
+        threads::SuspendLock suspend(waitMs);
+        if (!suspend.Held()) {
+            log::Line(L"hooks not switched off: another runtime kept the threads suspended");
+        }
+        for (int attempt = 0; attempt < 2 && !ok && suspend.Held(); attempt++) {
+            MH_STATUS status = MH_DisableHook(MH_ALL_HOOKS);
+            ok = status == MH_OK || status == MH_ERROR_NOT_CREATED;
+            if (!ok) {
+                log::Line(L"MH_DisableHook: %S", MH_StatusToString(status));
+            }
         }
     }
     ReleaseSRWLockExclusive(&g_lock);
@@ -160,12 +186,15 @@ bool DisableAll() {
 bool RemoveAll() {
     AcquireSRWLockExclusive(&g_lock);
     Busy busy;
+    // Every hook is off here (DisableAll, or after a failed Init none was ever
+    // applied) and none can be switched on, so removing one stops no thread.
     for (int attempt = 0; attempt < 2 && !g_hooks.empty(); attempt++) {
         RemoveLocked(Targets());
     }
     bool ok = g_hooks.empty();
     g_toRemove.clear();
     g_initialized = false;
+    g_applied = false;
     ReleaseSRWLockExclusive(&g_lock);
     return ok;
 }
@@ -385,7 +414,19 @@ BOOL HookSymbols(HMODULE module, const WH_SYMBOL_HOOK* entries, size_t count) {
             Busy busy;
             if (!created.empty() && busy.entered) {
                 AcquireSRWLockExclusive(&g_lock);
-                RemoveLocked(created);
+                // Another thread's Wh_ApplyHookOperations may have switched these on
+                // meanwhile. Without the suspend lock they are queued off instead, and
+                // the next apply takes them out.
+                threads::SuspendLock suspend(threads::kSuspendWaitMs);
+                if (suspend.Held()) {
+                    RemoveLocked(created);
+                } else {
+                    for (void* target : created) {
+                        if (MH_QueueDisableHook(target) == MH_OK) {
+                            g_toRemove.push_back(target);
+                        }
+                    }
+                }
                 ReleaseSRWLockExclusive(&g_lock);
             }
             return FALSE;

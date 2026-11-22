@@ -14,11 +14,12 @@
 | `ADDON_MOD_SRC`, `ADDON_MOD_VERSION` | 모드 소스(conf 기준 경로), `WH_MOD_VERSION` |
 | `ADDON_WINDHAWK_MODS` | 거절 검사에 쓰는 Windhawk 모드 id(3절 코드 12) |
 | `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32. 기호를 훅하지 않는 애드온은 빈 값(`""`)으로 둔다. 그러면 호스트는 기호 준비(모듈 확인, PDB 찾기와 받기)를 통째로 건너뛰고 바로 넣는다. `symbols.txt`에 이름이 하나도 없을 때도 같다 |
+| `ADDON_TARGETS` | 런타임을 넣는 프로세스(`kTargets`). `explorer.exe`는 늘 있어야 하고, `ShellHost.exe`를 적은 애드온만 ShellHost에도 넣는다(4절 "ShellHost"). 아는 이름은 이 둘뿐이며 다른 이름은 빌드가 거절한다. 빼면 `explorer.exe`만. PillTaskbar만 둘 다 적는다 |
 | `ADDON_SCHEMA`, `ADDON_VALUES_DEFAULTS` | `settings.schema.json`을 싣는지, 모드 YAML 기본값을 덮는 JSON |
 | `ADDON_EASY` | 스키마에 합칠 `settings.easy.json`(6절, conf 기준 경로, 비우면 없음) |
 | `ADDON_THIRD_PARTY`, `ADDON_NAME_KO/EN`, `ADDON_ABOUT_KO/EN`, `ADDON_LICENSE`, `ADDON_SOURCE`, `ADDON_MIN_BLOOM`, `ADDON_NEEDS` | 묶음의 고지 파일과 addon.json |
 
-이름이 다르므로 두 애드온의 런타임이 한 explorer에 같이 들어가도 뮤텍스, 이벤트, 공유 메모리, `restart` 거절(같은 파일 이름의 런타임)이 서로 닿지 않는다. 런타임 export 이름 `PillTaskbarHookProc`, `WM_COPYDATA` 값, 데이터 폴더 안 파일 이름은 애드온마다 같다(각자 자기 모듈, 자기 창, 자기 폴더에 묻는다). 모드가 `Wh_ModInit` 말고 다른 콜백을 빼거나 인자 없는 `Wh_ModSettingsChanged()`를 쓰면 `addon/addon_entry.cpp`의 약한 기본 함수가 채운다(Windhawk와 같이: 빠진 것은 아무것도 안 함, 옛 형식은 다시 올리지 않음).
+이름이 다르므로 두 애드온의 런타임이 한 explorer에 같이 들어가도 뮤텍스, 이벤트, 공유 메모리, `restart` 거절(같은 파일 이름의 런타임)이 서로 닿지 않는다. 하나만 일부러 같다: 스레드 멈춤 뮤텍스 `Local\Bloom.Addon.Suspend.<pid>`(`kSuspendMutex`)는 모든 애드온의 런타임이 함께 쓴다(4절 "내리기" 2). 런타임 export 이름 `PillTaskbarHookProc`, `WM_COPYDATA` 값, 데이터 폴더 안 파일 이름은 애드온마다 같다(각자 자기 모듈, 자기 창, 자기 폴더에 묻는다). 모드가 `Wh_ModInit` 말고 다른 콜백을 빼거나 인자 없는 `Wh_ModSettingsChanged()`를 쓰면 `addon/addon_entry.cpp`의 약한 기본 함수가 채운다(Windhawk와 같이: 빠진 것은 아무것도 안 함, 옛 형식은 다시 올리지 않음).
 
 ## 1. 폴더와 파일
 
@@ -167,7 +168,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 
 - `--serve`: 평소 실행. Bloom이 `ArgumentList`로 띄운다.
 - 한 번만 실행: `Local\Bloom.Addon.pill-taskbar.Host` 뮤텍스. 이미 떠 있으면 두 번째 실행은 자기 명령줄을 `WM_COPYDATA`(`dwData = 0x50544831`)로 첫 호스트의 숨은 창(클래스 `Bloom.Addon.pill-taskbar.Host`)에 넘기고 0으로 끝난다. 다만 `--serve`인데 `host-state.json`의 `version`이 자기와 다르면, 먼저 `--stop`을 넘기고 뮤텍스가 풀리기를 15초까지 기다린 뒤 자기가 첫 호스트가 된다(애드온 업데이트).
-- `--stop`: 런타임을 내리고(아래 4절) 끝난다. 이벤트 `Local\Bloom.Addon.pill-taskbar.Stop`을 켜는 것과 같다.
+- `--stop`: 런타임을 내리고(아래 4절) 끝난다. 이벤트 `Local\Bloom.Addon.pill-taskbar.Stop`을 켜는 것과 같다. 떠 있는 호스트가 없는데 런타임이 남아 있으면(호스트가 죽음) 직접 내린다. ShellHost 안에 남은 것도 같이 요청하고(`ADDON_TARGETS`에 `ShellHost.exe`가 없는 애드온도: 예전 버전이 남긴 것), 둘을 합쳐 10초까지 기다린다.
 - `--safe-mode`: `safeMode`를 켜고 `--stop`처럼 내린다. 떠 있는 호스트가 없으면 파일만 고친다.
 - `--reset-safe-mode`: Bloom의 [다시 켜기]. 시작할 때 `safeMode`와 `crashes`를 비운다.
 - `--log`: 런타임의 `Wh_Log`를 처음부터 켠다.
@@ -203,7 +204,7 @@ Bloom은 종료 코드 10–13과 15 뒤에는 스스로 다시 띄우지 않는
 4. `host-state.json`에 `loaded`를 먼저 쓴다.
 5. 공유 메모리 `Local\PillTaskbar.Config.<pid>`(`addon::Config`)를 만들고, 이벤트 `Loaded`, `Unload`, `Unloaded`(모두 수동 재설정)를 만든다.
 6. 실행용 복사본의 `PillTaskbarRuntime.dll`을 호스트에 올려 `PillTaskbarHookProc` 주소를 얻고, `SetWindowsHookExW(WH_GETMESSAGE, …, 작업표시줄 스레드)`, `PostMessage(Shell_TrayWnd, WM_NULL)`. 런타임이 `Loaded`를 켜면(10초 안, 0.5초마다 `WM_NULL`을 다시 보냄) 훅을 푼다.
-7. 런타임: 훅 프로시저가 처음 불리면 공유 메모리를 복사하고, 자기 모듈에 참조를 하나 더 잡고(`GetModuleHandleEx`), 제어 스레드를 만든다. `Config`의 크기나 `kProtocol`이 다르면 `dataDir`까지만 읽어 `refused`/`protocol`을 알린다(`dataDir`까지의 필드는 버전이 바뀌어도 자리를 지킨다). 제어 스레드는 런타임 뮤텍스를 5초까지 기다려 얻고(못 얻으면 아무것도 쓰지 않고 끝남), `starting`을 쓴 뒤 `Loaded`를 켠다. 그다음 거절 사유를 본다: 이 이미지가 앞서 모드를 남겼거나 다른 `PillTaskbarRuntime.dll`이 올라 있으면 `restart`, Windhawk판 모드가 있으면 `windhawk`. 거절이 아니면 데이터 폴더 감시를 먼저 시작하고 `values.json`을 읽은 뒤 모드 DLL을 올린다(`Wh_ModInit`, 훅 일괄 적용, `Wh_ModAfterInit`). 결과는 `runtime-state.json`에 쓴다.
+7. 런타임: 훅 프로시저가 처음 불리면 공유 메모리를 복사하고, 자기 모듈에 참조를 하나 더 잡고(`GetModuleHandleEx`), 제어 스레드를 만든다. `Config`의 크기나 `kProtocol`이 다르면 `dataDir`까지만 읽어 `refused`/`protocol`을 알린다(`dataDir`까지의 필드는 버전이 바뀌어도 자리를 지킨다). 제어 스레드는 런타임 뮤텍스를 5초까지 기다려 얻고(못 얻으면 아무것도 쓰지 않고 끝남), `starting`을 쓴 뒤 `Loaded`를 켠다. 그다음 거절 사유를 본다: 이 이미지가 앞서 모드를 남겼거나 다른 `PillTaskbarRuntime.dll`이 올라 있으면 `restart`, Windhawk판 모드가 있으면 `windhawk`. 거절이 아니면 데이터 폴더 감시를 먼저 시작하고 `values.json`을 읽은 뒤 모드 DLL을 올린다(`Wh_ModInit`, 훅 일괄 적용, `Wh_ModAfterInit`). 훅 일괄 적용이 실패하면 `Wh_ModAfterInit`을 부르지 않고 `Wh_ModAfterInit`이 예외로 끝날 때처럼 `Wh_ModUninit`으로 내린 뒤 `initFailed`/`init`이다. 결과는 `runtime-state.json`에 쓴다.
 8. 호스트는 `runtime-state.json`이 `running`이 되면 `phase: running`. 이때(이미 들어 있던 런타임을 이어받을 때도) `island.enabled`와 `autohide.enabled`가 둘 다 켜져 있고(`values.json`에 없는 키는 호스트 옆 `settings.schema.json`의 기본값, `values.json`이 없으면 모두 기본값) Windows 작업표시줄 자동 숨김이 꺼져 있으면 `ABM_SETSTATE`로 켠다. 끄지는 않는다. 끄는 것은 Bloom의 "숨김 아일랜드 쓰기" 스위치가 한다(끄면 자동 숨김도 끈다). `initFailed`면 내리고 `symbols`는 11, 그 밖은 1. `refused`면 내리고 `windhawk`는 12, `restart`는 15, 그 밖은 1로 끝난다.
 
 같은 explorer에 같은 경로의 런타임을 다시 넣으면 훅 프로시저가 이미 올라 있는 이미지에서 다시 불린다. 제어 스레드가 끝날 때 시작 표시를 지우므로 그 이미지도 처음부터 다시 시작한다(앞서 모드를 남긴 이미지면 `restart`로 거절).
@@ -219,24 +220,27 @@ Bloom은 종료 코드 10–13과 15 뒤에는 스스로 다시 띄우지 않는
 
 1. 호스트가 `Local\PillTaskbar.Unload.<pid>`를 켠다.
 2. 런타임 제어 스레드: `Wh_ModBeforeUninit`, 모든 훅 끄기(실패하면 한 번 더), `Wh_ModUninit`, 모드 객체 기다리기, 스레드 기다리기, 훅 지우기(실패하면 한 번 더), 모드 DLL `FreeLibrary`(이미지가 실제로 내려가기를 1초까지 봄), MinHook 정리, `runtime-state: stopped`, 로그 닫기, `Loaded` 끄기, 런타임 뮤텍스 놓기, `Unloaded` 켜기, `FreeLibraryAndExitThread`.
-   - 모드 객체 기다리기: 모드 DLL이 C++/WinRT로 만든 객체(대리자, `implements<>` 객체, `IAsync*` 코루틴)의 수를 `PillAddonCallbacks::liveObjects`(C++/WinRT 모듈 잠금)로 10 ms마다 읽어 0이 되기를 기다린다. XAML은 트리에서 뺀 요소와 모드가 단 처리기를 패널의 내리기 전환이 끝날 때까지 쥐고 있다가(`AddDeleteThemeTransition`은 0.45초) 그 vtable로 `Release`를 부른다. 0이면 기다리지 않는다. 그 `Release`는 런타임을 넣은 스레드(작업표시줄 스레드)에서 오므로, 읽을 때마다 그 스레드의 창에 `WM_NULL`을 `SendMessageTimeoutW`(`SMTO_ABORTIFHUNG | SMTO_BLOCK`, 100 ms)로 보내 답하는지 본다. 답한 시간만 2초(`kObjectWaitMs`)에 세고, 답하지 않는 동안(바쁘거나 멈춤)은 세지 않고 내리기 기한까지 기다린다. 그 스레드에 창이 없으면 답한 것으로 센다. 답하는 스레드로 2초가 지나도 남으면(오래 사는 요소의 처리기처럼 스스로 놓지 않는 보유자) 그 수를 로그에 남기고 전처럼 내린다. `fire_and_forget` 코루틴과 스레드풀 대기자(`resume_background`, `resume_after`, `resume_on_signal`)는 이 수에 들지 않으므로 모드가 `Wh_ModUninit` 안에서 끝내야 한다.
+   - 모드 객체 기다리기: 모드 DLL이 C++/WinRT로 만든 객체(대리자, `implements<>` 객체, `IAsync*` 코루틴)의 수를 `PillAddonCallbacks::liveObjects`(C++/WinRT 모듈 잠금)로 10 ms마다 읽어 0이 되기를 기다린다. XAML은 트리에서 뺀 요소와 모드가 단 처리기를 패널의 내리기 전환이 끝날 때까지 쥐고 있다가(`AddDeleteThemeTransition`은 0.45초) 그 vtable로 `Release`를 부른다. 0이면 기다리지 않는다. 그 `Release`는 런타임을 넣은 스레드(작업표시줄 스레드)에서 오므로, 읽을 때마다 그 스레드의 창에 `WM_NULL`을 `SendMessageTimeoutW`(`SMTO_ABORTIFHUNG | SMTO_BLOCK`, 100 ms)로 보내 답하는지 본다. 답한 시간만 2초(`kObjectWaitMs`)에 세고, 답하지 않는 동안(바쁘거나 멈춤)은 세지 않고 내리기 기한까지 기다린다. 그 스레드에 창이 없으면 답한 것으로 센다. 답하는 스레드로 2초가 지나도 남으면(오래 사는 요소의 처리기처럼 스스로 놓지 않는 보유자) 그 수를 로그에 남기고 전처럼 내린다. 답한 시간이 2초가 되기 전에 기한이 오고 객체가 남아 있으면 그 `Release`가 아직 올 수 있으므로 이미지를 남긴다(아래 누수). `fire_and_forget` 코루틴과 스레드풀 대기자(`resume_background`, `resume_after`, `resume_on_signal`)는 이 수에 들지 않으므로 모드가 `Wh_ModUninit` 안에서 끝내야 한다.
    - 스레드 기다리기: 다른 스레드를 하나씩 잠깐 멈춰 레지스터와 스택(RSP부터 최대 1 MB)을 복사하고 바로 다시 돌린 뒤, RIP나 스택 값 가운데 모드 DLL의 코드 구역이나 MinHook 트램펄린 칸을 가리키면서 바로 앞 바이트가 호출 명령(`E8 rel32`, `FF /2`)인 것이 있는지 본다. 있으면 400 ms마다 다시 본다. 멈춘 동안에는 시스템 호출만 하고 할당이나 잠금은 하지 않는다. 오래된 스택 값이 우연히 맞으면 더 기다릴 뿐이다.
+   - 스레드 멈춤 뮤텍스: 다른 스레드를 멈추는 일(스레드 기다리기의 한 바퀴, 훅을 켜거나 끄는 MinHook 호출: 일괄 적용, 모두 끄기, 켜졌을 수 있는 훅 지우기)은 `Local\Bloom.Addon.Suspend.<pid>`를 잡은 동안에만 한다. 모든 애드온의 런타임이 같은 이름이라, 두 런타임이 동시에 서로의 스레드를 멈춰 둘 다 멈춘 채 남는 일(Bloom이 끝날 때 모든 애드온이 함께 내려감)이 없다. 모드 코드나 기다림 동안에는 잡지 않는다. 주인이 죽어 버려진 뮤텍스는 얻은 것으로 친다. 2초 안에 얻지 못하면 일괄 적용은 실패하고(대기열은 그대로), 모두 끄기는 훅이 켜진 채로 끝나 아래 누수로 가며, 스레드 기다리기는 아직 안에 있는 스레드가 있는 것으로 치고 기한까지 다시 본다.
    - 시간: `Unload`를 본 때부터 모드 콜백, 모드 객체 기다리기, 스레드 기다리기를 합쳐 8초(`kRuntimeUnloadMs`), 이미지가 내려가기를 보는 데 1초(`kRuntimeUnmapMs`)까지 쓴다. `values.json`의 `$unloadWaitMs`(시험용)는 이 8초를 줄이기만 한다.
-   - 기한 안에 스레드가 빠지지 않거나 훅을 끄거나 지울 수 없으면 모드 DLL `FreeLibrary`도 MinHook 정리도 하지 않고 이미지를 남긴다(충돌보다 누수). `runtime-state`는 `stopped`/`leaked`이고, 그 explorer에는 다시 시작할 때까지 모드를 올리지 않는다. 설정 변경으로 다시 올리다 이렇게 되면 `refused`/`restart`로 남는다.
+   - 기한 안에 모드 객체나 스레드가 빠지지 않거나 훅을 끄거나 지울 수 없으면 모드 DLL `FreeLibrary`도 MinHook 정리도 하지 않고 이미지를 남긴다(충돌보다 누수). `runtime-state`는 `stopped`/`leaked`이고, 그 explorer에는 다시 시작할 때까지 모드를 올리지 않는다. 설정 변경으로 다시 올리다 이렇게 되면 `refused`/`restart`로 남는다.
    - `refused`나 시작 때의 `initFailed`로 기다리던 런타임은 상태를 덮지 않고 끝난다.
 3. 호스트는 `Unloaded`를 10초(`kUnloadWaitMs`)까지 기다린다. 런타임 쪽 예산(8초 + 1초)은 이보다 짧다. 다만 모드 자체의 `Wh_ModUninit`이 그보다 오래 걸리면 넘길 수 있다. 안 오면 explorer를 건드리지 않고 `reason: unloadTimeout`을 남긴다.
-4. Bloom은 끌 때 `Stop`을 켜고 호스트가 끝나기를 12초까지 기다린 뒤에야 프로세스를 죽인다(호스트가 explorer를 10초 기다리므로).
+4. Bloom은 끌 때 `Stop`을 켜고 호스트가 끝나기를 12초까지 기다린 뒤에야 프로세스를 죽인다(호스트가 explorer를 10초 기다리므로). 그래서 호스트는 ShellHost에도 런타임이 있으면 두 `Unload`를 먼저 다 켜고 둘을 합쳐 10초 안에서 기다린다.
 
 ### ShellHost
 
 빠른 설정(Win+A)은 ShellHost.exe가 자기 창(`ControlCenterWindow`)을 스스로 놓는다. 그래서 모드의 패널 부분(`panels`)이 그 안에서 돈다. 모드는 `Wh_ModInit`에서 실행 파일 이름이 `ShellHost.exe`이면 `SetWindowPos` 훅만 걸고 다른 기능은 하나도 켜지 않는다. 알림 센터·달력(ShellExperienceHost.exe, AppContainer)은 explorer가 창을 놓고 클로킹을 푸므로 explorer 안의 모드가 맡고, 그 프로세스에는 넣지 않는다.
+
+ShellHost에는 `ADDON_TARGETS`에 `ShellHost.exe`를 적은 애드온(PillTaskbar)만 넣는다. 그 안의 런타임은 모드 전체를 한 번 더 올리므로, 거기서 할 일이 없는 애드온이 들어가면 키보드 훅이나 장치 작업이 두 벌이 된다. 아래 단계는 그런 애드온에만 해당한다.
 
 1. explorer의 런타임이 `running`이 되면(그 뒤 5초마다, 아직 없으면) 호스트가 `System32\ShellHost.exe`의 최상위 창 하나를 찾는다. ShellHost는 보통 무결성(AppContainer 아님)이고 서명·확장 지점 완화가 꺼져 있어 explorer와 같은 길로 넣는다.
 2. 넣기 3–7과 같다. 이름은 ShellHost pid로 만든 `Config`, `Loaded`, `Unload`, `Unloaded`, 런타임 뮤텍스이고, `Config.flags`에 `kConfigPanel`(2)을 더한다. 훅은 그 창의 스레드에 걸고 `WM_NULL`도 그 창에 보낸다. 런타임은 이 표시를 보고 `runtime-panel-state.json`과 `runtime-panel.log`에 쓴다. Bloom은 이 둘을 읽지 않는다.
 3. 이미 `Loaded`가 켜져 있으면 `runtime-panel-state.json`의 버전이 같고 살아 있을 때 이어받고, 아니면 먼저 내린다.
 4. 15초 안에 `running`·`off`·`reloading`이 되지 않거나 `initFailed`·`refused`(예: Windhawk판 모드가 ShellHost에 있음)이면 내리고, 이 호스트 실행 동안 다시 넣지 않는다. 훅을 걸지 못해도 같다. 어느 경우든 explorer 쪽과 종료 코드는 그대로이고 `host.log`에만 남는다.
 5. ShellHost가 끝나면 다시 뜬 뒤 5초 안에 다시 넣는다. 충돌 종료 코드(`0xC…`)로 끝났으면 이 호스트 실행 동안 다시 넣지 않는다. 안전 모드 셈에는 넣지 않는다.
-6. 호스트가 끝날 때(어느 길이든) ShellHost의 런타임도 내리기 1–3으로 내린다. explorer가 끝나도 ShellHost 쪽은 그대로 둔다(창 속성이 없으면 패널은 Windows 자리에 열린다).
+6. 호스트가 끝날 때(어느 길이든) ShellHost의 런타임도 내리기 1–3으로 내린다. 멈춤 요청, Bloom이 돌아오지 않음, Windhawk 충돌로 끝날 때는 explorer의 것과 함께 요청하고 한 10초 안에서 기다린다(내리기 4). explorer가 끝나도 ShellHost 쪽은 그대로 둔다(창 속성이 없으면 패널은 Windows 자리에 열린다).
 
 `--mod none`(런타임만 넣는 시험)이면 ShellHost에는 넣지 않는다. 설정을 꺼도 런타임과 훅은 남고, 훅은 아무것도 바꾸지 않는다(`Wh_ModSettingsChanged`가 다시 올리지 않고 값만 바꾼다).
 

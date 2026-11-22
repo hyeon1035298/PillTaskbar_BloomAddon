@@ -24,7 +24,9 @@ bool HostRunning();
 bool ForwardToHost(const std::wstring& commandLine);
 // Waits until the running host lets go of its mutex.
 bool WaitForHostExit(DWORD ms);
-// Unloads a runtime that no host looks after any more (its host died).
+// Unloads the runtimes no host looks after any more (their host died): explorer's and
+// ShellHost's, also for an add-on without ShellHost.exe in ADDON_TARGETS (one an
+// earlier version left there).
 bool UnloadOrphanRuntime();
 
 }  // namespace host

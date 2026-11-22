@@ -98,6 +98,10 @@ HookResult HookUntilLoaded(Explorer& e, const std::wstring& runtimePath, const W
     return result;
 }
 
+void AskUnload(Explorer& e) {
+    if (e.unload) SetEvent(e.unload.get());
+}
+
 bool UnloadRuntime(Explorer& e, DWORD timeoutMs, const WaitFn& wait) {
     if (!e.unload || !e.unloaded) return false;
     SetEvent(e.unload.get());
