@@ -217,7 +217,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - gapAfter: 14
     $name: 오른쪽 간격 (px)
     $description: 사용량 끝에서 오른쪽 트레이 아이콘까지의 간격입니다
-  - sessions: true
+  - sessions: false
     $name: 자세한 창에 세션 보기
     $description: 사용량을 클릭해 여는 창에 이 PC의 Claude Code·Codex 세션(진행 상태, 이번 턴 토큰, 컨텍스트)을 보여 줍니다. 창이 열려 있는 동안에만 각 도구의 세션 기록 끝부분을 읽고, 대화 내용은 읽지 않습니다(아래 채팅 패널을 켜면 고른 세션의 최근 대화만 읽습니다)
   - chat: false
@@ -417,6 +417,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 
 #include <initguid.h>
 
+#include <aclapi.h>
 #include <commctrl.h>
 #include <d2d1_1.h>
 #include <d2d1_3.h>
@@ -425,6 +426,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 #include <dwmapi.h>
 #include <dwrite.h>
 #include <robuffer.h>
+#include <sddl.h>
 #include <shlobj.h>
 #include <shlguid.h>  // shlobj.h leaves it out under INITGUID
 #include <shlwapi.h>
@@ -6684,7 +6686,8 @@ void Stop() {
 
 // The usage meter's details, built on the folder popup further down.
 namespace usage_detail {
-void Toggle(HWND taskbar, FrameworkElement const& anchor);
+// `onTop`: the side the taskbar is on, when not the clicked point's.
+void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> onTop = std::nullopt);
 void Refresh();
 void Close();
 }  // namespace usage_detail
@@ -15667,7 +15670,9 @@ bool PopupDropsTimer(HWND taskbar, UINT_PTR id) {
     bool coming = g_previewWait && g_previewWait->taskbar == taskbar &&
                   GetTickCount64() - g_previewWait->since < kComingHoldMs;
     HWND front = GetForegroundWindow();
-    if ((!shows && !coming) || front == taskbar) {
+    // A secondary's check is held while it shows a popup, active or not: it looks at the
+    // pointer, not at the activation, and the popup may have come without it (a remote open).
+    if ((!shows && !coming) || (front == taskbar && !(shows && core::IsSecondary(taskbar)))) {
         if (g_popupHeld == taskbar) g_popupHeld = nullptr;  // this tick goes on to the check
         return false;
     }
@@ -15677,14 +15682,16 @@ bool PopupDropsTimer(HWND taskbar, UINT_PTR id) {
 }
 
 // The check runs on from where it is; the primary's is started again, as after the
-// launcher's hold, in case something stopped it meanwhile.
+// launcher's hold, in case something stopped it meanwhile, and a secondary's looks now
+// rather than a tick later.
 void ReleasePopupHold() {
     HWND taskbar = std::exchange(g_popupHeld, nullptr);
     if (!taskbar || g_unloading) return;
     core::DiagLine(L"Popup lets go %p", taskbar);
     RunOnTaskbar([taskbar] {  // outside the closing's calls
-        if (IsWindow(taskbar) && !core::IsSecondary(taskbar) && !autohide::LooksHidden(taskbar))
-            autohide::ResumeAutoHide(taskbar);
+        if (!IsWindow(taskbar) || autohide::LooksHidden(taskbar)) return;
+        if (core::IsSecondary(taskbar)) PostMessage(taskbar, WM_TIMER, autohide::kTrayHideTimer, 0);
+        else autohide::ResumeAutoHide(taskbar);
     });
 }
 
@@ -18333,14 +18340,45 @@ std::wstring Home() {
     return Env(L"USERPROFILE");
 }
 
+// A folder as one name: full, with backslashes and no trailing separator.
+std::wstring FullDir(std::wstring dir) {
+    while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/' || dir.back() == L' ')) {
+        dir.pop_back();
+    }
+    if (dir.empty()) return dir;
+    WCHAR full[MAX_PATH];
+    DWORD n = GetFullPathNameW(dir.c_str(), ARRAYSIZE(full), full, nullptr);
+    if (n && n < ARRAYSIZE(full)) dir = full;
+    while (dir.size() > 3 && dir.back() == L'\\') dir.pop_back();
+    return dir;
+}
+
+// The folders in `parent` named like `name` (a wildcard) that hold a folder `inside`.
+std::vector<std::wstring> FoldersLike(std::wstring const& parent, PCWSTR name, PCWSTR inside) {
+    std::vector<std::wstring> out;
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileExW((parent + L"\\" + name).c_str(), FindExInfoBasic, &data,
+                                   FindExSearchLimitToDirectories, nullptr, 0);
+    if (find == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        std::wstring dir = parent + L"\\" + data.cFileName;
+        DWORD in = GetFileAttributesW((dir + L"\\" + inside).c_str());
+        if (in != INVALID_FILE_ATTRIBUTES && (in & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(dir);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    std::ranges::sort(out);
+    return out;
+}
+
 // Claude Code's project folders: CLAUDE_CONFIG_DIR's (a comma list), the XDG
-// one, and ~\.claude's.
+// one, ~\.claude's, and those of each ~\.claude-<name> and Bloom's account
+// folders (programs that start Claude Code with a config folder of their own).
+// Listed again with each search for logs.
 std::vector<std::wstring> ClaudeRoots() {
     std::vector<std::wstring> roots;
-    auto add = [&](std::wstring dir) {
-        while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/' || dir.back() == L' ')) {
-            dir.pop_back();
-        }
+    auto add = [&](std::wstring const& given) {
+        std::wstring dir = FullDir(given);
         if (dir.empty() || !usage::LocalPath(dir)) {
             return;
         }
@@ -18366,10 +18404,16 @@ std::vector<std::wstring> ClaudeRoots() {
     }
     if (!home.empty()) {
         add(home + L"\\.claude");
+        for (auto const& dir : FoldersLike(home, L".claude-*", L"projects")) add(dir);
+    }
+    std::wstring local = Env(L"LOCALAPPDATA");
+    if (!local.empty()) {
+        for (auto const& dir : FoldersLike(local + L"\\Bloom\\accounts", L"claude-*", L"projects")) add(dir);
     }
     return roots;
 }
 
+// The Codex app's home: CODEX_HOME, else ~\.codex.
 std::wstring CodexHome() {
     std::wstring dir = Env(L"CODEX_HOME");
     if (dir.empty() || !usage::LocalPath(dir)) {
@@ -18377,6 +18421,31 @@ std::wstring CodexHome() {
         dir = home.empty() ? L"" : home + L"\\.codex";
     }
     return dir;
+}
+
+// Every Codex home whose sessions are listed: the app's first, then each
+// ~\.codex-<name> with sessions (programs that run Codex with a home of their own).
+std::vector<std::wstring> CodexHomes() {
+    std::vector<std::wstring> homes;
+    auto add = [&](std::wstring const& given) {
+        std::wstring dir = FullDir(given);
+        if (!dir.empty() &&
+            std::ranges::none_of(homes, [&](auto const& h) { return _wcsicmp(h.c_str(), dir.c_str()) == 0; }))
+            homes.push_back(dir);
+    };
+    add(CodexHome());
+    if (std::wstring home = Home(); !home.empty()) {
+        for (auto const& dir : FoldersLike(home, L".codex-*", L"sessions")) add(dir);
+    }
+    return homes;
+}
+
+// Whether a Codex log is in the app's home, the only one whose threads the app shows.
+bool InCodexApp(std::wstring const& logPath) {
+    std::wstring home = FullDir(CodexHome());
+    if (home.empty()) return false;
+    std::wstring sessions = home + L"\\sessions\\";
+    return logPath.size() > sessions.size() && _wcsnicmp(logPath.c_str(), sessions.c_str(), sessions.size()) == 0;
 }
 
 // The newest `count` of `found` written in the last day.
@@ -18491,20 +18560,18 @@ std::wstring CodexId(std::wstring const& path);
 // sessions\YYYY\MM\DD\rollout-*.jsonl; a session started days ago may still run
 // (Codex keeps writing to the file in the folder of the day it began), so every
 // day's folder is listed. The one asked for comes too.
-std::vector<Found> FindCodex(int64_t now) {
+std::vector<Found> FindCodex(int64_t now, std::vector<std::wstring> const& homes) {
     std::vector<Found> all;
-    std::wstring home = CodexHome();
-    if (home.empty()) {
-        return all;
-    }
     auto desc = [](std::vector<std::wstring> v) {
         std::ranges::sort(v, std::greater{});
         return v;
     };
-    for (auto const& year : desc(Dirs(home + L"\\sessions"))) {
-        for (auto const& month : desc(Dirs(year))) {
-            for (auto const& day : desc(Dirs(month))) {
-                FilesIn(Source::kCodex, day, L"*.jsonl", all);
+    for (auto const& home : homes) {
+        for (auto const& year : desc(Dirs(home + L"\\sessions"))) {
+            for (auto const& month : desc(Dirs(year))) {
+                for (auto const& day : desc(Dirs(month))) {
+                    FilesIn(Source::kCodex, day, L"*.jsonl", all);
+                }
             }
         }
     }
@@ -18644,7 +18711,7 @@ struct Snapshot {
 
 std::mutex g_lock;  // held by the one look at a time
 [[clang::no_destroy]] std::unordered_map<std::wstring, Log> g_logs;
-[[clang::no_destroy]] Names g_names;
+[[clang::no_destroy]] std::vector<Names> g_names;  // one per Codex home
 int g_looks = 0;
 std::atomic<bool> g_findNow{true};  // the next look searches for logs first
 std::vector<Found> g_found;
@@ -18822,8 +18889,12 @@ Row RowOf(Log const& g, int64_t now) {
     r.state = g.Activity(now);
     r.tool = r.state == State::kTool || r.state == State::kInput ? g.RunningTool() : L"";
     if (g.source == Source::kCodex) {
-        auto it = g_names.byId.find(g.sessionId);
-        r.title = it != g_names.byId.end() ? it->second.second : std::wstring();
+        for (auto const& names : g_names) {
+            if (auto it = names.byId.find(g.sessionId); it != names.byId.end()) {
+                r.title = it->second.second;
+                break;
+            }
+        }
     } else {
         r.title = g.Title();
     }
@@ -18875,10 +18946,16 @@ void Look() {
         FindSpawns(now);
         g_found = FindClaude(now);
         FindClaudeSettings();
-        std::vector<Found> codex = FindCodex(now);
+        std::vector<std::wstring> homes = CodexHomes();
+        std::vector<Found> codex = FindCodex(now, homes);
         g_found.insert(g_found.end(), codex.begin(), codex.end());
-        std::wstring home = CodexHome();
-        g_names.path = home.empty() ? L"" : home + L"\\session_index.jsonl";
+        std::vector<Names> names;
+        for (auto const& home : homes) {
+            std::wstring path = home + L"\\session_index.jsonl";
+            auto old = std::ranges::find(g_names, path, &Names::path);
+            names.push_back(old != g_names.end() ? std::move(*old) : Names{path});
+        }
+        g_names = std::move(names);
         // Logs no longer among the newest are forgotten.
         std::erase_if(g_logs, [](auto const& entry) {
             return std::ranges::none_of(g_found, [&](Found const& f) { return f.path == entry.first; });
@@ -18921,7 +18998,7 @@ void Look() {
         for (auto const& [path, g] : g_logs) {
             if (g.source == Source::kCodex && !g.sessionId.empty()) ids.push_back(g.sessionId);
         }
-        g_names.Update(std::move(ids));
+        for (auto& names : g_names) names.Update(ids);
     }
     now = usage::Now();
     std::vector<Row> agents;
@@ -19021,7 +19098,7 @@ void Forget() {
         std::unordered_map<std::wstring, Spawn>().swap(g_spawns);
         std::unordered_map<std::wstring, size_t>().swap(g_agentTotals);
         std::vector<ClaudeSettings>().swap(g_claudeSettings);
-        g_names = Names{};
+        std::vector<Names>().swap(g_names);
         std::vector<Found>().swap(g_found);
         g_looks = 0;
         g_findNow = true;
@@ -20661,6 +20738,264 @@ void SetHidden(std::wstring const& id, bool hidden) {
 
 }  // namespace usage
 
+namespace usage_detail {
+void T3Heard(std::wstring const& line);
+void T3Linked(bool up);
+}  // namespace usage_detail
+
+namespace bloom_link {
+std::wstring Quote(std::wstring_view text);
+std::string Utf8(std::wstring_view text);
+}  // namespace bloom_link
+
+// ============================================================================
+namespace t3_link {
+// ============================================================================
+// The chat panel's line to Bloom for the sessions that run in T3 Code: only
+// Bloom knows which sessions those are, and only Bloom talks to T3. Bloom
+// serves a named pipe, Bloom.t3.<Windows session>.<user SID>, with one UTF-8
+// JSON object per line each way and no greeting. A thread of its own, started
+// the first time the panel needs it, connects, makes sure the other end is
+// this user's Bloom.exe in this Windows session (the pipe's owner is this
+// user, so a pipe someone else made first under the name is not taken, and
+// its server runs in this session), reads lines and writes the queued ones,
+// and tries again every few seconds while Bloom is not there. Each line read,
+// and the line coming up or going, reach the chat panel on the taskbar thread
+// (core::Post). The taskbar thread only queues lines: it never waits on the
+// pipe.
+
+constexpr DWORD kRetryMs = 3000;
+constexpr DWORD kWriteMs = 2000;
+constexpr size_t kMaxLine = 1 << 20;  // a reply is a few KB; anything this long is not one
+constexpr size_t kMaxQueued = 64;
+
+std::mutex g_lock;  // the thread, the queue and whether the line is up
+HANDLE g_thread = nullptr, g_stop = nullptr, g_wake = nullptr;
+std::vector<std::string> g_queue;  // lines to write, each with its newline
+bool g_up = false;
+
+std::wstring PipeName() {
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    std::wstring sid;
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        DWORD size = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+        std::vector<uint64_t> buffer((size + 7) / 8);
+        LPWSTR text = nullptr;
+        if (size && GetTokenInformation(token, TokenUser, buffer.data(), size, &size) &&
+            ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &text)) {
+            sid = text;
+            LocalFree(text);
+        }
+        CloseHandle(token);
+    }
+    return L"\\\\.\\pipe\\Bloom.t3." + std::to_wstring(session) + L"." + sid;
+}
+
+// A piece of this process's token (TokenUser, TokenOwner); empty when it can't be read.
+std::vector<uint64_t> TokenPart(TOKEN_INFORMATION_CLASS what) {
+    std::vector<uint64_t> out;
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return out;
+    DWORD size = 0;
+    GetTokenInformation(token, what, nullptr, 0, &size);
+    out.resize((size + 7) / 8);
+    if (!size || !GetTokenInformation(token, what, out.data(), size, &size)) out.clear();
+    CloseHandle(token);
+    return out;
+}
+
+// Bloom's pipe is owned by its token's owner: the user, or the Administrators
+// group for a full administrator token (explorer and Bloom then share it).
+bool OwnedByMe(HANDLE pipe) {
+    auto user = TokenPart(TokenUser), owns = TokenPart(TokenOwner);
+    if (user.empty()) return false;
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd) !=
+        ERROR_SUCCESS)
+        return false;
+    bool ok = owner && IsValidSid(owner) &&
+              (EqualSid(owner, reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid) ||
+               (!owns.empty() && EqualSid(owner, reinterpret_cast<TOKEN_OWNER*>(owns.data())->Owner)));
+    LocalFree(sd);
+    return ok;
+}
+
+// The server is a Bloom.exe in this Windows session.
+bool IsBloom(DWORD pid) {
+    DWORD mine = 0, theirs = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine) || !ProcessIdToSessionId(pid, &theirs) || mine != theirs)
+        return false;
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return false;
+    wchar_t path[MAX_PATH];
+    DWORD n = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(p, 0, path, &n);
+    CloseHandle(p);
+    const wchar_t* name = ok ? wcsrchr(path, L'\\') : nullptr;
+    return name && _wcsicmp(name + 1, L"Bloom.exe") == 0;
+}
+
+// Bloom's end of the pipe, or null when it is not there or not Bloom's.
+HANDLE Connect(std::wstring const& name) {
+    HANDLE pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) return nullptr;
+    ULONG server = 0;
+    if (!OwnedByMe(pipe) || !GetNamedPipeServerProcessId(pipe, &server) || !IsBloom(server)) {
+        CloseHandle(pipe);
+        return nullptr;
+    }
+    return pipe;
+}
+
+// Up or down, and each line read, to the chat panel.
+void Tell(bool up) {
+    core::Post([up] { usage_detail::T3Linked(up); });
+}
+
+void Heard(std::string const& line) {
+    core::Post([line = usage::Widen(line)] { usage_detail::T3Heard(line); });
+}
+
+// One line out, waiting at most kWriteMs: Bloom reads all the time, so a write
+// normally goes at once. False when it did not go through whole.
+bool Write(HANDLE pipe, OVERLAPPED& ov, std::string const& data) {
+    ResetEvent(ov.hEvent);
+    DWORD wrote = 0;
+    if (!WriteFile(pipe, data.data(), DWORD(data.size()), nullptr, &ov) && GetLastError() != ERROR_IO_PENDING) {
+        return false;
+    }
+    HANDLE wait[2] = {g_stop, ov.hEvent};
+    if (WaitForMultipleObjects(2, wait, FALSE, kWriteMs) != WAIT_OBJECT_0 + 1) CancelIoEx(pipe, &ov);
+    // Waits for the write, or its cancelling, to finish either way: the system writes into `ov` until then.
+    return GetOverlappedResult(pipe, &ov, &wrote, TRUE) && wrote == data.size();
+}
+
+// Reads lines and writes the queued ones until the pipe breaks, a write fails
+// (part of a line may have gone, and would run into the next) or the mod stops.
+void Serve(HANDLE pipe) {
+    OVERLAPPED in{}, out{};
+    in.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    out.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::string pending;
+    char buffer[4096];
+    bool reading = false;
+    while (in.hEvent && out.hEvent) {
+        if (!reading) {
+            ResetEvent(in.hEvent);
+            if (!ReadFile(pipe, buffer, sizeof(buffer), nullptr, &in) && GetLastError() != ERROR_IO_PENDING) break;
+            reading = true;
+        }
+        HANDLE wait[3] = {g_stop, in.hEvent, g_wake};
+        DWORD r = WaitForMultipleObjects(3, wait, FALSE, INFINITE);
+        if (r == WAIT_OBJECT_0 + 1) {
+            reading = false;
+            DWORD got = 0;
+            if (!GetOverlappedResult(pipe, &in, &got, FALSE) || got == 0) break;
+            pending.append(buffer, got);
+            for (size_t nl; (nl = pending.find('\n')) != std::string::npos;) {
+                std::string line = pending.substr(0, nl);
+                pending.erase(0, nl + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) Heard(line);
+            }
+            if (pending.size() > kMaxLine) break;
+        } else if (r == WAIT_OBJECT_0 + 2) {
+            std::vector<std::string> lines;
+            {
+                std::lock_guard hold(g_lock);
+                lines.swap(g_queue);
+            }
+            bool wrote = true;
+            for (auto const& line : lines) {
+                if (!(wrote = Write(pipe, out, line))) break;
+            }
+            if (!wrote) break;
+        } else {
+            break;
+        }
+    }
+    if (reading) {
+        DWORD got = 0;
+        CancelIoEx(pipe, &in);
+        GetOverlappedResult(pipe, &in, &got, TRUE);
+    }
+    if (in.hEvent) CloseHandle(in.hEvent);
+    if (out.hEvent) CloseHandle(out.hEvent);
+}
+
+DWORD WINAPI Main(void*) {
+    std::wstring name = PipeName();
+    while (WaitForSingleObject(g_stop, 0) == WAIT_TIMEOUT) {
+        if (HANDLE pipe = Connect(name)) {
+            {
+                std::lock_guard hold(g_lock);
+                g_queue.clear();
+                g_up = true;
+            }
+            Tell(true);
+            Serve(pipe);
+            {
+                std::lock_guard hold(g_lock);
+                g_queue.clear();  // lines that did not go: the panel hears the line went
+                g_up = false;
+            }
+            CloseHandle(pipe);
+            Tell(false);
+        }
+        if (WaitForSingleObject(g_stop, kRetryMs) != WAIT_TIMEOUT) break;
+    }
+    return 0;
+}
+
+// The thread, from the first time the panel needs Bloom.
+void Want() {
+    std::lock_guard hold(g_lock);
+    if (g_thread || core::g_unloading) return;
+    if (!g_stop) g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_wake) g_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_stop && g_wake) g_thread = CreateThread(nullptr, 0, Main, nullptr, 0, nullptr);
+}
+
+bool Up() {
+    std::lock_guard hold(g_lock);
+    return g_up;
+}
+
+// Queues one line (its newline added) for the thread to write; false when
+// there is no line to Bloom.
+bool Send(std::wstring const& line) {
+    std::lock_guard hold(g_lock);
+    if (!g_up || g_queue.size() >= kMaxQueued) return false;
+    g_queue.push_back(bloom_link::Utf8(line) + "\n");
+    SetEvent(g_wake);
+    return true;
+}
+
+// After core::g_unloading is set, so no thread starts after this; its waits all
+// end on g_stop or within kWriteMs.
+void Stop() {
+    HANDLE thread;
+    {
+        std::lock_guard hold(g_lock);
+        thread = std::exchange(g_thread, nullptr);
+    }
+    if (thread) {
+        SetEvent(g_stop);
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
+    for (HANDLE* event : {&g_stop, &g_wake}) {
+        if (*event) CloseHandle(std::exchange(*event, nullptr));
+    }
+}
+
+}  // namespace t3_link
+
 // ============================================================================
 namespace usage_detail {
 // ============================================================================
@@ -20821,6 +21156,9 @@ constexpr double kGap = 8;            // between cards
 constexpr double kMarkSize = 16;
 constexpr double kTitleSize = 14, kNameSize = 12.5, kTextSize = 11.5, kSmallSize = 11;
 
+// A question a T3 Code session waits on, as Bloom tells it (no answer yet).
+using T3Question = ai_sessions::Question;
+
 // The chat panel's session (or new session) and what it shows; see "the chat panel".
 struct Chat {
     std::wstring key;  // the row's; empty for a new session
@@ -20829,6 +21167,22 @@ struct Chat {
     std::wstring model, effort, mode;  // ids, as the logs and records name them; Codex's mode its sandbox
     int ultracode = -1;
     std::wstring cannot;  // why nothing can be sent from here
+    // A session outside the apps that Bloom may carry words to, in T3 Code: `t3Id`
+    // is asked of Bloom, `notHere` is `cannot` while Bloom does not take them. `t3`
+    // while Bloom takes words for it (and `cannot` is empty), `t3Stop` a stop.
+    // `t3Sent` the words on their way since `t3SentAt` (ms; 0 with no send under
+    // way, as a send of picks alone has no words), until Bloom's `said`.
+    std::wstring t3Id, notHere;
+    bool t3 = false, t3Stop = false;
+    std::wstring t3Sent;
+    uint64_t t3SentAt = 0;
+    // The question the log says the session waits on, asked of Bloom once by its
+    // call (`t3AskedFor`); what Bloom told of it (empty: none) and the choices
+    // picked in it, each question's in Bloom's order. `t3StopAt` a stop pressed (ms).
+    std::wstring t3AskedFor;
+    std::optional<std::vector<T3Question>> t3Questions;
+    std::vector<std::vector<size_t>> t3Picks;
+    uint64_t t3StopAt = 0;
     std::shared_ptr<const ai_sessions::Talk> said;
     size_t lastSaid = 0;  // the last entry drawn, to scroll down as more come
     bool earlier = false;  // the log's part before is being read
@@ -20874,7 +21228,11 @@ struct Open {
     std::vector<std::pair<size_t, wux::UIElement>> saidRows;  // in chatSaid, each by what it shows
     Controls::TextBlock chatStatus{nullptr};
     Controls::TextBox chatBox{nullptr}, folderBox{nullptr};
-    Controls::Border chatSend{nullptr};
+    Controls::Border chatSend{nullptr}, chatStopMark{nullptr};
+    Controls::TextBlock chatArrow{nullptr}, chatFine{nullptr};
+    // A T3 question's choice rows not picked, by tag, lit as the pointer comes.
+    std::vector<std::pair<std::wstring, Controls::Border>> pickRows;
+    DispatcherTimer t3Timer{nullptr};  // only while a T3 send or stop waits
     std::vector<std::wstring> chatFolders;  // as the folder popover lists them
     std::wstring chatHover, chatPressed;
     // The bubble (`shell`, in its shadow's `room`) and its shadow, which the widening
@@ -22540,7 +22898,7 @@ void DrawChatHead() {
     head.Children().Append(Columns(mark, title, close));
     std::wstring line;
     uint32_t ink = C().dim;
-    std::wstring app = c.codex ? L"Codex" : L"Claude";
+    std::wstring app = c.t3 ? L"T3 Code" : c.codex ? L"Codex" : L"Claude";
     if (c.fresh) {
         line = app + L" 앱에서 새 대화를 시작해요";
     } else if (!c.cannot.empty()) {
@@ -23330,7 +23688,8 @@ std::vector<bool> Picked(ai_sessions::Question const& q, std::wstring& other) {
     return on;
 }
 
-FrameworkElement ChoiceRow(ai_sessions::Choice const& choice, bool on, bool multi) {
+// A choice; with a tag, one to pick (lit under the pointer while not picked).
+FrameworkElement ChoiceRow(ai_sessions::Choice const& choice, bool on, bool multi, std::wstring const& tag = {}) {
     Controls::Border mark;
     mark.Width(13);
     mark.Height(13);
@@ -23370,14 +23729,20 @@ FrameworkElement ChoiceRow(ai_sessions::Choice const& choice, bool on, bool mult
     row.Margin({0, 5, 0, 0});
     row.BorderThickness({1, 1, 1, 1});
     row.BorderBrush(Brush(on ? C().accent : C().edge));
-    row.Background(Brush(on ? C().accentSoft : 0));
+    row.Background(Brush(on ? C().accentSoft : !tag.empty() && g_open->chatHover == tag ? C().hover : 0));
     row.Child(Columns(mark, words, nullptr));
+    if (!tag.empty()) {
+        SetTag(row, tag);
+        Automation::AutomationProperties::SetName(row, choice.label);
+        if (!on) g_open->pickRows.emplace_back(tag, row);
+    }
     return row;
 }
 
 // Claude's question as the app asks it: its head, the question, the choices
-// and the one picked, or that it waits for an answer.
-FrameworkElement AskCard(ai_sessions::Said const& s) {
+// and the one picked, or that it waits for an answer. With `picks` (a T3
+// session's question, as Bloom tells it), its choices are picked here.
+FrameworkElement AskCard(ai_sessions::Said const& s, std::vector<std::vector<size_t>> const* picks = nullptr) {
     using Answer = ai_sessions::Said::Answer;
     Controls::StackPanel inside;
     auto icon = Glyph(L"\xE897", 11, C().accentText);
@@ -23385,7 +23750,8 @@ FrameworkElement AskCard(ai_sessions::Said const& s) {
     std::wstring state = s.answer == Answer::kGiven ? L"답함" : s.answer == Answer::kNone ? L"답 없이 넘어감" : L"답을 기다리는 중";
     uint32_t ink = s.answer == Answer::kGiven ? C().accentText : s.answer == Answer::kNone ? C().faint : C().warn;
     inside.Children().Append(Line(Across({icon, Text(L"질문", kSmallSize, C().dim, Medium())}), Text(state, kSmallSize, ink, Medium())));
-    for (auto const& q : s.questions) {
+    for (size_t at = 0; at < s.questions.size(); at++) {
+        auto const& q = s.questions[at];
         if (!q.header.empty()) {
             Controls::Border chip;
             chip.Background(Brush(C().accentSoft));
@@ -23405,6 +23771,14 @@ FrameworkElement AskCard(ai_sessions::Said const& s) {
             many.Margin({0, 1, 0, 0});
             inside.Children().Append(many);
         }
+        if (picks) {
+            for (size_t k = 0; k < q.choices.size(); k++) {
+                bool on = at < picks->size() && std::ranges::find((*picks)[at], k) != (*picks)[at].end();
+                std::wstring tag = L"pick|" + std::to_wstring(at) + L"." + std::to_wstring(k);
+                inside.Children().Append(ChoiceRow(q.choices[k], on, q.multi, tag));
+            }
+            continue;
+        }
         std::wstring other;
         auto on = Picked(q, other);
         for (size_t k = 0; k < q.choices.size(); k++) inside.Children().Append(ChoiceRow(q.choices[k], on[k], q.multi));
@@ -23414,6 +23788,13 @@ FrameworkElement AskCard(ai_sessions::Said const& s) {
             none.Margin({0, 5, 0, 0});
             inside.Children().Append(none);
         }
+    }
+    if (picks) {
+        auto pen = Glyph(L"\xE70F", 10, C().faint);
+        pen.Margin({0, 0, 5, 0});
+        auto hint = Across({pen, Text(L"다른 답은 아래 칸에 쓰면 기타로 갑니다", 10.5, C().faint)});
+        hint.Margin({0, 7, 0, 0});
+        inside.Children().Append(hint);
     }
     Controls::Border card;
     card.CornerRadius(CornerRadiusHelper::FromUniformRadius(12));
@@ -23484,9 +23865,59 @@ wux::UIElement SaidRow(ai_sessions::Said const& s) {
     return bubble;
 }
 
+// The question the log says the session waits on: its last, still unanswered.
+ai_sessions::Said const* WaitingAsk(Chat const& c) {
+    using Who = ai_sessions::Said::Who;
+    if (!c.said) return nullptr;
+    auto const& said = c.said->said;
+    for (size_t i = said.size(), seen = 0; i-- > 0 && seen < 64; seen++) {
+        if (said[i]->who == Who::kAsk) return said[i]->answer == ai_sessions::Said::Answer::kWaiting ? said[i].get() : nullptr;
+    }
+    return nullptr;
+}
+
+// The call a waiting question is known by, to ask Bloom of it once.
+std::wstring AskId(ai_sessions::Said const& s) {
+    return !s.ask.empty() ? s.ask : L"@" + std::to_wstring(s.line);
+}
+
+// A T3 chat's question with its choices from Bloom, to answer here.
+bool T3Asking(Chat const& c) {
+    return c.t3 && !c.t3AskedFor.empty() && c.t3Questions && !c.t3Questions->empty();
+}
+
+bool T3Picked(Chat const& c) {
+    return std::ranges::any_of(c.t3Picks, [](auto const& picks) { return !picks.empty(); });
+}
+
+// The waiting question as Bloom tells it, with what is picked, in this palette.
+size_t PickKey(Chat const& c) {
+    size_t key = 0x9E3779B9u;
+    auto mix = [&](size_t part) { key = key * 31 + part; };
+    for (auto const& q : *c.t3Questions) {
+        mix(std::hash<std::wstring>{}(q.header + L"\n" + q.text));
+        for (auto const& choice : q.choices) mix(std::hash<std::wstring>{}(choice.label + L"\n" + choice.about));
+    }
+    for (auto const& picks : c.t3Picks) {
+        mix(0x51);
+        for (size_t k : picks) mix(k + 1);
+    }
+    for (uint32_t part : {C().text, C().accent, C().hover}) mix(part);
+    return key;
+}
+
+wux::UIElement PickCard(Chat const& c) {
+    g_open->pickRows.clear();
+    ai_sessions::Said s;
+    s.who = ai_sessions::Said::Who::kAsk;
+    s.questions = *c.t3Questions;
+    return AskCard(s, &c.t3Picks);
+}
+
 // Every row read, drawn again as the log grows, a call opens or the part
 // before comes in: rows already drawn stay, and only new or changed ones are
 // made and laid out. At the top, the log's start or how to read before it.
+// A T3 chat's waiting question is drawn from Bloom's, its choices to pick.
 void DrawSaid() {
     auto& c = *g_open->chat;
     auto rows = g_open->chatSaid.Children();
@@ -23524,7 +23955,18 @@ void DrawSaid() {
         t.Margin({0, 2, 0, 6});
         return wux::UIElement(t);
     });
-    for (auto const& s : c.said->said) put(SaidKey(*s), [&] { return SaidRow(*s); });
+    auto const* waiting = WaitingAsk(c);
+    if (!waiting || !T3Asking(c) || AskId(*waiting) != c.t3AskedFor) {
+        waiting = nullptr;
+        g_open->pickRows.clear();
+    }
+    for (auto const& s : c.said->said) {
+        if (s.get() == waiting) {
+            put(PickKey(c), [&] { return PickCard(c); });
+        } else {
+            put(SaidKey(*s), [&] { return SaidRow(*s); });
+        }
+    }
     // Out what has gone (and a note), then in each new row where it goes.
     std::unordered_set<void*> kept;
     for (auto const& n : next) kept.insert(winrt::get_abi(n.second));
@@ -23565,20 +24007,54 @@ void DrawChips() {
                                  c.menu == L"mode", c.fresh ? 70 : 110));
 }
 
+// The status, and the words around the box: what a T3 chat's question takes
+// and where a T3 chat's words go.
 void DrawStatus() {
-    auto& c = *g_open->chat;
-    auto status = g_open->chatStatus;
-    status.Text(c.status);
+    auto& o = *g_open;
+    auto& c = *o.chat;
+    bool asking = T3Asking(c);
+    std::wstring text = c.status.empty() && asking ? L"Enter로 답하기" : c.status;
+    auto status = o.chatStatus;
+    status.Text(text);
     status.Foreground(Brush(c.tone == 1 ? C().accentText : c.tone == 2 ? C().danger : C().dim));
-    status.Visibility(c.status.empty() ? Visibility::Collapsed : Visibility::Visible);
+    status.Visibility(text.empty() ? Visibility::Collapsed : Visibility::Visible);
+    o.chatBox.PlaceholderText(asking ? L"기타 답 (비워 둬도 됨)" : L"메시지 (Enter 보내기 · Shift+Enter 줄바꿈)");
+    o.chatFine.Text(c.t3 ? L"Bloom을 거쳐 T3 스레드로 보냅니다" : L"앱 화면의 입력창에 대신 넣어 보냅니다 · 실험 기능");
 }
 
+constexpr uint64_t kT3StopWaitMs = 5000;  // a stop waits this long for the turn to end before it can be pressed again
+
+// With an empty box, a T3 chat's working session takes a stop instead of words.
+bool StopShows(Chat const& c, bool typed) {
+    if (!c.t3 || !c.t3Stop || typed || c.t3SentAt || T3Asking(c) || c.fresh) return false;
+    auto snapshot = ai_sessions::g_snapshot;
+    auto const* r = RowByKey(snapshot.get(), c.key);
+    return r && r->Live() && r->state != ai_sessions::State::kInput;
+}
+
+// 보내기, ready with words (or a T3 question's picks); or 정지, waiting a while
+// once pressed.
 void DrawSendButton() {
     auto& o = *g_open;
-    bool ready = o.chat && !o.chat->busy && o.chat->cannot.empty() && !ai_sessions::Tidy(std::wstring(o.chatBox.Text())).empty();
-    o.chatSend.Background(Brush(ready ? C().accent : o.chatHover == L"chat|send" ? C().edge : C().tile));
-    if (auto glyph = o.chatSend.Child().try_as<Controls::TextBlock>()) {
-        glyph.Foreground(Brush(ready ? 0xFFFFFFFF : C().faint));
+    bool typed = !ai_sessions::Tidy(std::wstring(o.chatBox.Text())).empty();
+    bool stop = o.chat && StopShows(*o.chat, typed);
+    std::wstring tag = stop ? L"chat|stop" : L"chat|send";
+    bool hot = o.chatHover == tag;
+    if (stop) {
+        bool stopping = o.chat->t3StopAt && GetTickCount64() - o.chat->t3StopAt < kT3StopWaitMs;
+        o.chatSend.Background(Brush(hot && !stopping ? C().edge : C().tile));
+        o.chatStopMark.Background(Brush(stopping ? C().faint : C().text));
+    } else {
+        bool ready = o.chat && !o.chat->busy && o.chat->cannot.empty() && !o.chat->t3SentAt &&
+                     (typed || (T3Asking(*o.chat) && T3Picked(*o.chat)));
+        o.chatSend.Background(Brush(ready ? C().accent : hot ? C().edge : C().tile));
+        o.chatArrow.Foreground(Brush(ready ? 0xFFFFFFFF : C().faint));
+    }
+    o.chatArrow.Visibility(stop ? Visibility::Collapsed : Visibility::Visible);
+    o.chatStopMark.Visibility(stop ? Visibility::Visible : Visibility::Collapsed);
+    if (winrt::unbox_value_or<winrt::hstring>(o.chatSend.Tag(), L"") != tag) {
+        SetTag(o.chatSend, tag);
+        Automation::AutomationProperties::SetName(o.chatSend, stop ? L"정지" : L"보내기");
     }
 }
 
@@ -23760,12 +24236,15 @@ void DrawOverlay() {
     overlay.Children().Append(card);
 }
 
+void T3Waits();
+
 // The panel drawn again; the conversation only with `said`, scrolled down when
 // more came at its end and it was there.
 void RenderChat(bool said) {
     if (!Ours() || !g_open->chat || !g_open->chatPanel) return;
     auto& o = *g_open;
     auto& c = *o.chat;
+    if (said) T3Waits();
     DrawChatHead();
     bool down = false;
     if (said) {
@@ -23789,6 +24268,7 @@ void HoverChat() {
     DrawChatHead();
     DrawChips();
     DrawSendButton();
+    for (auto const& [tag, row] : g_open->pickRows) row.Background(Brush(g_open->chatHover == tag ? C().hover : 0));
 }
 
 // ---- reading and driving -------------------------------------------------------------------
@@ -24076,6 +24556,7 @@ void PickIn(app_drive::Change what, std::wstring const& value) {
         return;
     }
     if (!c.cannot.empty()) return SetStatus(c.cannot, 2);
+    if (c.t3) return SetStatus(L"T3 세션은 여기서 바꿀 수 없어요", 2);
     if (c.busy) return SetStatus(L"앞의 작업이 끝나면 다시 눌러 주세요", 2);
     int index = -1;
     app_drive::Labels labels = LabelsOf(c, what, value, index);
@@ -24095,12 +24576,272 @@ void PickIn(app_drive::Change what, std::wstring const& value) {
         });
 }
 
+// ---- T3 Code sessions, through Bloom ----------------------------------------------------------
+// A session outside the apps may be a T3 Code thread's. Bloom tells whether it
+// takes words for it (`can`), and carries them there: into the running turn, to
+// a pending question or as a new turn, so a T3 chat is never held for being busy.
+
+namespace wdj = winrt::Windows::Data::Json;
+
+// {"t":what,"session":…} for the open chat's session; false with no line to Bloom.
+bool AskT3(std::wstring_view what) {
+    auto const& c = *g_open->chat;
+    if (c.t3Id.empty()) return false;
+    return t3_link::Send(L"{\"t\":\"" + std::wstring(what) + L"\",\"session\":" + bloom_link::Quote(c.t3Id) + L"}");
+}
+
+// The question the session waits on; the answer comes as `question`.
+bool AskT3Question() {
+    return AskT3(L"question");
+}
+
+// Stops the session's turn; the answer comes as `stopped`.
+bool StopT3() {
+    return g_open->chat->t3Stop && AskT3(L"stop");
+}
+
+// What Bloom told of a question, and the choices picked in it, go.
+void DropT3Question(Chat& c) {
+    c.t3Questions.reset();
+    c.t3Picks.clear();
+}
+
+// The question the log says the open T3 chat's session waits on: Bloom is asked
+// for its choices once a question; as it goes, so do they and the picks.
+void T3Waits() {
+    auto& c = *g_open->chat;
+    auto const* ask = c.t3 ? WaitingAsk(c) : nullptr;
+    std::wstring id = ask ? AskId(*ask) : L"";
+    if (id == c.t3AskedFor) return;
+    DropT3Question(c);
+    c.t3AskedFor = id;
+    if (ask && !AskT3Question()) c.t3AskedFor.clear();  // asked again at the next look
+}
+
+void T3Tick();
+
+// While a T3 send or stop waits, a tick of its own: the 60 s a send has, the
+// while a stop waits. It stops with nothing waiting.
+void ArmT3Timer() {
+    auto& o = *g_open;
+    if (o.t3Timer) return;
+    DispatcherTimer timer;
+    timer.Interval(std::chrono::milliseconds(500));
+    timer.Tick([](auto&&, auto&&) { core::Guard(L"Usage chat T3 wait", [] { T3Tick(); }); });
+    o.t3Timer = timer;
+    timer.Start();
+}
+
+// 정지: once pressed, not again until the turn has had a while to end.
+void PressStop() {
+    auto& c = *g_open->chat;
+    uint64_t now = GetTickCount64();
+    if (c.t3StopAt && now - c.t3StopAt < kT3StopWaitMs) return;
+    if (!StopT3()) return SetStatus(L"멈추지 못했어요", 2);
+    c.t3StopAt = now;
+    SetStatus(L"", 0);
+    ArmT3Timer();
+}
+
+// Bloom could not stop it: 정지 can be pressed again.
+void T3NotStopped(Chat& c, std::wstring const& why) {
+    c.t3StopAt = 0;
+    SetStatus(why == L"t3-off" ? L"T3가 꺼져 있어 못 멈췄어요" : L"멈추지 못했어요", 2);
+}
+
+// A choice of the T3 question picked (`q.k`): one of a question's, or any of a
+// question with several.
+void PickT3(std::wstring const& value) {
+    auto& c = *g_open->chat;
+    size_t dot = value.find(L'.');
+    if (!T3Asking(c) || c.t3SentAt || dot == std::wstring::npos) return;
+    size_t q = wcstoul(value.c_str(), nullptr, 10), k = wcstoul(value.c_str() + dot + 1, nullptr, 10);
+    auto const& questions = *c.t3Questions;
+    if (q >= questions.size() || k >= questions[q].choices.size()) return;
+    c.t3Picks.resize(questions.size());
+    auto& picks = c.t3Picks[q];
+    auto at = std::ranges::find(picks, k);
+    if (!questions[q].multi) {
+        picks = {k};
+    } else if (at == picks.end()) {
+        picks.push_back(k);
+    } else {
+        picks.erase(at);
+    }
+    if (c.tone == 2) SetStatus(L"", 0);
+}
+
+// Whether Bloom takes words (and a stop) for the open chat's session.
+void T3Can(Chat& c, bool say, bool stop) {
+    c.t3 = say;
+    c.t3Stop = stop;
+    c.cannot = say ? L"" : c.notHere;
+}
+
+// What came of a send (Bloom's `said`: how it went, or why not); words that did
+// not go stay in the box. A question's answer that went takes the question with
+// it; one that did not asks Bloom of the question again (it may be over).
+void T3Said(Chat& c, bool ok, std::wstring const& word) {
+    std::wstring sent = std::exchange(c.t3Sent, L"");
+    c.t3SentAt = 0;
+    if (ok) {
+        DropT3Question(c);
+    } else if (!c.t3AskedFor.empty() && !AskT3Question()) {
+        DropT3Question(c);
+    }
+    if (ok) {
+        if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == sent) g_open->chatBox.Text(L"");
+        SetStatus(word == L"answered"  ? L"질문에 답했어요"
+                  : word == L"steered" ? L"지금 턴에 넣었어요"
+                  : word == L"started" ? L"보냈어요"
+                                       : L"다음 턴으로 보냈어요",
+                  1);
+    } else {
+        SetStatus(word == L"t3-off"        ? L"T3가 꺼져 있어 못 보냈어요"
+                  : word == L"no-thread"   ? L"T3에서 이 세션을 못 찾았어요"
+                  : word == L"bloom"       ? L"Bloom에 닿지 않아 못 보냈어요"
+                  : word == L"no-question" ? L"질문이 이미 끝났어요"
+                                           : L"보내지 못했어요",
+                  2);
+    }
+}
+
+constexpr size_t kT3SayMax = 20000;     // the most characters a send carries (Bloom takes no more)
+constexpr uint64_t kT3SayWaitMs = 60000;  // a send Bloom has not answered by then did not go
+
+// The words to Bloom, with the choices picked while a question waits (each
+// question's, in order); Bloom answers the question with them, the words as
+// another answer. Picks alone, words alone or both.
+void SayT3(std::wstring const& text) {
+    auto& c = *g_open->chat;
+    if (text.empty() && !(T3Asking(c) && T3Picked(c))) return;
+    if (c.t3SentAt) return SetStatus(L"앞의 메시지를 보내는 중이에요", 2);
+    if (text.size() > kT3SayMax) return SetStatus(L"한 번에 20000자까지 보낼 수 있어요", 2);
+    std::wstring picks;
+    if (T3Asking(c)) {
+        c.t3Picks.resize(c.t3Questions->size());
+        picks = L",\"picks\":[";
+        for (size_t q = 0; q < c.t3Picks.size(); q++) {
+            picks += q ? L",[" : L"[";
+            for (size_t i = 0; i < c.t3Picks[q].size(); i++) picks += (i ? L"," : L"") + std::to_wstring(c.t3Picks[q][i]);
+            picks += L"]";
+        }
+        picks += L"]";
+    }
+    c.t3Sent = text;
+    c.t3SentAt = GetTickCount64();
+    SetStatus(L"보내는 중…", 0);
+    if (!t3_link::Send(L"{\"t\":\"say\",\"session\":" + bloom_link::Quote(c.t3Id) + L",\"text\":" +
+                       bloom_link::Quote(text) + picks + L"}")) {
+        return T3Said(c, false, L"bloom");
+    }
+    ArmT3Timer();
+}
+
+// The T3 wait's tick: a send with no answer in 60 s did not go; a stop pressed
+// 5 s ago can be pressed again.
+void T3Tick() {
+    if (!g_open) return;
+    auto& o = *g_open;
+    bool waits = false;
+    if (Ours() && o.chat) {
+        auto& c = *o.chat;
+        uint64_t now = GetTickCount64();
+        if (c.t3SentAt && now - c.t3SentAt >= kT3SayWaitMs) {
+            T3Said(c, false, L"failed");
+            RenderChat(false);
+        }
+        if (c.t3StopAt && now - c.t3StopAt >= kT3StopWaitMs) {
+            c.t3StopAt = 0;
+            DrawSendButton();
+        }
+        waits = c.t3SentAt || c.t3StopAt;
+    }
+    if (!waits && o.t3Timer) {
+        o.t3Timer.Stop();
+        o.t3Timer = nullptr;
+    }
+}
+
+// The line to Bloom came up (the open chat's session is asked about) or went
+// (Bloom takes nothing now; a send under way did not go).
+void T3Linked(bool up) {
+    if (!Ours() || !g_open->chat || g_open->chat->t3Id.empty()) return;
+    auto& c = *g_open->chat;
+    if (up) {
+        AskT3(L"can");
+        return;
+    }
+    T3Can(c, false, false);
+    if (c.t3SentAt) T3Said(c, false, L"bloom");
+    DropT3Question(c);
+    c.t3AskedFor.clear();
+    c.t3StopAt = 0;
+    RenderChat(true);
+}
+
+// A line from Bloom; only those for the open chat's session count.
+void T3Heard(std::wstring const& line) {
+    if (!Ours() || !g_open->chat || g_open->chat->t3Id.empty()) return;
+    auto& c = *g_open->chat;
+    wdj::JsonObject m{nullptr};
+    if (!wdj::JsonObject::TryParse(line, m)) return;
+    std::wstring t = ai_sessions::Str(m, L"t");
+    if (_wcsicmp(ai_sessions::Str(m, L"session").c_str(), c.t3Id.c_str()) != 0) return;
+    if (t == L"can") {
+        // Also unasked, as Bloom's T3 link is turned on or off.
+        T3Can(c, ai_sessions::True(m, L"say"), ai_sessions::True(m, L"stop"));
+    } else if (t == L"said") {
+        if (!c.t3SentAt) return;
+        bool ok = ai_sessions::True(m, L"ok");
+        T3Said(c, ok, ai_sessions::Str(m, ok ? L"how" : L"why"));
+    } else if (t == L"question") {
+        if (c.t3AskedFor.empty()) return;  // the log has moved on since it was asked
+        std::vector<T3Question> questions;
+        auto list = m.TryLookup(L"questions");
+        if (list && list.ValueType() == wdj::JsonValueType::Array) {
+            for (auto const& each : list.GetArray()) {
+                auto q = ai_sessions::Object(each);
+                if (!q) continue;
+                T3Question one{ai_sessions::Str(q, L"header"), ai_sessions::Str(q, L"text"), ai_sessions::True(q, L"multi")};
+                auto choices = q.TryLookup(L"choices");
+                if (choices && choices.ValueType() == wdj::JsonValueType::Array) {
+                    for (auto const& choice : choices.GetArray()) {
+                        auto o = ai_sessions::Object(choice);
+                        if (o) one.choices.push_back({ai_sessions::Str(o, L"label"), ai_sessions::Str(o, L"description")});
+                    }
+                }
+                questions.push_back(std::move(one));
+            }
+        }
+        // The same question told again (a send that did not go) keeps its picks.
+        auto same = [](T3Question const& a, T3Question const& b) {
+            return a.text == b.text && a.multi == b.multi && a.choices.size() == b.choices.size();
+        };
+        bool kept = c.t3Questions && std::ranges::equal(*c.t3Questions, questions, same);
+        if (!kept) {
+            c.t3Picks.assign(questions.size(), {});
+            if (!questions.empty() && c.tone != 2) SetStatus(L"", 0);
+        }
+        if (questions.empty()) c.t3Picks.clear();
+        c.t3Questions = std::move(questions);
+    } else if (t == L"stopped") {
+        if (!ai_sessions::True(m, L"ok")) T3NotStopped(c, ai_sessions::Str(m, L"why"));
+    } else {
+        return;
+    }
+    RenderChat(true);
+}
+
 void Send() {
     auto& o = *g_open;
     auto& c = *o.chat;
     std::wstring text = ai_sessions::Tidy(std::wstring(o.chatBox.Text()));
-    if (text.empty()) return;
-    if (c.busy) {
+    if (c.t3) {
+        SayT3(text);  // with no words, the picks of a question that waits
+    } else if (text.empty()) {
+        return;
+    } else if (c.busy) {
         SetStatus(L"앞의 작업이 끝나면 다시 보내 주세요", 2);
     } else if (!c.cannot.empty()) {
         SetStatus(c.cannot, 2);
@@ -24330,8 +25071,13 @@ void OpenChat(ai_sessions::Row const* r) {
         c.effort = r->effort;
         c.mode = c.codex ? r->sandbox : r->mode;
         c.ultracode = r->ultracode;
-        if (!c.codex && c.record.empty()) {
-            c.cannot = L"Claude 앱의 세션이 아니라(터미널 등) 여기서는 보낼 수 없어요";
+        bool outside = c.codex ? !ai_sessions::InCodexApp(c.logPath) : c.record.empty();
+        if (outside) {
+            c.cannot = c.codex ? L"Codex 앱의 세션이 아니라 여기서는 보낼 수 없어요"
+                               : L"Claude 앱의 세션이 아니라(터미널 등) 여기서는 보낼 수 없어요";
+            // It may be a T3 Code thread's, which Bloom tells.
+            c.t3Id = r->sessionId;
+            c.notHere = c.cannot;
         } else if (c.appTitle.empty()) {
             c.cannot = c.codex ? L"스레드 제목이 없어 Codex 앱에서 찾을 수 없어요"
                                : L"제목이 아직 없어 Claude 앱에서 칸을 찾을 수 없어요";
@@ -24344,6 +25090,10 @@ void OpenChat(ai_sessions::Row const* r) {
     bool wide = o.chat && o.widenTo > 0;
     o.chat = std::move(c);
     if (o.chat->codex) LoadCodexModels();
+    if (!o.chat->t3Id.empty()) {
+        t3_link::Want();
+        AskT3(L"can");  // or when the line comes up
+    }
     core::DiagLine(L"Usage chat opens: %s", o.chat->fresh ? L"new" : o.chat->codex ? L"codex" : L"claude");
     RenderChat(true);
     LookChat();
@@ -24369,6 +25119,10 @@ void ChatAct(std::wstring const& tag) {
     if (what == L"chat") {
         if (value == L"close") return CloseChat();
         if (value == L"send") return Send();
+        if (value == L"stop") PressStop();
+    } else if (what == L"pick") {
+        PickT3(value);
+        return RenderChat(true);
     } else if (what == L"tools") {
         if (!c.openTools.erase(value)) c.openTools.insert(value);
         return RenderChat(true);
@@ -24516,7 +25270,17 @@ Controls::Grid BuildChat(folders::Popup& p) {
     send.CornerRadius(CornerRadiusHelper::FromUniformRadius(10));
     auto arrow = Glyph(L"\xE724", 13, C().faint);
     arrow.HorizontalAlignment(HorizontalAlignment::Center);
-    send.Child(arrow);
+    Controls::Border square;  // 정지, for a T3 chat's working session
+    square.Width(10);
+    square.Height(10);
+    square.CornerRadius(CornerRadiusHelper::FromUniformRadius(2.5));
+    square.HorizontalAlignment(HorizontalAlignment::Center);
+    square.VerticalAlignment(VerticalAlignment::Center);
+    square.Visibility(Visibility::Collapsed);
+    Controls::Grid marks;
+    marks.Children().Append(arrow);
+    marks.Children().Append(square);
+    send.Child(marks);
     SetTag(send, L"chat|send");
     Automation::AutomationProperties::SetName(send, L"보내기");
     Controls::Grid::SetColumn(send, 1);
@@ -24565,6 +25329,9 @@ Controls::Grid BuildChat(folders::Popup& p) {
     o.chatScroll = scroll;
     o.chatBox = box;
     o.chatSend = send;
+    o.chatArrow = arrow;
+    o.chatStopMark = square;
+    o.chatFine = fine;
     o.chatChips = chips;
     o.chatMeter = meter;
     o.chatStatus = status;
@@ -24639,6 +25406,7 @@ void StartSessions() {
             }
             if (g_open->chat && g_open->widenTo > 0) {
                 DrawChatHead();  // the session's state
+                if (g_open->chat->t3Stop) DrawSendButton();  // 정지 while it works
             }
         });
     });
@@ -24749,6 +25517,7 @@ FrameworkElement Bubble(folders::Popup& p, FrameworkElement const& content) {
 void LetGo() {
     StopSessions();
     if (g_open) {
+        if (g_open->t3Timer) g_open->t3Timer.Stop();
         if (g_open->widenBatch) g_open->widenBatch.Completed(g_open->widenDone);
         if (g_open->chat) ForgetChat();
     }
@@ -24812,7 +25581,7 @@ void Refresh() {
 
 // Opens the details over the meter, or closes them when the click that just
 // closed them was on the meter.
-void Toggle(HWND taskbar, FrameworkElement const& anchor) {
+void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> onTop) {
     if (folders::JustClosed(kKey)) {
         return;
     }
@@ -24875,7 +25644,7 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor) {
             open.room.Padding(RoomPadding(false));
             shift = (open.spareRight - open.spareLeft) / 2;
         }
-        folders::Present(p, anchor, folders::TaskbarOnTop(pt), shift);
+        folders::Present(p, anchor, onTop ? *onTop : folders::TaskbarOnTop(pt), shift);
         folders::Keep(p, flyout.Opened(winrt::auto_revoke, [](auto&&, auto&&) {
             core::Guard(L"Usage details opened", [] {
                 if (Ours() && !std::exchange(g_open->shownOnce, true) && folders::g_popup->content &&
@@ -24927,19 +25696,35 @@ bool CanChat() {
 }
 
 // A session's chat asked for from outside (Bloom's card, by the session's log id):
-// the details open on the primary taskbar's meter unless they are open, the
-// session is read even when it isn't among the newest, and its chat opens once
-// its row comes. Bloom lets explorer come forward before it asks.
-void OpenChatFor(bool codex, std::wstring const& id) {
-    if (!CanChat() || folders::g_unloading) return;
-    if (!(Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen())) {
-        HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
-        auto ui = std::ranges::find(usage::g_uis, primary, &usage::Ui::taskbar);
-        if (!primary || ui == usage::g_uis.end() || !ui->root) return;
-        SetForegroundWindow(primary);
-        Toggle(primary, ui->root);
-        if (!Ours()) return;
-    }
+// the details open on the meter of the taskbar on the monitor of `pt` (the pointer
+// as the card was pressed), else the primary's, unless they are open; the session is
+// read even when it isn't among the newest, and its chat opens once its row comes.
+// Bloom lets explorer come forward before it asks. Taskbar thread only.
+struct ChatOpening {
+    HWND taskbar = nullptr;
+    bool codex = false;
+    std::wstring id;
+    ULONGLONG since = 0;
+    UINT_PTR timer = 0;
+};
+[[clang::no_destroy]] std::optional<ChatOpening> g_chatOpening;
+constexpr UINT kChatOutLookMs = 25;
+constexpr ULONGLONG kChatOutWaitMs = 500;  // then it opens over the taskbar as it is
+
+void DropChatOpening() {
+    if (g_chatOpening && g_chatOpening->timer) KillTimer(nullptr, g_chatOpening->timer);
+    g_chatOpening.reset();
+}
+
+// Whether a taskbar sits at the top of its monitor, hidden or not.
+bool TaskbarAtTop(HWND taskbar) {
+    RECT rc;
+    MONITORINFO monitor{sizeof(monitor)};
+    if (!GetWindowRect(taskbar, &rc) || !GetMonitorInfoW(core::MonitorOf(taskbar), &monitor)) return false;
+    return rc.top + rc.bottom < monitor.rcMonitor.top + monitor.rcMonitor.bottom;
+}
+
+void ChatInPanel(bool codex, std::wstring const& id) {
     ai_sessions::Want(codex, id);
     ai_sessions::Request();
     g_open->pendingChat = (codex ? L"x:" : L"c:") + id;
@@ -24947,9 +25732,60 @@ void OpenChatFor(bool codex, std::wstring const& id) {
     TryPendingChat();
 }
 
+// Opens the details once the taskbar is out: an auto-hiding one slides out after it
+// comes forward, and the popup is placed from where it is.
+void ChatOpeningLook() {
+    if (!g_chatOpening) return;
+    ChatOpening& o = *g_chatOpening;
+    bool out = IsWindow(o.taskbar) && !autohide::LooksHidden(o.taskbar);
+    if (!out && GetTickCount64() - o.since < kChatOutWaitMs && IsWindow(o.taskbar)) return;
+    ChatOpening done = std::move(o);
+    DropChatOpening();
+    if (!CanChat() || folders::g_unloading) return;
+    core::DiagLine(L"Usage chat opens on %p, out %d after %llu ms", done.taskbar, out,
+                   GetTickCount64() - done.since);
+    if (!(Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen())) {
+        auto ui = std::ranges::find(usage::g_uis, done.taskbar, &usage::Ui::taskbar);
+        if (ui == usage::g_uis.end() || !ui->root) return;
+        Toggle(done.taskbar, ui->root, TaskbarAtTop(done.taskbar));
+        if (!Ours()) return;
+    }
+    ChatInPanel(done.codex, done.id);
+}
+
+void OpenChatFor(bool codex, std::wstring const& id, POINT pt) {
+    if (!CanChat() || folders::g_unloading) return;
+    if (Ours() && folders::g_popup->flyout && folders::g_popup->flyout.IsOpen()) {
+        DropChatOpening();
+        return ChatInPanel(codex, id);
+    }
+    HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
+    auto ui = std::ranges::find_if(usage::g_uis, [&](usage::Ui const& u) {
+        return u.root && IsWindow(u.taskbar) && core::MonitorOf(u.taskbar) == monitor;
+    });
+    if (ui == usage::g_uis.end()) ui = std::ranges::find(usage::g_uis, primary, &usage::Ui::taskbar);
+    if (ui == usage::g_uis.end() || !ui->taskbar || !ui->root) return;
+    HWND taskbar = ui->taskbar;
+    DropChatOpening();
+    SetForegroundWindow(taskbar);
+    if (autohide::LooksHidden(taskbar)) autohide::Reveal(taskbar);
+    ChatOpening& o = g_chatOpening.emplace();
+    o.taskbar = taskbar;
+    o.codex = codex;
+    o.id = id;
+    o.since = GetTickCount64();
+    if (!autohide::LooksHidden(taskbar)) return ChatOpeningLook();
+    o.timer = SetTimer(nullptr, 0, kChatOutLookMs, [](HWND, UINT, UINT_PTR, DWORD) {
+        core::Guard(L"Usage chat opening", [] { ChatOpeningLook(); });
+    });
+    if (!o.timer) ChatOpeningLook();
+}
+
 // The meter goes (an unload, new settings): its popup and everything it set up
 // with it, which the folders otherwise undo on their own unload.
 void Close() {
+    DropChatOpening();
     LetGo();
     folders::DropGiveBack();
     if (g_ownsTimerHook) {
@@ -26900,7 +27736,10 @@ PCWSTR Chat(const Command& c) {
     if (folders::g_unloading) return kFailed;
     if (!usage_detail::CanChat()) return kChatOff;
     std::wstring id = ai_sessions::Lower(c.session);
-    return core::Post([codex, id] { usage_detail::OpenChatFor(codex, id); }) ? nullptr : kFailed;
+    // The pointer is on the card just pressed, so on the monitor whose taskbar it means.
+    POINT pt{};
+    GetCursorPos(&pt);
+    return core::Post([codex, id, pt] { usage_detail::OpenChatFor(codex, id, pt); }) ? nullptr : kFailed;
 }
 
 PCWSTR Execute(const Command& c) {
@@ -27412,6 +28251,7 @@ void Wh_ModBeforeUninit() {
     bloom_link::Stop();
     changes::Stop();
     core::g_unloading = true;
+    t3_link::Stop();
     // The usage details and Bloom's link use the folders' workers and taskbar calls
     // with the feature off as well, so these stop taking new work either way.
     folders::g_unloading = true;
