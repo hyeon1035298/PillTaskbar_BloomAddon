@@ -748,6 +748,19 @@ constexpr GlassStop kGlassSheen[] = {{0.0f, {0x3C, 0xFF, 0xFF, 0xFF}},
                                      {0.85f, {0x06, 0xFF, 0xFF, 0xFF}},
                                      {1.0f, {0x2C, 0xFF, 0xFF, 0xFF}}};
 constexpr float kGlassSaturation = 1.35f;
+// The glass's luminosity layer, as Windows' acrylic has one: the blurred backdrop
+// takes a grey's luminosity while keeping its own hue and saturation, so a bright
+// window behind the dark pill comes out dark (and a dark one behind the light pill
+// light) and the words on it keep reading, while the colours behind still show.
+// The grey, dark / light theme (acrylic's own).
+constexpr uint8_t kLuminosityGreyDark = 0x2C;
+constexpr uint8_t kLuminosityGreyLight = 0xFC;
+// How much of the grey goes in is worked out from the tint: enough that a white
+// backdrop (dark theme) comes out no lighter than this under the tint, and a black
+// one (light theme) no darker. The usage meter's red text, the faintest words on
+// the pill, keeps 4.5:1 on either, with room for the sheen.
+constexpr float kGroundDark = 42;
+constexpr float kGroundLight = 226;
 // Small taskbar buttons (the taskbar's own posture when it's full).
 constexpr int kIconSizeSmall = 20;
 constexpr int kButtonWidthSmall = 30;
@@ -1904,6 +1917,33 @@ struct Effect : winrt::implements<Effect,
 constexpr UINT32 kBlurOptimizationBalanced = 1;
 constexpr GUID kAlphaMaskEffect{
     0xC80ECFF0, 0x3FD5, 0x4F05, {0x83, 0x28, 0xC5, 0xD1, 0x72, 0x4B, 0x4F, 0x0A}};
+// The Blend effect's mode that keeps the background's hue and saturation and takes
+// the foreground's luminosity. Direct2D calls that 23 (D2D1_BLEND_MODE_LUMINOSITY),
+// but composition has 22 and 23 the other way round, as WinUI's acrylic also
+// notes: 22 is the one that does it (23 turns the backdrop into a grey copy).
+constexpr UINT32 kBlendLuminosity = 22;
+
+// The luminosity layer: a grey whose luminosity goes into the backdrop by `amount`.
+struct Luminosity {
+    uint8_t grey;
+    float amount;  // 0..1
+};
+
+// The layer for `tint` at its alpha: the theme's grey (dark when the tint is),
+// and the amount that brings a white backdrop to kGroundDark under a dark tint and
+// a black one to kGroundLight under a light tint.
+Luminosity LuminosityFor(winrt::Windows::UI::Color tint) {
+    float tone = 0.3f * tint.R + 0.59f * tint.G + 0.11f * tint.B;
+    bool dark = tone < 128;
+    float grey = dark ? theme::kLuminosityGreyDark : theme::kLuminosityGreyLight;
+    float bare = dark ? 255.0f : 0.0f;  // the backdrop that is hardest to read on
+    float alpha = tint.A / 255.0f;      // below 1: GlassEffect has a backdrop only then
+    // Ground = alpha * tone + (1 - alpha) * (bare + amount * (grey - bare)).
+    float under = ((dark ? theme::kGroundDark : theme::kGroundLight) - alpha * tone) /
+                  (1.0f - alpha);
+    float amount = (bare - under) / (bare - grey);
+    return {(uint8_t)grey, std::clamp(amount, 0.0f, 1.0f)};
+}
 
 wuc::CompositionGradientBrush Sheen(wuc::Compositor const& compositor) {
     auto sheen = compositor.CreateLinearGradientBrush();
@@ -1917,12 +1957,14 @@ wuc::CompositionGradientBrush Sheen(wuc::Compositor const& compositor) {
 }
 
 // The glass over the "backdrop" source: a blur if `blur` is set, saturation
-// and the "sheen" source on top with `sheen`, and the tint; with `masked` it is
-// cut to the alpha of the "mask" source. An opaque tint hides the backdrop, so
-// then there is none: nothing behind is fetched or blurred.
+// and the "sheen" source on top with `sheen`, the luminosity layer if
+// `luminosity` is set, and the tint; with `masked` it is cut to the alpha of the
+// "mask" source. An opaque tint hides the backdrop, so then there is none:
+// nothing behind is fetched or blurred.
 wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
                                  winrt::Windows::UI::Color tint,
                                  bool sheen,
+                                 std::optional<Luminosity> luminosity,
                                  bool masked) {
     auto pv = [](auto v) { return wf::PropertyValue::CreateSingle(v); };
 
@@ -1956,6 +1998,21 @@ wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
                        std::vector<wge::IGraphicsEffectSource>{backdrop})
                        .as<wge::IGraphicsEffectSource>();
     }
+    if (luminosity && seeThrough) {
+        float grey = luminosity->grey / 255.0f;
+        auto layer = winrt::make<Effect>(
+            L"LuminosityGrey", CLSID_D2D1Flood,
+            std::vector<wf::IInspectable>{wf::PropertyValue::CreateSingleArray(
+                {grey, grey, grey, luminosity->amount})},
+            std::vector<wge::IGraphicsEffectSource>{});
+        backdrop = winrt::make<Effect>(
+                       L"Luminosity", CLSID_D2D1Blend,
+                       std::vector<wf::IInspectable>{
+                           wf::PropertyValue::CreateUInt32(kBlendLuminosity)},
+                       std::vector<wge::IGraphicsEffectSource>{
+                           backdrop, layer.as<wge::IGraphicsEffectSource>()})
+                       .as<wge::IGraphicsEffectSource>();
+    }
     std::vector<wge::IGraphicsEffectSource> layers;
     if (seeThrough) {
         layers.push_back(backdrop);
@@ -1982,6 +2039,8 @@ wge::IGraphicsEffect GlassEffect(std::optional<float> blur,
 // Glass brushes alive. XAML may hold one after the element lets go of it, and
 // its release runs this module's code: unload waits for none to be left.
 std::atomic<int> g_glassBrushes;
+// Logged once: every brush would fail the same way.
+std::atomic<bool> g_luminosityFailed;
 
 class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
    public:
@@ -2093,12 +2152,30 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
     wuc::CompositionBrush CreateBlur(winrt::Windows::UI::Color tint, bool sheen) {
         // A blur of 0 is no blur: the pass is left out, not run at radius 0.
         float amount = settings::g.pill.blur;
-        auto brush =
-            m_compositor
-                .CreateEffectFactory(GlassEffect(
-                    amount > 0 ? std::optional<float>(amount) : std::nullopt,
-                    tint, sheen, false))
-                .CreateBrush();
+        auto blur = amount > 0 ? std::optional<float>(amount) : std::nullopt;
+        auto factory = [&](std::optional<Luminosity> luminosity) {
+            return m_compositor.CreateEffectFactory(
+                GlassEffect(blur, tint, sheen, luminosity, false));
+        };
+        wuc::CompositionEffectFactory made{nullptr};
+        if (tint.A < 255) {
+            // Without the luminosity layer the glass is as before it had one.
+            try {
+                made = factory(LuminosityFor(tint));
+                auto status = made.LoadStatus();
+                if (status != wuc::CompositionEffectFactoryLoadStatus::Success &&
+                    status != wuc::CompositionEffectFactoryLoadStatus::Pending) {
+                    HRESULT why = made.ExtendedError();
+                    winrt::throw_hresult(FAILED(why) ? why : E_FAIL);
+                }
+            } catch (...) {
+                if (!g_luminosityFailed.exchange(true)) {
+                    Wh_Log(L"Glass luminosity layer failed: %08X", winrt::to_hresult());
+                }
+                made = nullptr;
+            }
+        }
+        auto brush = (made ? made : factory(std::nullopt)).CreateBrush();
         if (tint.A < 255) {  // GlassEffect has a backdrop only then
             brush.SetSourceParameter(
                 L"backdrop", m_host ? m_compositor.CreateHostBackdropBrush()
