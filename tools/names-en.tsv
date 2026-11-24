@@ -1,32 +1,32 @@
 group:pill	Pill
 pill.enabled	Pill shape
-pill.enabled#about	When off, the taskbar goes back to the default Windows look
+pill.enabled#about	Turn off to restore the default Windows taskbar style
 pill.edge	Taskbar position
-pill.edge#about	Top or bottom of the screen. Windows' setting in the registry is not changed, so turning this off or turning the mod off puts the taskbar back where Windows has it. To auto-hide a taskbar at the top, keep the auto-hide helper on as well
-pill.edge=windows	Follow Windows settings
+pill.edge#about	Place at the top or bottom of the screen. Doesn't modify the Windows registry, so turning off this option or mod restores the Windows setting. Enable Auto-hide helper as well to use auto-hide at the top
+pill.edge=windows	Follow Windows setting
 pill.edge=top	Top
 pill.edge=bottom	Bottom
 pill.align	Pill alignment
-pill.align#about	Where along the edge the expanded pill sits
+pill.align#about	Where to align the taskbar pill along the screen edge
 pill.align=left	Left
 pill.align=center	Center
 pill.align=right	Right
-pill.style	Style
-pill.style=bloom	Bloom (glass with a faint outline)
-pill.style=glass	Glassmorphism (lit edges, top reflection and bottom glow)
+pill.style	Appearance
+pill.style=bloom	Bloom (glass with subtle outline)
+pill.style=glass	Glassmorphism (lit edges, top highlight, and bottom glow)
 pill.style=windowGlass	WindowGlass (borderless glass)
 pill.theme	Theme
-pill.theme#about	Light or dark for the taskbar and the icons, usage and folders in it. As a Bloom add-on it follows Bloom's theme
+pill.theme#about	Light or dark theme for the taskbar, icons, usage, and folders. Follows Bloom's theme when used as a Bloom add-on
 pill.theme=system	Windows taskbar theme
 pill.theme=dark	Dark
 pill.theme=light	Light
-pill.glass	Glass effect
-pill.glass#about	When off, the pill, the island's morph and the folder popup are filled in the theme's color without blur. As a Bloom add-on it follows Bloom's glass effect
+pill.glass	Glass Effect
+pill.glass#about	When turned off, the pill, hidden island transition, and folder popup use solid theme colors without blur. Follows Bloom's glass effect when used as a Bloom add-on
 pill.cornerRadius	Corner radius (px)
 pill.blur	Background blur
 pill.tintOpacity	Background tint opacity (%)
 group:tray	Tray
-group:tray#about	Hidden icons leave no empty space. The registry is not changed
+group:tray#about	Hidden icons leave no empty space. The registry is not modified
 tray.hideVolume	Hide volume icon
 tray.hideNetwork	Hide network icon
 tray.hideBattery	Hide battery icon
@@ -35,145 +35,145 @@ tray.hideLocation	Hide location icon
 tray.hideStudioEffects	Hide Studio Effects icon
 tray.hideRecall	Hide Recall icon
 tray.hideLanguageBar	Hide language bar
-tray.hideLanguageExtras	Hide extra language icons
+tray.hideLanguageExtras	Hide input indicator icon
 tray.hideCopilot	Hide Copilot icon
 tray.bell	Notification bell
 tray.bell=shown	Always show
 tray.bell=whenNew	Only when there are new notifications
-tray.bell=hidden	Hidden
+tray.bell=hidden	Hide
 tray.clock	Clock
 tray.clock=timeDate	Time and date
 tray.clock=time	Time only
-tray.clock=hidden	Hidden
+tray.clock=hidden	Hide
 tray.clockFormat	Time format
 tray.clockFormat=h24	24-hour (18:24)
 tray.clockFormat=h12	12-hour (6:24 PM)
-tray.panelsNearTray	Open Windows panels at the tray
-tray.panelsNearTray#about	Quick Settings (Win+A) and the notification center and calendar (Win+N, the clock) open at the pill's tray instead of the right end of the screen. With the taskbar at the top, the notification center opens at the top too. When off, they open where Windows puts them
-tray.centerStill	Notification center without the slide
-tray.centerStill#about	The notification center and calendar (Win+N, the clock) appear in place instead of sliding in from the right of the screen. When off, Windows' animation stays
+tray.panelsNearTray	Open Windows flyouts near tray
+tray.panelsNearTray#about	Opens Quick Settings (Win+A) and Notification Center / Calendar (Win+N, clock) near the pill tray instead of the far right edge. When the taskbar is at the top, Notification Center also attaches to the top. Turn off to use default Windows positions
+tray.centerStill	Disable Notification Center slide animation
+tray.centerStill#about	Shows Notification Center / Calendar (Win+N, clock) immediately in place instead of sliding in from the right edge. Turn off to keep the default Windows animation
 group:size	Size
-group:size#about	Don't use together with the Windows "small taskbar buttons" setting
-size.enabled	Change size
+group:size#about	Do not use together with Windows' "Use small taskbar buttons" setting
+size.enabled	Custom size
 size.taskbarHeight	Taskbar height (px)
-size.taskbarHeight#about	Windows default is 48
+size.taskbarHeight#about	Windows default: 48
 size.iconSize	Icon size (px)
-size.iconSize#about	Windows default is 24
+size.iconSize#about	Windows default: 24
 size.iconSpacing	Icon spacing (px)
-size.iconSpacing#about	App button width is icon size plus spacing (Windows default is 20)
+size.iconSpacing#about	App button width equals icon size + spacing (Windows default: 20)
 group:start	Start button
-group:start#about	The right-click menu stays the same
+group:start#about	Keeps the default right-click menu
 start.mode	Start button
-start.mode=windows	Unchanged
-start.mode=hidden	Hidden (open Start with the Win key)
-start.mode=bloom	Bloom button (opens and closes Bloom)
+start.mode=windows	Default
+start.mode=hidden	Hide (open Start menu with Win key)
+start.mode=bloom	Bloom button (click to toggle Bloom)
 group:autohide	Auto-hide
 autohide.enabled	Auto-hide helper
-autohide.enabled#about	Turn auto-hide on or off in Windows Settings (Taskbar behaviors). This feature also lets a taskbar at the top hide, and applies the values below
-autohide.revealZone	Reveal zone (%)
-autohide.revealZone#about	The mouse brings the taskbar out only in this part of the edge, around its middle (or from the end the pill is set against, when it is aligned left or right). 100 means the whole edge
+autohide.enabled#about	Turn auto-hide on or off in Windows Settings (Taskbar behaviors). This option enables auto-hide for top taskbars and applies the settings below
+autohide.revealZone	Trigger zone (%)
+autohide.revealZone#about	Only reveals the taskbar when hovering within this percentage of the edge around the center (or the aligned side). 100 means the entire edge
 autohide.showDelay	Show delay (ms)
 autohide.showDelay#about	-1 uses the Windows default (mouse hover time, usually 400)
 autohide.hideDelay	Hide delay (ms)
-autohide.hideDelay#about	Time after the mouse leaves before hiding. -1 uses the Windows default (mouse hover time)
-autohide.animation	Animation length (ms)
+autohide.hideDelay#about	Delay before hiding after the pointer leaves. -1 uses the Windows default (mouse hover time)
+autohide.animation	Animation duration (ms)
 autohide.animation#about	0 uses the Windows default
-autohide.keepHiddenForBloom	Stay hidden when the Bloom launcher opens
-autohide.keepHiddenForBloom#about	When off, opening the Bloom launcher with the Bloom key or Win key also brings out the hidden taskbar on that monitor, and it stays out while the launcher is in front
-autohide.keepHiddenOnFlash	Stay hidden when an app flashes
-autohide.keepHiddenOnFlash#about	An app flashing its taskbar button to get attention doesn't bring out the hidden taskbar. When off, the taskbar comes out as in Windows and stays out until you open that app
+autohide.keepHiddenForBloom	Keep hidden when Bloom launcher opens
+autohide.keepHiddenForBloom#about	When turned off, opening the Bloom launcher with the Bloom or Win key also reveals the hidden taskbar on that monitor and keeps it visible while the launcher is in front
+autohide.keepHiddenOnFlash	Keep hidden when apps flash
+autohide.keepHiddenOnFlash#about	Keeps the taskbar hidden when an app flashes its taskbar button. When turned off, the taskbar pops up as in default Windows and stays visible until the app is opened
 group:media	Media
 media.enabled	Media player
-media.enabled#about	Puts the playing track's album art, title and previous/play/next buttons before the tray. Collapses when nothing is playing
+media.enabled#about	Shows album art, title, and previous/play/next controls for the current track before the tray. Collapses when nothing is playing
 media.maxWidth	Max title width (px)
-media.maxWidth#about	Longer titles are shortened with …
+media.maxWidth#about	Truncates overflowing titles with …
 group:usage	Usage
 usage.enabled	Show Bloom usage
-usage.enabled#about	Reads the AI usage file Bloom exports and shows each account's weekly usage % with a bar in the tray. The numbers follow Bloom's used / left setting; a right-click turns them the other way. A click opens the details of every limit. Turn on file export under Home > AI usage in Bloom settings. Nothing is created if the export folder doesn't exist
+usage.enabled#about	Reads the AI usage file exported by Bloom and displays weekly usage % and a bar per account in the tray. Follows Bloom's used/remaining display setting (right-click to toggle) and opens a detailed view per limit on click. Requires file export enabled in Bloom Settings > Home Screen > AI Usage; does not create folders if the export folder is missing
 usage.logoColor	Logo color
-usage.logoColor#about	The account icons in the tray and the island (files picked in Bloom Settings › AI accounts, or else the Anthropic and OpenAI logos Bloom carries)
-usage.logoColor=mono	Mono (dim text color)
-usage.logoColor=brand	Original colors (as in the icon file; a logo in black or white alone takes the text color)
-usage.gapBefore	Gap from apps (px)
-usage.gapBefore#about	Space added between the last app button and the usage
-usage.gapAfter	Right gap (px)
-usage.gapAfter#about	Space from the end of the usage to the tray icons on the right
-usage.sessions	Show sessions in the details
-usage.sessions#about	The window a click on the usage opens lists this PC's Claude Code and Codex sessions (state, this turn's tokens, context). The end of each tool's session logs is read only while the window is open, and never what was said (with the chat panel below on, only the picked session's recent conversation is read)
-usage.chat	Session chat panel (experimental)
-usage.chat#about	Clicking a session in the details widens the window and shows that session's recent conversation and a message box on the right (a right-click shows its details). From there you reply, add to a running turn, change the model, effort, Ultracode and permissions, and start new sessions. Sending and changing work by driving the Claude desktop app's and the Codex app's own screens through UI Automation, so the apps do it; no token or credential is touched. This is a gray zone under the terms: Anthropic's consumer terms bar accessing the services through automated or non-human means (bots, scripts) without an API key or explicit permission, and whether putting text a person chose into the app's screen counts is unclear. Using it is your responsibility. Needs session view on
-group:island	Auto-hide island
-island.enabled	Auto-hide island
-island.enabled#about	While the taskbar is hidden by auto-hide, puts a small black island on its edge (top or bottom). Clicking the island (setting below) or pointing at it expands the island and brings out the taskbar. Drag it with Ctrl held to move it along the edge; Ctrl and a right click put it back in the middle. Auto-hide helper must also be on
+usage.logoColor#about	Account icon shown in the tray and island (custom file chosen in Bloom Settings › AI Accounts, or built-in Anthropic / OpenAI logos if unset)
+usage.logoColor=mono	Monochrome (muted text color)
+usage.logoColor=brand	Original color (uses icon file colors; pure black or white logos use text color)
+usage.gapBefore	Spacing from apps (px)
+usage.gapBefore#about	Extra spacing between the last app button and the usage indicator
+usage.gapAfter	Right spacing (px)
+usage.gapAfter#about	Spacing from the end of the usage indicator to the tray icons on the right
+usage.sessions	Show sessions in detail window
+usage.sessions#about	Displays local Claude Code and Codex sessions (status, current turn tokens, context) in the usage detail window. Reads only the tail of each tool's session log while the window is open and does not read conversation text (unless the chat panel below is enabled, which reads recent messages for the selected session only)
+usage.chat	Session chat panel (Experimental)
+usage.chat#about	Clicking a session in the detail window expands a chat panel on the right with recent messages and an input box (right-click for session info). Reply or steer active turns, switch model, effort, Ultracode, or permissions, and start new sessions. Sending and switching use UI Automation to drive the Claude desktop app and Codex app windows without touching tokens or credentials. Note: This is a gray area under terms of service. Anthropic's Consumer Terms prohibit accessing services via automated or non-human means (bots, scripts, etc.) without an API key or explicit permission, and it is unclear whether relaying user-typed text into the app window qualifies. Use at your own risk. Requires "Show sessions in detail window" to be enabled
+group:island	Hidden Island
+island.enabled	Hidden Island
+island.enabled#about	Places a small black island at the screen edge (top or bottom) while the taskbar is auto-hidden. Clicking or hovering over the island (depending on the setting below) expands it into the taskbar. Hold Ctrl and drag to move it along the edge, or Ctrl+right-click to reset to center. Requires Auto-hide helper to be enabled
 island.color	Island color
 island.color=black	Black
 island.color=white	White
 island.showClock	Show clock
-island.showMedia	Show playing track
-island.showMedia#about	Shows album art and title when the media player is on
+island.showMedia	Show now playing
+island.showMedia#about	Shows album art and track title when the Media player feature is enabled
 island.showUsage	Show AI usage
-island.showUsage#about	Shows when Bloom usage is on and the Bloom file exists
-island.showMemory	Show memory use
-island.showMemory#about	Shows while the Memory Clean add-on is on, drawn like its taskbar icon
-island.showCpu	Show CPU use
-island.showCpu#about	Shows while the Memory Clean add-on is on
-island.clockAt	Clock on
-island.clockAt#about	The middle island, or an island against the left or right corner of the screen
-island.clockAt=center	Middle
+island.showUsage#about	Shown when "Show Bloom usage" is enabled and the Bloom usage file exists
+island.showMemory	Show memory usage
+island.showMemory#about	Shown in the same style as the taskbar icon when the Memory Cleaner add-on is enabled
+island.showCpu	Show CPU usage
+island.showCpu#about	Shown when the Memory Cleaner add-on is enabled
+island.clockAt	Clock position
+island.clockAt#about	Center island, or an island docked at the left or right screen corner
+island.clockAt=center	Center
 island.clockAt=left	Left
 island.clockAt=right	Right
-island.mediaAt	Playing track on
-island.mediaAt=center	Middle
+island.mediaAt	Now playing position
+island.mediaAt=center	Center
 island.mediaAt=left	Left
 island.mediaAt=right	Right
-island.usageAt	AI usage on
-island.usageAt=center	Middle
+island.usageAt	AI usage position
+island.usageAt=center	Center
 island.usageAt=left	Left
 island.usageAt=right	Right
-island.memoryAt	Memory use on
-island.memoryAt=center	Middle
+island.memoryAt	Memory usage position
+island.memoryAt=center	Center
 island.memoryAt=left	Left
 island.memoryAt=right	Right
-island.cpuAt	CPU use on
-island.cpuAt=center	Middle
+island.cpuAt	CPU usage position
+island.cpuAt=center	Center
 island.cpuAt=left	Left
 island.cpuAt=right	Right
 island.height	Height (px)
 island.height#about	At 100% scale, from 20 to 60
 island.width	Width (px)
-island.width#about	Width of the island body at 100% scale, up to 1200. 0 fits what it shows. If the content doesn't fit, the track title is shortened with …
-island.reveal	Bring out the taskbar
-island.reveal#about	With the click option, pointing at the island doesn't bring the taskbar out; you have to click the island. Pointing at the edge doesn't either, except while dragging a file, as before
-island.reveal=hover	As soon as you point at it
-island.reveal=click	Only when you click the island
-island.hoverTransparency	Transparency on hover (%)
-island.hoverTransparency#about	Makes the island this transparent while the pointer is over it, so what's below shows through. 0 leaves it as is, 100 makes it invisible. The island still gets the clicks
-group:folders	Folders
-folders.enabled	Taskbar folders
-folders.enabled#about	Drag a pinned app onto another app to group them into a folder. Keep the Taskbar Folders mod off while this is on
-folders.foldersPath	Folder location
-folders.foldersPath#about	Each subfolder in this folder becomes one taskbar folder
-folders.mergeDelay	Merge delay (ms)
-folders.mergeDelay#about	How long an app must stay over another app before the two can merge (100–3000)
-folders.popupScale	Folder size (%)
-folders.popupScale#about	Shrinks or enlarges an open folder and its menu as a whole, text and icons included (50–150)
+island.width#about	Island width at 100% scale, up to 1200. 0 fits the content automatically. Overflowing track titles are truncated with …
+island.reveal	Show taskbar on
+island.reveal#about	When set to click, hovering over the island or screen edge won't reveal the taskbar—you must click the island (dragging a file still reveals it)
+island.reveal=hover	On hover
+island.reveal=click	On island click
+island.hoverTransparency	Hover transparency (%)
+island.hoverTransparency#about	Makes the island transparent while hovered so content underneath shows through. 0 is opaque, 100 is invisible. The island still receives clicks
+group:folders	Folder
+folders.enabled	Taskbar Folders
+folders.enabled#about	Drag a pinned app onto another to group them into a folder. Disable the Taskbar Folders mod while this is enabled
+folders.foldersPath	Folder path
+folders.foldersPath#about	Each subfolder inside this folder becomes a taskbar folder
+folders.mergeDelay	Merge hover delay (ms)
+folders.mergeDelay#about	How long to hold an app over another before merging them (100–3000)
+folders.popupScale	Folder scale (%)
+folders.popupScale#about	Scales the open folder popup and its menu, including text and icons (50–150)
 folders.showLabels	Show app names
-folders.showLabels#about	Puts names under the apps in an open folder. When off, the cells shrink to icon size
-folders.iconSize	Icon size in folders (px)
-folders.iconSize#about	Size of app icons in an open folder (16–96)
+folders.showLabels#about	Shows app names below icons in open folders. When turned off, cells shrink to fit the icons
+folders.iconSize	Folder icon size (px)
+folders.iconSize#about	App icon size inside open folders (16–96)
 folders.appSpacing	App spacing (px)
-folders.appSpacing#about	Between apps in an open folder (0–40)
-folders.popupSide	Folder opens
-folders.popupSide=auto	Away from the taskbar
-folders.popupSide=above	Above the taskbar
-folders.popupSide=below	Below the taskbar
+folders.appSpacing#about	Spacing between apps inside open folders (0–40)
+folders.popupSide	Folder open direction
+folders.popupSide=auto	Away from taskbar
+folders.popupSide=above	Above taskbar
+folders.popupSide=below	Below taskbar
 folders.popupGap	Distance from taskbar (px)
-folders.popupGap#about	Between the taskbar and an open folder or its menu (0–200)
+folders.popupGap#about	Gap between the taskbar and the open folder popup or its menu (0–200)
 folders.cornerRadius	Corner radius (px)
-folders.cornerRadius#about	Corners of an open folder and its menu (0–40)
+folders.cornerRadius#about	Corner radius of the open folder popup and its menu (0–40)
 folders.cornerSmoothing	Corner smoothing (%)
-folders.cornerSmoothing#about	0 gives ordinary rounded corners, 60 a continuous curve like Apple icons (0–100)
-folders.autoRunning	Running folder
-folders.autoRunning#about	Gathers apps you started without pinning, and that aren't in any folder, into one clock-shaped folder. Apps leave it when closed, and the folder is gone when there are none
-folders.runningName	Running folder name
-folders.runningName#about	The name the taskbar gives this folder's button
+folders.cornerSmoothing#about	0 uses standard rounded corners; 60 gives Apple-style continuous squircle curves (0–100)
+folders.autoRunning	Running apps folder
+folders.autoRunning#about	Groups unpinned running apps that aren't in any folder into a single clock-icon folder. Apps are removed when closed, and the folder disappears when empty
+folders.runningName	Running apps folder name
+folders.runningName#about	Name shown on this folder button on the taskbar

@@ -66,14 +66,14 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 끄면 Windows 기본 작업표시줄 모양으로 돌아갑니다
   - edge: windows
     $name: 작업표시줄 위치
-    $description: 화면 위나 아래. 레지스트리의 Windows 설정은 바꾸지 않아서, 이 기능을 끄거나 모드를 끄면 Windows 설정 위치로 돌아갑니다. 위에 두고 자동 숨김을 쓰려면 자동 숨김 보조도 켜 두세요
+    $description: 화면 위나 아래에 둡니다. Windows 레지스트리 설정은 바꾸지 않으므로, 이 기능이나 모드를 끄면 원래 Windows 설정 위치로 돌아갑니다. 위에 두고 자동 숨김을 쓰려면 자동 숨김 보조도 켜 두세요
     $options:
     - windows: Windows 설정 따름
     - top: 위
     - bottom: 아래
   - align: center
     $name: 알약 정렬
-    $description: 펼친 알약을 가장자리의 어디에 둘지
+    $description: 펼친 알약을 가장자리의 어디에 둘지 정합니다
     $options:
     - left: 왼쪽
     - center: 가운데
@@ -86,14 +86,14 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - windowGlass: WindowGlass (테두리 없는 유리)
   - theme: system
     $name: 테마
-    $description: 작업표시줄과 그 안의 아이콘, 사용량, 폴더의 라이트·다크. Bloom 애드온으로 쓰면 Bloom의 테마를 따릅니다
+    $description: 작업표시줄과 아이콘, 사용량, 폴더의 라이트·다크 테마입니다. Bloom 애드온으로 쓰면 Bloom의 테마를 따릅니다
     $options:
     - system: Windows 작업표시줄 테마
     - dark: 다크
     - light: 라이트
   - glass: true
     $name: 유리 효과
-    $description: 끄면 알약, 숨김 아일랜드가 바뀌는 모양, 폴더 창이 블러 없이 테마 색으로 칠해집니다. Bloom 애드온으로 쓰면 Bloom의 유리 효과를 따릅니다
+    $description: 끄면 알약, 숨김 아일랜드 전환 모양, 폴더 창이 블러 없이 테마 색으로 채워집니다. Bloom 애드온으로 쓰면 Bloom의 유리 효과를 따릅니다
   - cornerRadius: 25
     $name: 모서리 (px)
   - blur: 12
@@ -141,26 +141,26 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - h12: 12시간 (오후 6:24)
   - panelsNearTray: true
     $name: Windows 패널을 트레이 쪽에 열기
-    $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 작업표시줄이 위에 있으면 알림 센터도 위쪽에 붙습니다. 끄면 Windows가 정한 자리에 열립니다
+    $description: 빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)을 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 엽니다. 작업표시줄이 위에 있으면 알림 센터도 위쪽에 붙습니다. 끄면 Windows 기본 위치에 열립니다
   - centerStill: true
     $name: 알림 센터 슬라이드 끄기
-    $description: 알림 센터·달력(Win+N, 시계)이 화면 오른쪽에서 밀려 들어오지 않고 제자리에 바로 나타납니다. 끄면 Windows 애니메이션 그대로입니다
+    $description: 알림 센터·달력(Win+N, 시계)이 화면 오른쪽에서 밀려 들어오지 않고 제자리에 바로 나타납니다. 끄면 Windows 기본 애니메이션을 유지합니다
   $name: 트레이
-  $description: 숨긴 아이콘은 자리도 남기지 않습니다. 레지스트리는 건드리지 않습니다
+  $description: 숨긴 아이콘은 빈자리를 남기지 않으며, 레지스트리는 건드리지 않습니다
 - size:
   - enabled: true
     $name: 크기 바꾸기
   - taskbarHeight: 56
     $name: 작업표시줄 높이 (px)
-    $description: Windows 기본 48
+    $description: Windows 기본값 48
   - iconSize: 32
     $name: 아이콘 크기 (px)
-    $description: Windows 기본 24
+    $description: Windows 기본값 24
   - iconSpacing: 14
     $name: 아이콘 간격 (px)
-    $description: 앱 버튼 폭은 아이콘 크기 + 간격입니다 (Windows 기본 20)
+    $description: 앱 버튼 폭은 아이콘 크기 + 간격입니다 (Windows 기본값 20)
   $name: 크기
-  $description: Windows의 "작은 작업표시줄 단추" 설정과는 같이 쓰지 마세요
+  $description: Windows의 "작은 작업표시줄 단추" 설정과는 함께 쓰지 마세요
 - start:
   - mode: bloom
     $name: 시작 버튼
@@ -169,29 +169,29 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - hidden: 숨기기 (시작 메뉴는 Win 키로)
     - bloom: Bloom 버튼 (누르면 Bloom을 열고 닫습니다)
   $name: 시작 버튼
-  $description: 오른쪽 클릭 메뉴는 그대로입니다
+  $description: 오른쪽 클릭 메뉴는 그대로 유지됩니다
 - autohide:
   - enabled: true
     $name: 자동 숨김 보조
-    $description: 자동 숨김을 켜고 끄는 것은 Windows 설정(작업 표시줄 동작)에서 합니다. 이 기능은 위쪽 작업표시줄도 숨게 하고 아래 값을 적용합니다
+    $description: 자동 숨김을 켜고 끄는 것은 Windows 설정(작업 표시줄 동작)에서 합니다. 이 기능은 위쪽 작업표시줄도 숨겨지게 하고 아래 설정값을 적용합니다
   - revealZone: 100
     $name: 나오는 구간 (%)
-    $description: 가장자리 가운데(알약을 왼쪽이나 오른쪽에 붙였으면 그쪽 끝)에서 이만큼에서만 마우스로 나옵니다. 100이면 가장자리 전체
+    $description: 가장자리 가운데(알약을 왼쪽이나 오른쪽에 붙였으면 그쪽 끝)에서 이 비율만큼의 구간에서만 마우스로 작업표시줄이 나옵니다. 100이면 가장자리 전체입니다
   - showDelay: -1
     $name: 나오기 지연 (ms)
-    $description: -1이면 Windows 기본(마우스 호버 시간, 보통 400)
+    $description: -1이면 Windows 기본값(마우스 호버 시간, 보통 400)
   - hideDelay: -1
     $name: 숨기 지연 (ms)
-    $description: 마우스가 떠난 뒤 숨기까지. -1이면 Windows 기본(마우스 호버 시간)
+    $description: 마우스가 떠난 뒤 숨기까지의 시간입니다. -1이면 Windows 기본값(마우스 호버 시간)
   - animation: 0
     $name: 애니메이션 길이 (ms)
-    $description: 0이면 Windows 기본
+    $description: 0이면 Windows 기본값
   - keepHiddenForBloom: false
     $name: Bloom 런처가 열려도 숨긴 채로
     $description: 끄면 Bloom 키나 Win 키로 Bloom 런처를 열 때 숨은 작업표시줄도 그 모니터에서 함께 나오고, 런처가 앞에 있는 동안 들어가지 않습니다
   - keepHiddenOnFlash: true
     $name: 앱이 깜박여도 숨긴 채로
-    $description: 앱이 작업표시줄 단추를 깜박여 알릴 때 숨은 작업표시줄이 나오지 않습니다. 끄면 Windows처럼 나와서 그 앱을 열 때까지 들어가지 않습니다
+    $description: 앱이 작업표시줄 단추를 깜박여 알릴 때 숨은 작업표시줄이 나오지 않습니다. 끄면 Windows 기본 동작처럼 나와서 그 앱을 열 때까지 들어가지 않습니다
   $name: 자동 숨김
 - media:
   - enabled: true
@@ -286,7 +286,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 100% 배율 기준 아일랜드 몸통의 폭, 1200까지. 0이면 보여 주는 내용에 맞춥니다. 내용이 넘치면 곡 제목을 …로 줄입니다
   - reveal: hover
     $name: 작업표시줄 부르기
-    $description: 클릭이면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 나옵니다
+    $description: 클릭으로 설정하면 포인터를 대기만 해서는 나오지 않고 아일랜드를 눌러야 나옵니다. 가장자리에 대도 나오지 않고, 파일을 끌고 있을 때만 나옵니다
     $options:
     - hover: 포인터를 대면 바로
     - click: 아일랜드를 클릭해야
@@ -309,13 +309,13 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 열린 폴더와 그 메뉴를 글자와 아이콘까지 통째로 줄이거나 키웁니다 (50~150)
   - showLabels: false
     $name: 앱 이름 보이기
-    $description: 열린 폴더에서 앱 아래에 이름을 둡니다. 끄면 칸이 아이콘 크기로 줄어듭니다
+    $description: 열린 폴더에서 앱 아래에 이름을 표시합니다. 끄면 칸이 아이콘 크기로 줄어듭니다
   - iconSize: 32
     $name: 폴더 안 아이콘 크기 (px)
     $description: 열린 폴더의 앱 아이콘 크기 (16~96)
   - appSpacing: 4
     $name: 앱 사이 간격 (px)
-    $description: 열린 폴더의 앱 사이 (0~40)
+    $description: 열린 폴더의 앱 사이 간격 (0~40)
   - popupSide: below
     $name: 폴더가 열리는 쪽
     $options:
@@ -324,19 +324,19 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     - below: 작업표시줄 아래
   - popupGap: 8
     $name: 작업표시줄과의 거리 (px)
-    $description: 작업표시줄과 열린 폴더나 그 메뉴 사이 (0~200)
+    $description: 작업표시줄과 열린 폴더나 그 메뉴 사이의 거리 (0~200)
   - cornerRadius: 20
     $name: 모서리 둥글기 (px)
-    $description: 열린 폴더와 그 메뉴의 모서리 (0~40)
+    $description: 열린 폴더와 그 메뉴의 모서리 둥글기 (0~40)
   - cornerSmoothing: 60
     $name: 모서리 부드러움 (%)
-    $description: 0이면 보통 둥근 모서리, 60이면 애플 아이콘 같은 이어진 곡선입니다 (0~100)
+    $description: 0이면 일반 둥근 모서리, 60이면 애플 아이콘 같은 연속 곡선입니다 (0~100)
   - autoRunning: true
     $name: 실행 중 폴더
-    $description: 작업표시줄에 고정하지 않고 켠 앱 가운데 어느 폴더에도 없는 앱을 시계 모양 폴더 하나에 모읍니다. 앱을 끄면 빠지고, 그런 앱이 없으면 폴더도 없습니다
+    $description: 작업표시줄에 고정하지 않고 켠 앱 가운데 어느 폴더에도 속하지 않은 앱을 시계 모양 폴더 하나에 모읍니다. 앱을 끄면 빠지고, 해당하는 앱이 없으면 폴더도 숨겨집니다
   - runningName: 실행 중
     $name: 실행 중 폴더 이름
-    $description: 작업표시줄이 이 폴더 버튼에 붙이는 이름입니다
+    $description: 작업표시줄에서 이 폴더 버튼에 표시할 이름입니다
   $name: 폴더
 */
 // ==/WindhawkModSettings==
@@ -354,10 +354,10 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     "file": "prefs.json",
     "field": "islandPositions",
     "label": "name",
-    "name": {"ko": "모니터별 아일랜드 위치", "en": "Island position per monitor"},
+    "name": {"ko": "모니터별 아일랜드 위치", "en": "Per-monitor island position"},
     "about": {
       "ko": "아일랜드를 Ctrl을 누른 채 끌어 옮기면 그 모니터의 자리가 여기 남습니다. 0이면 왼쪽 끝, 500이면 가운데, 1000이면 오른쪽 끝입니다",
-      "en": "Where each monitor's island sits after you drag it with Ctrl held. 0 is the left end, 500 the middle, 1000 the right end"
+      "en": "Ctrl+dragging the island saves its position for that monitor here. 0 is far left, 500 is center, and 1000 is far right"
     },
     "fields": [
       {
@@ -366,7 +366,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
         "default": 500,
         "min": 0,
         "max": 1000,
-        "name": {"ko": "가로 위치", "en": "Position along the edge"}
+        "name": {"ko": "가로 위치", "en": "Horizontal position"}
       }
     ]
   }
@@ -19794,25 +19794,25 @@ std::wstring OutputText(wdj::IJsonValue const& value) {
 Result ReadResult(std::wstring const& path, Source source, std::wstring const& id, Place place) {
     Result r;
     if (!place.length) {
-        r.text = L"기록에 이 도구의 결과가 아직 없어요";
+        r.text = L"기록에 이 도구의 결과가 아직 없습니다";
         r.missing = true;
         return r;
     }
     if (place.length > kResultBytes) {
-        r.text = L"결과가 너무 커서 읽지 않았어요 (" + std::to_wstring(place.length / (1024 * 1024)) + L" MB)";
+        r.text = L"결과가 너무 커서 읽지 않았습니다 (" + std::to_wstring(place.length / (1024 * 1024)) + L" MB)";
         return r;
     }
     auto file = OpenLog(path);
     std::string bytes;
     if (!file || !ReadAt(file.get(), place.at, (size_t)place.length, bytes) || bytes.size() != place.length) {
-        r.text = L"기록을 읽지 못했어요";
+        r.text = L"기록을 읽지 못했습니다";
         r.error = true;
         return r;
     }
     bytes = WithoutPictures(bytes);
     wdj::JsonObject record{nullptr};
     if (!wdj::JsonObject::TryParse(Widen(bytes), record)) {
-        r.text = L"결과 줄을 읽지 못했어요";
+        r.text = L"결과 줄을 읽지 못했습니다";
         r.error = true;
         return r;
     }
@@ -20081,16 +20081,16 @@ struct Ui {
         app = which;
         window = FindWindowOf(which);
         if (!window) {
-            why = which == App::kClaude ? L"Claude 앱 창이 열려 있지 않아요" : L"Codex 앱 창이 열려 있지 않아요";
+            why = which == App::kClaude ? L"Claude 앱 창이 열려 있지 않습니다" : L"Codex 앱 창이 열려 있지 않습니다";
             return false;
         }
         if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation,
                                     reinterpret_cast<void**>(uia.GetAddressOf())))) {
-            why = L"UI 자동화를 쓸 수 없어요";
+            why = L"UI 자동화를 사용할 수 없습니다";
             return false;
         }
         if (FAILED(uia->ElementFromHandle(window, &root)) || !root || FAILED(uia->CreateCacheRequest(&cache))) {
-            why = L"앱 창을 읽지 못했어요";
+            why = L"앱 창을 읽지 못했습니다";
             return false;
         }
         for (PROPERTYID p : {UIA_NamePropertyId, UIA_ControlTypePropertyId, UIA_BoundingRectanglePropertyId,
@@ -20258,7 +20258,7 @@ struct Pane {
     Node edit, send, stop, model, mode, folder;
 };
 
-constexpr PCWSTR kNoPane = L"Claude 앱에 이 세션 칸이 없어요";
+constexpr PCWSTR kNoPane = L"Claude 앱에 이 세션 항목이 없습니다";
 
 // The pane of the session titled `title`: its prompt box under that header,
 // the send or stop button at the box's end and the model and permission
@@ -20281,7 +20281,7 @@ bool FindPane(Ui& u, std::wstring const& title, Pane& pane, std::wstring& why) {
     Node const* edit = nullptr;
     if (!title.empty()) {
         if (heads.size() > 1) {
-            why = L"Claude 앱에 같은 제목의 칸이 둘 이상이라 고를 수 없어요";
+            why = L"Claude 앱에 같은 제목의 항목이 둘 이상이라 고를 수 없습니다";
             return false;
         }
         if (heads.empty()) {
@@ -20304,7 +20304,7 @@ bool FindPane(Ui& u, std::wstring const& title, Pane& pane, std::wstring& why) {
         }
     }
     if (!edit) {
-        why = L"Claude 앱에서 입력창을 찾지 못했어요";
+        why = L"Claude 앱에서 입력창을 찾지 못했습니다";
         return false;
     }
     pane.edit = *edit;
@@ -20468,9 +20468,9 @@ bool PaneOf(Ui& u, std::wstring const& title, std::wstring const& record, Pane& 
 // Ultracode to `on`. "" when it took.
 std::wstring SetClaude(Ui& u, Pane const& pane, Change what, Labels const& labels, int index, bool on) {
     Node button = what == Change::kMode ? pane.mode : pane.model;
-    if (!button) return what == Change::kMode ? L"권한 버튼을 찾지 못했어요" : L"모델 버튼을 찾지 못했어요";
+    if (!button) return what == Change::kMode ? L"권한 버튼을 찾지 못했습니다" : L"모델 버튼을 찾지 못했습니다";
     Menu menu = ExpandMenu(u, button);
-    if (!menu.menu) return L"앱 메뉴가 열리지 않았어요";
+    if (!menu.menu) return L"앱 메뉴가 열리지 않았습니다";
     Labels opened{button.name};
     std::wstring result;
     if (what == Change::kModel || what == Change::kMode) {
@@ -20480,9 +20480,9 @@ std::wstring SetClaude(Ui& u, Pane const& pane, Change what, Labels const& label
         }
         Node const* item = Pick(radios, labels, -1);
         if (!item) {
-            result = L"앱 메뉴에 '" + (labels.empty() ? L"" : labels[0]) + L"' 항목이 없어요";
+            result = L"앱 메뉴에 '" + (labels.empty() ? L"" : labels[0]) + L"' 항목이 없습니다";
         } else if (!Selected(*item) && !Invoke(*item)) {
-            result = L"앱 메뉴를 누르지 못했어요";
+            result = L"앱 메뉴를 누르지 못했습니다";
         }
     } else {
         Node effort;
@@ -20502,14 +20502,14 @@ std::wstring SetClaude(Ui& u, Pane const& pane, Change what, Labels const& label
         if (what == Change::kEffort) {
             Node const* item = sub.menu ? Pick(sub.items, labels, index) : nullptr;
             if (!item) {
-                result = L"앱의 노력 메뉴에 그 단계가 없어요";
+                result = L"앱의 노력 메뉴에 해당 단계가 없습니다";
             } else if (!Selected(*item) && !Invoke(*item)) {
-                result = L"앱 메뉴를 누르지 못했어요";
+                result = L"앱 메뉴를 누르지 못했습니다";
             }
         } else if (!toggle) {
-            result = L"앱 메뉴에서 울트라코드를 찾지 못했어요";
+            result = L"앱 메뉴에서 울트라코드를 찾지 못했습니다";
         } else if (Toggled(*toggle) != (int)on && !Invoke(*toggle)) {
-            result = L"울트라코드를 바꾸지 못했어요";
+            result = L"울트라코드를 바꾸지 못했습니다";
         }
     }
     Wait(300);
@@ -20532,20 +20532,20 @@ std::wstring ChangeClaude(std::wstring const& title, std::wstring const& record,
 // person was writing there is lost. "" when it went.
 std::wstring SendInPane(Ui& u, Pane& pane, std::wstring const& title, std::wstring const& text) {
     std::wstring why;
-    if (!Plain(ValueOf(pane.edit)).empty()) return L"Claude 앱 입력창에 쓰던 글이 있어 보내지 않았어요";
-    if (!SetValue(pane.edit, text)) return L"입력창에 글을 넣지 못했어요";
+    if (!Plain(ValueOf(pane.edit)).empty()) return L"Claude 앱 입력창에 작성 중인 글이 있어 보내지 않았습니다";
+    if (!SetValue(pane.edit, text)) return L"입력창에 글을 넣지 못했습니다";
     if (!WaitFor(1500, [&] { return SameText(ValueOf(pane.edit), text); })) {
         SetValue(pane.edit, L"");
-        return L"입력창에 넣은 글이 달라져 보내지 않았어요";
+        return L"입력창에 넣은 글이 달라져 보내지 않았습니다";
     }
     Pane now;
     if (!WaitFor(1500, [&] { return FindPane(u, title, now, why) && now.send; })) {
         SetValue(pane.edit, L"");
-        return L"보내기 버튼을 찾지 못했어요";
+        return L"보내기 버튼을 찾지 못했습니다";
     }
-    if (!Invoke(now.send)) return L"보내기를 누르지 못했어요";
+    if (!Invoke(now.send)) return L"보내기를 누르지 못했습니다";
     if (!WaitFor(4000, [&] { return Plain(ValueOf(now.edit)).empty(); })) {
-        return L"보냈는지 확인하지 못했어요 (Claude 앱을 확인해 주세요)";
+        return L"전송 여부를 확인하지 못했습니다 (Claude 앱을 확인해 주세요)";
     }
     return {};
 }
@@ -20586,8 +20586,8 @@ std::wstring StartClaude(NewSession const& s, std::function<void(std::wstring)> 
     std::wstring why;
     if (!u.Open(App::kClaude, why)) return why;
     Pane pane;
-    if (!OpenLink(L"claude://code/new")) return L"Claude 앱의 새 세션 화면을 열지 못했어요";
-    if (!WaitFor(6000, [&] { return FindPane(u, L"", pane, why); })) return L"Claude 앱의 새 세션 화면을 찾지 못했어요";
+    if (!OpenLink(L"claude://code/new")) return L"Claude 앱의 새 세션 화면을 열지 못했습니다";
+    if (!WaitFor(6000, [&] { return FindPane(u, L"", pane, why); })) return L"Claude 앱의 새 세션 화면을 찾지 못했습니다";
     std::wstring shown;
     StartsWith(pane.folder.name, kFolder, &shown);
     if (!SameFolder(shown, s.folder)) {
@@ -20602,15 +20602,15 @@ std::wstring StartClaude(NewSession const& s, std::function<void(std::wstring)> 
         } else {
             CloseMenus(u, {pane.folder.name});
             step(L"Claude 앱에서 '작업 공간 신뢰'를 눌러 주세요");
-            if (!OpenLink(L"claude://code/new?folder=" + UrlPart(s.folder))) return L"새 세션 링크를 열지 못했어요";
+            if (!OpenLink(L"claude://code/new?folder=" + UrlPart(s.folder))) return L"새 세션 링크를 열지 못했습니다";
             WaitFor(6000, [&] { return AsksTrust(u); });
-            if (!WaitFor(120000, [&] { return !AsksTrust(u); })) return L"신뢰 확인을 기다리다 멈췄어요";
+            if (!WaitFor(120000, [&] { return !AsksTrust(u); })) return L"신뢰 확인을 기다리다 시간이 초과되었습니다";
         }
         if (!WaitFor(4000, [&] {
                 return FindPane(u, L"", pane, why) && StartsWith(pane.folder.name, kFolder, &shown) &&
                        SameFolder(shown, s.folder);
             })) {
-            return L"폴더가 정해지지 않아 보내지 않았어요";
+            return L"폴더가 지정되지 않아 보내지 않았습니다";
         }
     }
     step(L"모델·노력·권한을 맞추는 중…");
@@ -20657,7 +20657,7 @@ Node ButtonWhere(Ui& u, std::function<bool(std::wstring const&)> const& match) {
 bool OpenCodexThread(Ui& u, std::wstring const& title, std::wstring& why) {
     Node thread = ButtonWhere(u, [&](std::wstring const& name) { return name == title; });
     if (!thread) {
-        why = L"Codex 앱 사이드바에 이 스레드가 없어요";
+        why = L"Codex 앱 사이드바에 이 스레드가 없습니다";
         return false;
     }
     Invoke(thread);
@@ -20667,23 +20667,23 @@ bool OpenCodexThread(Ui& u, std::wstring const& title, std::wstring& why) {
 
 std::wstring SendCodexHere(Ui& u, std::wstring const& text) {
     Node box = CodexComposer(u);
-    if (!box) return L"Codex 입력창을 찾지 못했어요";
+    if (!box) return L"Codex 입력창을 찾지 못했습니다";
     std::wstring before = Plain(ValueOf(box));
-    if (!before.empty() && before != Plain(box.name)) return L"Codex 앱 입력창에 쓰던 글이 있어 보내지 않았어요";
+    if (!before.empty() && before != Plain(box.name)) return L"Codex 앱 입력창에 작성 중인 글이 있어 보내지 않았습니다";
     if (!SetValue(box, text) || !WaitFor(1500, [&] { return SameText(ValueOf(box), text); })) {
-        return L"Codex 입력창에 글을 넣지 못했어요";
+        return L"Codex 입력창에 글을 넣지 못했습니다";
     }
     Node send;
     if (!WaitFor(1500, [&] { return bool(send = ButtonWhere(u, [](std::wstring const& n) { return Is(n, kSend); })); })) {
         SetValue(box, L"");
-        return L"Codex가 응답 중이라 보내기 버튼이 없어요";
+        return L"Codex가 응답 중이라 보내기 버튼이 없습니다";
     }
-    if (!Invoke(send)) return L"보내기를 누르지 못했어요";
+    if (!Invoke(send)) return L"보내기를 누르지 못했습니다";
     if (!WaitFor(4000, [&] {
             std::wstring v = Plain(ValueOf(box));
             return v.empty() || v == Plain(box.name);
         })) {
-        return L"보냈는지 확인하지 못했어요 (Codex 앱을 확인해 주세요)";
+        return L"전송 여부를 확인하지 못했습니다 (Codex 앱을 확인해 주세요)";
     }
     return {};
 }
@@ -20698,7 +20698,7 @@ std::wstring SendCodex(std::wstring const& title, std::wstring const& text) {
 std::wstring SetCodex(Ui& u, Change what, Labels const& labels, int index) {
     if (what == Change::kMode) {
         Node mode = ButtonWhere(u, [](std::wstring const& n) { return StartsWith(n, kCodexMode); });
-        if (!mode) return L"Codex 모드 버튼을 찾지 못했어요";
+        if (!mode) return L"Codex 모드 버튼을 찾지 못했습니다";
         Menu menu = ExpandMenu(u, mode);
         Node const* item = Pick(menu.items, labels, -1);
         std::wstring result = item && Invoke(*item) ? L"" : L"Codex 모드 메뉴에 그 항목이 없어요";
@@ -22977,13 +22977,13 @@ void DrawChatHead() {
     uint32_t ink = C().dim;
     std::wstring app = c.t3 ? L"T3 Code" : c.codex ? L"Codex" : L"Claude";
     if (c.fresh) {
-        line = app + L" 앱에서 새 대화를 시작해요";
+        line = app + L" 앱에서 새 대화를 시작합니다";
     } else if (!c.cannot.empty()) {
         line = c.cannot;
         ink = C().warn;
     } else {
         bool live = r && (r->Live() || r->state == ai_sessions::State::kInput);
-        line = Joined({app, r ? StateWords(*r) : L"", live ? L"보내면 진행 중인 턴에 끼워 넣어요" : L"보내면 새 턴을 시작해요"});
+        line = Joined({app, r ? StateWords(*r) : L"", live ? L"보내면 진행 중인 턴에 끼워 넣습니다" : L"보내면 새 턴을 시작합니다"});
     }
     auto sub = Text(line, kSmallSize, ink);
     sub.TextWrapping(TextWrapping::Wrap);
@@ -23861,7 +23861,7 @@ FrameworkElement AskCard(ai_sessions::Said const& s, std::vector<std::vector<siz
         for (size_t k = 0; k < q.choices.size(); k++) inside.Children().Append(ChoiceRow(q.choices[k], on[k], q.multi));
         if (!other.empty()) inside.Children().Append(ChoiceRow({L"직접 쓴 답: " + other, L""}, true, q.multi));
         if (s.answer == Answer::kGiven && q.answer.empty()) {
-            auto none = Text(L"이 질문에는 답하지 않았어요", kSmallSize, C().faint);
+            auto none = Text(L"이 질문에는 답하지 않았습니다", kSmallSize, C().faint);
             none.Margin({0, 5, 0, 0});
             inside.Children().Append(none);
         }
@@ -23869,7 +23869,7 @@ FrameworkElement AskCard(ai_sessions::Said const& s, std::vector<std::vector<siz
     if (picks) {
         auto pen = Glyph(L"\xE70F", 10, C().faint);
         pen.Margin({0, 0, 5, 0});
-        auto hint = Across({pen, Text(L"다른 답은 아래 칸에 쓰면 기타로 갑니다", 10.5, C().faint)});
+        auto hint = Across({pen, Text(L"다른 답은 아래 칸에 입력하면 기타로 들어갑니다", 10.5, C().faint)});
         hint.Margin({0, 7, 0, 0});
         inside.Children().Append(hint);
     }
@@ -24008,11 +24008,11 @@ void DrawSaid() {
         rows.Append(n);
     };
     if (c.fresh) {
-        return note(L"첫 메시지를 보내면 앱에서 새 세션이 시작돼요. 폴더, 모델, 권한은 아래 칩에서 고릅니다.");
+        return note(L"첫 메시지를 보내면 앱에서 새 세션이 시작됩니다. 폴더, 모델, 권한은 아래 칩에서 고릅니다.");
     }
-    if (c.logPath.empty()) return note(L"이 세션의 기록 파일을 모릅니다");
+    if (c.logPath.empty()) return note(L"이 세션의 기록 파일을 알 수 없습니다");
     if (!c.said) return note(L"대화 기록을 읽는 중…");
-    if (c.said->said.empty()) return note(c.said->start ? L"기록에 대화가 없어요" : L"앞쪽 기록에서 대화를 찾는 중…");
+    if (c.said->said.empty()) return note(c.said->start ? L"기록에 대화가 없습니다" : L"앞쪽 기록에서 대화를 찾는 중…");
     std::unordered_map<size_t, wux::UIElement> had;
     for (auto const& [key, row] : drawn) had.emplace(key, row);
     std::vector<std::pair<size_t, wux::UIElement>> next;
@@ -24025,7 +24025,7 @@ void DrawSaid() {
             had.erase(it);
         }
     };
-    std::wstring top = c.said->start ? L"대화 처음" : c.earlier ? L"앞 대화를 읽는 중…" : L"위로 굴리면 앞 대화를 더 읽어요";
+    std::wstring top = c.said->start ? L"대화 처음" : c.earlier ? L"앞 대화를 읽는 중…" : L"위로 스크롤하면 앞 대화를 더 읽습니다";
     put(std::hash<std::wstring>{}(top) * 31 + C().text, [&] {
         auto t = Text(top, 10.5, C().faint);
         t.HorizontalAlignment(HorizontalAlignment::Center);
@@ -24182,7 +24182,7 @@ void DrawModelMenu(Controls::StackPanel const& pop) {
         bool on = c.codex == codex, can = c.fresh || on;
         apps.push_back({codex ? L"ChatGPT" : L"Claude",
                         can && !on ? (codex ? L"platform|codex" : L"platform|claude") : L"none|",
-                        can ? L"" : L"이 세션의 앱은 바꿀 수 없어요", on, can});
+                        can ? L"" : L"이 세션의 앱은 바꿀 수 없습니다", on, can});
     }
     pop.Children().Append(Segments(apps, false));
 
@@ -24223,7 +24223,7 @@ void DrawModelMenu(Controls::StackPanel const& pop) {
     if (!c.codex) {
         Controls::StackPanel words;
         words.Children().Append(Text(L"울트라코드", kNameSize, C().text, Medium()));
-        auto about = Text(L"에이전트 여럿이 더 깊게 일합니다 · 사용량이 많아요", kSmallSize, C().faint);
+        auto about = Text(L"에이전트 여럿이 더 깊게 일합니다 · 사용량이 많습니다", kSmallSize, C().faint);
         about.TextWrapping(TextWrapping::Wrap);
         words.Children().Append(about);
         auto row = MenuRow(L"ultra|", Columns(nullptr, words, Switch(c.ultracode == 1)), false);
@@ -24464,7 +24464,7 @@ void ReadOutput(std::wstring const& id) {
             }
             result = std::make_shared<const ai_sessions::Result>(ai_sessions::ReadResult(path, ChatSource(codex), id, place));
         } catch (...) {
-            result = std::make_shared<const ai_sessions::Result>(ai_sessions::Result{L"결과를 읽지 못했어요", true});
+            result = std::make_shared<const ai_sessions::Result>(ai_sessions::Result{L"결과를 읽지 못했습니다", true});
         }
         core::Post([result, generation, id] {
             core::Guard(L"Usage chat output", [&] {
@@ -24530,7 +24530,7 @@ void RunDrive(std::function<std::wstring()> work, std::function<void(Chat&, std:
             try {
                 error = work();
             } catch (...) {
-                error = L"앱을 다루다 오류가 났어요";
+                error = L"앱을 조작하는 중 오류가 발생했습니다";
                 Wh_Log(L"Chat drive failed: %08X", winrt::to_hresult());
             }
         }
@@ -24633,8 +24633,8 @@ void PickIn(app_drive::Change what, std::wstring const& value) {
         return;
     }
     if (!c.cannot.empty()) return SetStatus(c.cannot, 2);
-    if (c.t3) return SetStatus(L"T3 세션은 여기서 바꿀 수 없어요", 2);
-    if (c.busy) return SetStatus(L"앞의 작업이 끝나면 다시 눌러 주세요", 2);
+    if (c.t3) return SetStatus(L"T3 세션은 여기서 바꿀 수 없습니다", 2);
+    if (c.busy) return SetStatus(L"이전 작업이 끝나면 다시 눌러 주세요", 2);
     int index = -1;
     app_drive::Labels labels = LabelsOf(c, what, value, index);
     bool on = value == L"on";
@@ -24714,7 +24714,7 @@ void PressStop() {
     auto& c = *g_open->chat;
     uint64_t now = GetTickCount64();
     if (c.t3StopAt && now - c.t3StopAt < kT3StopWaitMs) return;
-    if (!StopT3()) return SetStatus(L"멈추지 못했어요", 2);
+    if (!StopT3()) return SetStatus(L"중단하지 못했습니다", 2);
     c.t3StopAt = now;
     SetStatus(L"", 0);
     ArmT3Timer();
@@ -24723,7 +24723,7 @@ void PressStop() {
 // Bloom could not stop it: 정지 can be pressed again.
 void T3NotStopped(Chat& c, std::wstring const& why) {
     c.t3StopAt = 0;
-    SetStatus(why == L"t3-off" ? L"T3가 꺼져 있어 못 멈췄어요" : L"멈추지 못했어요", 2);
+    SetStatus(why == L"t3-off" ? L"T3가 꺼져 있어 중단하지 못했습니다" : L"중단하지 못했습니다", 2);
 }
 
 // A choice of the T3 question picked (`q.k`): one of a question's, or any of a
@@ -24768,16 +24768,16 @@ void T3Said(Chat& c, bool ok, std::wstring const& word) {
     }
     if (ok) {
         if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == sent) g_open->chatBox.Text(L"");
-        SetStatus(word == L"answered"  ? L"질문에 답했어요"
-                  : word == L"steered" ? L"지금 턴에 넣었어요"
-                  : word == L"started" ? L"보냈어요"
-                                       : L"다음 턴으로 보냈어요",
+        SetStatus(word == L"answered"  ? L"질문에 답변했습니다"
+                  : word == L"steered" ? L"현재 턴에 전달했습니다"
+                  : word == L"started" ? L"보냈습니다"
+                                       : L"다음 턴으로 보냈습니다",
                   1);
     } else {
-        SetStatus(word == L"t3-off"        ? L"T3가 꺼져 있어 못 보냈어요"
-                  : word == L"no-thread"   ? L"T3에서 이 세션을 못 찾았어요"
-                  : word == L"bloom"       ? L"Bloom에 닿지 않아 못 보냈어요"
-                  : word == L"no-question" ? L"질문이 이미 끝났어요"
+        SetStatus(word == L"t3-off"        ? L"T3가 꺼져 있어 보내지 못했습니다"
+                  : word == L"no-thread"   ? L"T3에서 이 세션을 찾을 수 없습니다"
+                  : word == L"bloom"       ? L"Bloom에 연결되지 않아 보내지 못했습니다"
+                  : word == L"no-question" ? L"이미 종료된 질문입니다"
                                            : L"보내지 못했어요",
                   2);
     }
@@ -24792,8 +24792,8 @@ constexpr uint64_t kT3SayWaitMs = 60000;  // a send Bloom has not answered by th
 void SayT3(std::wstring const& text) {
     auto& c = *g_open->chat;
     if (text.empty() && !(T3Asking(c) && T3Picked(c))) return;
-    if (c.t3SentAt) return SetStatus(L"앞의 메시지를 보내는 중이에요", 2);
-    if (text.size() > kT3SayMax) return SetStatus(L"한 번에 20000자까지 보낼 수 있어요", 2);
+    if (c.t3SentAt) return SetStatus(L"이전 메시지를 보내는 중입니다", 2);
+    if (text.size() > kT3SayMax) return SetStatus(L"한 번에 20000자까지 보낼 수 있습니다", 2);
     std::wstring picks;
     if (T3Asking(c)) {
         c.t3Picks.resize(c.t3Questions->size());
@@ -24919,7 +24919,7 @@ void Send() {
     } else if (text.empty()) {
         return;
     } else if (c.busy) {
-        SetStatus(L"앞의 작업이 끝나면 다시 보내 주세요", 2);
+        SetStatus(L"이전 작업이 끝나면 다시 보내 주세요", 2);
     } else if (!c.cannot.empty()) {
         SetStatus(c.cannot, 2);
     } else if (c.fresh && c.folder.empty()) {
@@ -24942,7 +24942,7 @@ void Send() {
             [text](Chat&, std::wstring const& error) {
                 if (!error.empty()) return SetStatus(error, 2);
                 if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == text) g_open->chatBox.Text(L"");
-                SetStatus(L"새 세션을 시작했어요 · 앱에서 이어 가요", 1);
+                SetStatus(L"새 세션을 시작했습니다 · 앱에서 이어 갑니다", 1);
             });
     } else {
         SetStatus(L"보내는 중…", 0);
@@ -24953,7 +24953,7 @@ void Send() {
             [text](Chat&, std::wstring const& error) {
                 if (!error.empty()) return SetStatus(error, 2);
                 if (ai_sessions::Tidy(std::wstring(g_open->chatBox.Text())) == text) g_open->chatBox.Text(L"");
-                SetStatus(L"보냈어요", 1);
+                SetStatus(L"보냈습니다", 1);
             });
     }
     RenderChat(false);
@@ -25150,14 +25150,14 @@ void OpenChat(ai_sessions::Row const* r) {
         c.ultracode = r->ultracode;
         bool outside = c.codex ? !ai_sessions::InCodexApp(c.logPath) : c.record.empty();
         if (outside) {
-            c.cannot = c.codex ? L"Codex 앱의 세션이 아니라 여기서는 보낼 수 없어요"
-                               : L"Claude 앱의 세션이 아니라(터미널 등) 여기서는 보낼 수 없어요";
+            c.cannot = c.codex ? L"Codex 앱의 세션이 아니라 여기서는 보낼 수 없습니다"
+                               : L"Claude 앱의 세션이 아니라(터미널 등) 여기서는 보낼 수 없습니다";
             // It may be a T3 Code thread's, which Bloom tells.
             c.t3Id = r->sessionId;
             c.notHere = c.cannot;
         } else if (c.appTitle.empty()) {
-            c.cannot = c.codex ? L"스레드 제목이 없어 Codex 앱에서 찾을 수 없어요"
-                               : L"제목이 아직 없어 Claude 앱에서 칸을 찾을 수 없어요";
+            c.cannot = c.codex ? L"스레드 제목이 없어 Codex 앱에서 찾을 수 없습니다"
+                               : L"제목이 아직 없어 Claude 앱에서 세션을 찾을 수 없습니다";
         }
     } else {
         c.fresh = true;
@@ -25435,7 +25435,7 @@ Controls::Grid BuildChat(folders::Popup& p) {
             std::wstring path = ai_sessions::Tidy(std::wstring(g_open->folderBox.Text()));
             DWORD attributes = path.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
             if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                SetStatus(L"그 폴더가 없어요", 2);
+                SetStatus(L"해당 폴더가 없습니다", 2);
             } else {
                 g_open->chat->folder = path;
                 g_open->chat->menu.clear();
