@@ -494,7 +494,7 @@
       "name": { "ko": "폭", "en": "Width", "ja": "幅", "zh": "宽度" },
       "about": {
         "ko": "100% 배율 기준입니다. 넘치면 곡 제목을 줄입니다",
-        "en": "Based on 100% scale. Truncates track titles on overflow",
+        "en": "At 100% scale. Long track titles are cut short",
         "ja": "100% スケール基準です。はみ出す場合は曲タイトルを省略します",
         "zh": "基于 100% 缩放比例。超出时将截断曲目标题"
       }
