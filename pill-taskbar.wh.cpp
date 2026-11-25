@@ -10924,14 +10924,13 @@ void RecheckFullscreen(Island& g);
 // the screen through Direct3D, asked at every such restack, not only the first:
 // a window over it minimizes it.
 // A window on the taskbar's monitor fills it, one a click could have put in
-// front (shown, not minimized, cloaked or a tool window). The desktop spans
-// every monitor and doesn't count.
+// front (shown, not minimized, cloaked or a tool window). The desktop doesn't
+// count (CoversMonitor).
 bool FilledHere(Island const& g) {
     HMONITOR monitor = core::MonitorOf(g.taskbar);
-    HWND desktop = GetShellWindow();
     for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
         DWORD cloaked = 0;
-        if (w == g.taskbar || w == g.hwnd || w == desktop || core::IsTaskbarWindow(w) ||
+        if (w == g.taskbar || w == g.hwnd || core::IsTaskbarWindow(w) ||
             (GetWindowLongPtrW(w, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) ||
             MonitorFromWindow(w, MONITOR_DEFAULTTONULL) != monitor ||
             (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
@@ -11072,10 +11071,21 @@ Island* Reach(Island& g) {
     return Of(taskbar);
 }
 
-// True while `window` still fills the island's monitor.
+// The desktop: the shell's window and the WorkerW ones behind its icons. They
+// span every monitor, but no app is in front through them: in front after
+// sign-in or a click on the wallpaper, they would count as a fullscreen app.
+bool IsDesktop(HWND window) {
+    WCHAR name[16];
+    return window == GetShellWindow() ||
+           (GetClassNameW(window, name, ARRAYSIZE(name)) &&
+            (wcscmp(name, L"Progman") == 0 || wcscmp(name, L"WorkerW") == 0));
+}
+
+// True while `window`, an app's (not the desktop), still fills the island's monitor.
 bool CoversMonitor(Island const& g, HWND window) {
     RECT monitor, rc;
-    return window && IsWindow(window) && IsWindowVisible(window) && !IsIconic(window) &&
+    return window && IsWindow(window) && !IsDesktop(window) && IsWindowVisible(window) &&
+           !IsIconic(window) &&
            MonitorRect(g, monitor) && GetWindowRect(window, &rc) && rc.left <= monitor.left &&
            rc.top <= monitor.top && rc.right >= monitor.right && rc.bottom >= monitor.bottom;
 }
