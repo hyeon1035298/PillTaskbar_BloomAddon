@@ -8974,6 +8974,7 @@ struct Island {
     bool fullscreen = false;  // a fullscreen app is active on the monitor
     HWND fullscreenWindow = nullptr;
     bool liftedTaskbar = false;  // made topmost to come out over a fullscreen window
+    bool cameOut = false;        // StartExpand brought it out; cleared as it goes in or the island hides
     bool unreachable = false;  // logged that the taskbar can't be asked yet
     bool bottom = false;       // at the bottom edge, under a bottom taskbar
     bool sharedEdge = false;   // another monitor is past the island's edge
@@ -10561,6 +10562,7 @@ void OnMorphed(int id, int morph) {
         Sync(g);
     } else if (g.phase == Phase::kCollapsing) {
         g.phase = Phase::kIdle;
+        g.cameOut = false;
         SinkLiftedTaskbar(g);
         Sync(g);
         SetHover(g);
@@ -10624,6 +10626,7 @@ void StartExpand(Island& g) {
         core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
     }
     g.phase = Phase::kExpanding;
+    g.cameOut = true;
     SetHover(g);
     Raise(g);
     // Out of the topmost band (a window fills the monitor, see StackIdle) the
@@ -10701,7 +10704,7 @@ void Hide(Island& g, PCWSTR why) {
     KillTimer(g.hwnd, kCrossingTimer);
     Phase was = g.phase;
     bool lifted = g.liftedTaskbar;
-    g.shown = g.inside = g.reaching = false;
+    g.shown = g.inside = g.reaching = g.cameOut = false;
     g.phase = Phase::kIdle;
     g.morph++;  // a running morph's end no longer counts, so its sink comes here
     bool sunk = SinkLiftedTaskbar(g);
@@ -10883,21 +10886,24 @@ void RecheckFullscreen(Island& g);
 // it is in again (SinkLiftedTaskbar). Otherwise a click on it, with the window
 // coming back to the front after, has the shell put it back under a browser in
 // F11 for a moment.
-// One that was topmost already as it came out is kept the same way once the
-// shell takes it out of the band while it's out: a click that fronts a window
-// the shell counts as fullscreen on its monitor would put it under that window
-// for a moment. From then on it counts as lifted, so it sinks back under that
-// window as it goes in. Hide and the morph's end make the island idle before
-// they sink it, so that sink isn't kept. Not over a game that holds the screen
-// through Direct3D: a window over it minimizes it.
+// One the island brought out while it was topmost already is kept the same way
+// once the shell takes it out of the band while it's out: a click that fronts a
+// window the shell counts as fullscreen on its monitor would put it under that
+// window for a moment. From then on it counts as lifted, so it sinks back under
+// that window as it goes in. Only one StartExpand brought out (cameOut): with
+// Windows' auto-hide off the island sits out for good, and a taskbar held over
+// a fullscreen video would never go in. Hide and the morph's end make the island
+// idle before they sink it, so that sink isn't kept. Never over a game that holds
+// the screen through Direct3D, asked at every such restack, not only the first:
+// a window over it minimizes it.
 bool KeepsTaskbarTopmost(HWND hwnd, HWND after) {
     Island* g = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!g) {
         return false;
     }
     bool topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST;
-    if (!g->liftedTaskbar && topmost && g->shown &&
-        (g->phase == Phase::kExpanding || g->phase == Phase::kOut)) {
+    if (topmost && (g->liftedTaskbar || (g->shown && g->cameOut &&
+                                         (g->phase == Phase::kExpanding || g->phase == Phase::kOut)))) {
         QUERY_USER_NOTIFICATION_STATE state{};
         bool d3d = SUCCEEDED(SHQueryUserNotificationState(&state)) &&
                    state == QUNS_RUNNING_D3D_FULL_SCREEN;
