@@ -1028,15 +1028,17 @@ void DiagLine(PCWSTR format, ...) {
         failedAt = GetTickCount() | 1;
         return;
     }
+    // With the date: the file outlives a day, and the old one is kept beside it.
     SYSTEMTIME t;
     GetLocalTime(&t);
+    WCHAR stamp[32];
+    swprintf_s(stamp, L"%04d-%02d-%02d %02d:%02d:%02d.%03d", t.wYear, t.wMonth, t.wDay, t.wHour,
+               t.wMinute, t.wSecond, t.wMilliseconds);
     int written = 0;
     if (repeats) {
-        written += fwprintf(f, L"%02d:%02d:%02d.%03d (the line above %lu more times)\n",
-                            t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, repeats);
+        written += fwprintf(f, L"%s (the line above %lu more times)\n", stamp, repeats);
     }
-    written += fwprintf(f, L"%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond,
-                        t.wMilliseconds, line);
+    written += fwprintf(f, L"%s %s\n", stamp, line);
     fclose(f);
     size += written > 0 ? written + 2 : 0;  // about: CRLF, mostly ASCII
     repeats = 0;
@@ -1416,8 +1418,9 @@ void (*g_onTaskbarMoved)(HWND) = nullptr;
 // while it morphs).
 void (*g_onTaskbarRestacked)(HWND) = nullptr;
 // True while a taskbar window has to stay in the topmost band: a restack that
-// would take it out of there keeps its place instead.
-bool (*g_keepsTaskbarTopmost)(HWND) = nullptr;
+// would take it out of there keeps its place instead. Also given the window the
+// restack would put it under.
+bool (*g_keepsTaskbarTopmost)(HWND taskbar, HWND after) = nullptr;
 // A taskbar window is going, e.g. with its monitor.
 void (*g_onTaskbarDestroyed)(HWND) = nullptr;
 // The primary taskbar turned vertical or back (F5); the shape features step
@@ -1526,7 +1529,7 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
                               (after != HWND_TOP && after != HWND_TOPMOST &&
                                !(GetWindowLongPtrW(after, GWL_EXSTYLE) & WS_EX_TOPMOST));
                 if (leaves) {
-                    Guard(L"Taskbar keeps topmost", [&] { keep = g_keepsTaskbarTopmost(hwnd); });
+                    Guard(L"Taskbar keeps topmost", [&] { keep = g_keepsTaskbarTopmost(hwnd, after); });
                 }
             }
             if (keep) {
@@ -10533,7 +10536,7 @@ void Raise(Island& g) {
 
 // ---- morph ----------------------------------------------------------------------
 
-void SinkLiftedTaskbar(Island& g);
+bool SinkLiftedTaskbar(Island& g);
 bool CoversMonitor(Island const& g, HWND window);
 
 void OnMorphed(int id, int morph) {
@@ -10569,19 +10572,20 @@ void OnMorphed(int id, int morph) {
 // front, where the shell had it, so the edge strip it leaves on the screen
 // doesn't line that window. Only while that window still fills the monitor:
 // otherwise the taskbar is where it belongs anyway, topmost, and taking it out
-// of that band would leave it under every maximized window.
-void SinkLiftedTaskbar(Island& g) {
+// of that band would leave it under every maximized window. True if it sank.
+bool SinkLiftedTaskbar(Island& g) {
     if (!std::exchange(g.liftedTaskbar, false)) {
-        return;
+        return false;
     }
     HWND front = GetForegroundWindow();
     if (!front || front == g.taskbar || front == g.hwnd || !CoversMonitor(g, front) ||
         (GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-        return;
+        return false;
     }
     constexpr UINT kFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     SetWindowPos(g.taskbar, HWND_NOTOPMOST, 0, 0, 0, 0, kFlags);
     SetWindowPos(g.taskbar, front, 0, 0, 0, 0, kFlags);
+    return true;
 }
 
 // The shape toward the pill (`out`) or the island, from wherever it is now, so
@@ -10614,7 +10618,7 @@ void Morph(Island& g, bool out) {
 // The taskbar is coming out: from the island, or from where a shrink left
 // off, to the pill, over the taskbar.
 void StartExpand(Island& g) {
-    core::DiagLine(L"StartExpand %d from %d", g.id, (int)g.phase);
+    Phase from = g.phase;
     if (g.phase == Phase::kIdle) {
         // The pill as it is now.
         core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
@@ -10628,11 +10632,15 @@ void StartExpand(Island& g) {
     // browser in F11 marks its window fullscreen with the shell, which then
     // keeps the taskbar under it, so the taskbar came out unseen behind it.
     // Back under the window in front as it goes in (SinkLiftedTaskbar).
-    if (!(GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-        g.liftedTaskbar = true;
+    bool topmost = GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST;
+    bool lifted = false;
+    if (!topmost) {
+        lifted = g.liftedTaskbar = true;
         SetWindowPos(g.taskbar, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
+    core::DiagLine(L"StartExpand %d from %d taskbar %p topmost %d lifted %d", g.id, (int)from,
+                   g.taskbar, topmost, lifted);
     SetRegion(g);
     Morph(g, true);
 }
@@ -10687,13 +10695,18 @@ void Show(Island& g) {
 
 void EndDrag(Island& g);
 
-void Hide(Island& g) {
+// `why` is only for the diagnostics.
+void Hide(Island& g, PCWSTR why) {
     EndDrag(g);
     KillTimer(g.hwnd, kCrossingTimer);
+    Phase was = g.phase;
+    bool lifted = g.liftedTaskbar;
     g.shown = g.inside = g.reaching = false;
     g.phase = Phase::kIdle;
     g.morph++;  // a running morph's end no longer counts, so its sink comes here
-    SinkLiftedTaskbar(g);
+    bool sunk = SinkLiftedTaskbar(g);
+    core::DiagLine(L"Hide %d (%s) from phase %d lifted %d collapsed %d sunk %d", g.id, why,
+                   (int)was, lifted, autohide::Collapsed(g.taskbar), sunk);
     ShowWindow(g.hwnd, SW_HIDE);
     // Shown again from transparent, not with the last frame.
     core::Guard(L"Island fade", [&] {
@@ -10870,9 +10883,42 @@ void RecheckFullscreen(Island& g);
 // it is in again (SinkLiftedTaskbar). Otherwise a click on it, with the window
 // coming back to the front after, has the shell put it back under a browser in
 // F11 for a moment.
-bool KeepsTaskbarTopmost(HWND hwnd) {
+// One that was topmost already as it came out is kept the same way once the
+// shell takes it out of the band while it's out: a click that fronts a window
+// the shell counts as fullscreen on its monitor would put it under that window
+// for a moment. From then on it counts as lifted, so it sinks back under that
+// window as it goes in. Hide and the morph's end make the island idle before
+// they sink it, so that sink isn't kept. Not over a game that holds the screen
+// through Direct3D: a window over it minimizes it.
+bool KeepsTaskbarTopmost(HWND hwnd, HWND after) {
     Island* g = OnIslandThread() ? Of(hwnd) : nullptr;
-    return g && g->liftedTaskbar;
+    if (!g) {
+        return false;
+    }
+    bool topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST;
+    if (!g->liftedTaskbar && topmost && g->shown &&
+        (g->phase == Phase::kExpanding || g->phase == Phase::kOut)) {
+        QUERY_USER_NOTIFICATION_STATE state{};
+        bool d3d = SUCCEEDED(SHQueryUserNotificationState(&state)) &&
+                   state == QUNS_RUNNING_D3D_FULL_SCREEN;
+        g->liftedTaskbar = !d3d;
+    }
+    // Only a restack that really takes it out of the band: one of a taskbar
+    // already out of it, under a fullscreen app, comes with every activation.
+    if (topmost) {
+        HWND front = GetForegroundWindow();
+        WCHAR name[64] = L"";
+        if (front) {
+            GetClassNameW(front, name, ARRAYSIZE(name));
+        }
+        POINT pt{};
+        GetCursorPos(&pt);
+        core::DiagLine(L"Restack out of topmost %d taskbar %p after %p keep %d phase %d shown %d "
+                       L"front %p %s cursor %d,%d",
+                       g->id, hwnd, after, g->liftedTaskbar, (int)g->phase, g->shown, front, name,
+                       pt.x, pt.y);
+    }
+    return g->liftedTaskbar;
 }
 
 // Explorer raises the taskbar as it comes out; a morph stays on top of it, and
@@ -10987,10 +11033,23 @@ bool IsBrowserWindow(HWND window) {
            (wcscmp(name, L"Chrome_WidgetWin_1") == 0 || wcscmp(name, L"MozillaWindowClass") == 0);
 }
 
-void SetFullscreen(Island& g, HWND window) {
+// `seen` is the window the decision looked at and `source` what asked (with
+// `rude`, the activation's word, -1 for none), only for the diagnostics.
+void SetFullscreen(Island& g, HWND window, HWND seen, PCWSTR source, int rude) {
     g.fullscreenWindow = window;
     bool fullscreen = window != nullptr;
     if (fullscreen != g.fullscreen) {
+        WCHAR name[64] = L"";
+        RECT rc{};
+        if (seen) {
+            GetClassNameW(seen, name, ARRAYSIZE(name));
+            GetWindowRect(seen, &rc);
+        }
+        core::DiagLine(L"Fullscreen %d -> %d by %s rude %d: %p %s %d,%d..%d,%d zoomed %d covers %d "
+                       L"phase %d collapsed %d",
+                       g.id, fullscreen, source, rude, seen, name, rc.left, rc.top, rc.right,
+                       rc.bottom, seen && IsZoomed(seen), CoversMonitor(g, seen), (int)g.phase,
+                       autohide::Collapsed(g.taskbar));
         g.fullscreen = fullscreen;
         Sync(g);
     }
@@ -11000,9 +11059,10 @@ void OnActivated(Island& g, HWND window, bool rude) {
     bool here = window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) ==
                               core::MonitorOf(g.taskbar);
     if (here || !window) {
-        SetFullscreen(g, rude && here && !IsZoomed(window) && !IsBrowserWindow(window) ? window : nullptr);
+        SetFullscreen(g, rude && here && !IsZoomed(window) && !IsBrowserWindow(window) ? window : nullptr,
+                      window, L"activation", rude);
     } else if (!CoversMonitor(g, g.fullscreenWindow)) {
-        SetFullscreen(g, nullptr);
+        SetFullscreen(g, nullptr, g.fullscreenWindow, L"activation elsewhere", rude);
     }
 }
 
@@ -11017,7 +11077,7 @@ void OnActivated(Island& g, HWND window, bool rude) {
 void RecheckFullscreen(Island& g) {
     if (GetWindowLongPtrW(g.taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST) {
         if (!CoversMonitor(g, g.fullscreenWindow)) {
-            SetFullscreen(g, nullptr);  // the game left fullscreen
+            SetFullscreen(g, nullptr, g.fullscreenWindow, L"recheck", -1);  // the game left fullscreen
         }
         return;
     }
@@ -11031,7 +11091,7 @@ void RecheckFullscreen(Island& g) {
     bool d3d = SUCCEEDED(SHQueryUserNotificationState(&state)) &&
                state == QUNS_RUNNING_D3D_FULL_SCREEN;
     if (!IsZoomed(front) || d3d) {
-        SetFullscreen(g, front);
+        SetFullscreen(g, front, front, L"recheck", -1);
     }
 }
 
@@ -11088,7 +11148,7 @@ void Sync(Island& g) {
     if (want && AtBottom(g.taskbar, monitor) != g.bottom) {
         // The taskbar went to the other edge: the island starts there afresh.
         if (g.shown) {
-            Hide(g);
+            Hide(g, L"edge change");
         }
         g.bottom = !g.bottom;
         g.shape = {};
@@ -11101,6 +11161,7 @@ void Sync(Island& g) {
             d.filletSize = 0;
         }
     }
+    bool laidOutTried = want;
     if (want) {
         FindClock();
         bool laidOut = false;
@@ -11110,7 +11171,10 @@ void Sync(Island& g) {
     if (want && !g.shown) {
         Show(g);
     } else if (!want && g.shown) {
-        Hide(g);
+        Hide(g, core::g_vertical ? L"vertical"
+                : g.fullscreen   ? L"fullscreen"
+                : laidOutTried   ? L"layout failed"
+                                 : L"no monitor");
     } else if (want && g.phase == Phase::kIdle && !settings::g.island.clickToReveal) {
         // In click mode it went over the taskbar as it showed and stays
         // there (OnTaskbarRestacked); raising it on every change of what it
@@ -15841,7 +15905,8 @@ void GiveBackTick() {
     bool popup = (g_popup && g_popup->flyout && g_popup->flyout.IsOpen()) || g_previewWait;
     if (held && !popup && GetTickCount64() - g_giveBack->since < kGiveBackHeldMs) return;  // next tick
     DropGiveBack();
-    std::wstring front = ClassOf(GetForegroundWindow());
+    HWND bar = GetForegroundWindow();
+    std::wstring front = ClassOf(bar);
     if (held || popup || g_unloading || (front != L"Shell_TrayWnd" && front != L"Shell_SecondaryTrayWnd"))
         return;
     HWND to = nullptr;
@@ -15853,6 +15918,16 @@ void GiveBackTick() {
     if (!to) to = GetShellWindow();  // no app window: the desktop, as after the last one closes
     BOOL ok = to && SetForegroundWindow(to);
     Wh_Log(L"activation back from the taskbar: %d", ok);
+    // The window fronted here may be one the shell counts as fullscreen, which
+    // then takes the taskbar out of the topmost band.
+    POINT pt{};
+    RECT barRect{};
+    bool onBar = GetCursorPos(&pt) && GetWindowRect(bar, &barRect) && PtInRect(&barRect, pt);
+    core::DiagLine(L"Give back from %p to %p %s monitor %p (taskbar's %p): %d, cursor on taskbar %d, "
+                   L"taskbar topmost %d",
+                   bar, to, ClassOf(to).c_str(), MonitorFromWindow(to, MONITOR_DEFAULTTONULL),
+                   core::MonitorOf(bar), ok, onBar,
+                   (GetWindowLongPtrW(bar, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0);
 }
 
 void GiveBackLater() {
