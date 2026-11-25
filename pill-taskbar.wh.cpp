@@ -1104,6 +1104,10 @@ bool SameValue(wf::IInspectable const& a, wf::IInspectable const& b) {
         auto y = b.try_as<wf::IReference<Visibility>>();
         return y && x.Value() == y.Value();
     }
+    if (auto x = a.try_as<wf::IReference<ElementTheme>>()) {
+        auto y = b.try_as<wf::IReference<ElementTheme>>();
+        return y && x.Value() == y.Value();
+    }
     return false;
 }
 
@@ -2644,6 +2648,31 @@ void StyleFrame(FrameworkElement const& frame, HWND hwnd) {
     region::Track(frame, hwnd);
 }
 
+// How deep under the root explorer's own theme settings are looked for: the tray's
+// panels, where the widgets sit, are the deepest that draw in the theme.
+constexpr int kThemeDepth = 14;
+
+// The root and every element under it that explorer gives a theme of its own
+// (Windows' one, nearer the widgets and the pill than the root's) are held to
+// the set theme, also when explorer sets them again as Windows' theme changes.
+void HoldTheme(FrameworkElement const& content, ElementTheme theme) {
+    auto value = box_value(theme);
+    core::Keep(content, FrameworkElement::RequestedThemeProperty(), value);
+    int held = 0;
+    core::FindDescendant(
+        content,
+        [&](FrameworkElement const& e) {
+            if (e.RequestedTheme() != ElementTheme::Default) {
+                core::Keep(e, FrameworkElement::RequestedThemeProperty(), value);
+                held++;
+            }
+            return false;
+        },
+        kThemeDepth);
+    core::DiagLine(L"Theme %d held on the root and %d under it, root now %d", (int)theme, held,
+                   (int)content.ActualTheme());
+}
+
 // Everything already in a taskbar's tree.
 void StyleRoot(XamlRoot const& root, HWND hwnd) {
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
@@ -2652,9 +2681,7 @@ void StyleRoot(XamlRoot const& root, HWND hwnd) {
     }
     // A theme set (Bloom's own) over Windows': all under the root follows it.
     if (auto set = settings::g.pill.theme; set != settings::Theme::kSystem) {
-        core::Set(content, FrameworkElement::RequestedThemeProperty(),
-                  box_value(set == settings::Theme::kDark ? ElementTheme::Dark
-                                                          : ElementTheme::Light));
+        HoldTheme(content, set == settings::Theme::kDark ? ElementTheme::Dark : ElementTheme::Light);
     }
     if (auto frame = core::FindDescendant(
             content, [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); },
@@ -10896,6 +10923,28 @@ void RecheckFullscreen(Island& g);
 // idle before they sink it, so that sink isn't kept. Never over a game that holds
 // the screen through Direct3D, asked at every such restack, not only the first:
 // a window over it minimizes it.
+// A window on the taskbar's monitor fills it, one a click could have put in
+// front (shown, not minimized, cloaked or a tool window). The desktop spans
+// every monitor and doesn't count.
+bool FilledHere(Island const& g) {
+    HMONITOR monitor = core::MonitorOf(g.taskbar);
+    HWND desktop = GetShellWindow();
+    for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        DWORD cloaked = 0;
+        if (w == g.taskbar || w == g.hwnd || w == desktop || core::IsTaskbarWindow(w) ||
+            (GetWindowLongPtrW(w, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) ||
+            MonitorFromWindow(w, MONITOR_DEFAULTTONULL) != monitor ||
+            (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+             cloaked)) {
+            continue;
+        }
+        if (CoversMonitor(g, w)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool KeepsTaskbarTopmost(HWND hwnd, HWND after) {
     Island* g = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!g) {
@@ -10909,6 +10958,12 @@ bool KeepsTaskbarTopmost(HWND hwnd, HWND after) {
                    state == QUNS_RUNNING_D3D_FULL_SCREEN;
         g->liftedTaskbar = !d3d;
     }
+    // The shell takes every taskbar out of the band for a window it counts as
+    // fullscreen, also one on another monitor (a borderless window maximized
+    // there, its edge a few pixels over this one), and keeps it out at each
+    // activation after. With nothing filling this monitor that would only put
+    // the taskbar under the window clicked next: it stays in the band.
+    bool stray = topmost && !g->liftedTaskbar && !FilledHere(*g);
     // Only a restack that really takes it out of the band: one of a taskbar
     // already out of it, under a fullscreen app, comes with every activation.
     if (topmost) {
@@ -10919,12 +10974,12 @@ bool KeepsTaskbarTopmost(HWND hwnd, HWND after) {
         }
         POINT pt{};
         GetCursorPos(&pt);
-        core::DiagLine(L"Restack out of topmost %d taskbar %p after %p keep %d phase %d shown %d "
-                       L"front %p %s cursor %d,%d",
-                       g->id, hwnd, after, g->liftedTaskbar, (int)g->phase, g->shown, front, name,
-                       pt.x, pt.y);
+        core::DiagLine(L"Restack out of topmost %d taskbar %p after %p keep %d stray %d phase %d "
+                       L"shown %d front %p %s cursor %d,%d",
+                       g->id, hwnd, after, g->liftedTaskbar, stray, (int)g->phase, g->shown, front,
+                       name, pt.x, pt.y);
     }
-    return g->liftedTaskbar;
+    return g->liftedTaskbar || stray;
 }
 
 // Explorer raises the taskbar as it comes out; a morph stays on top of it, and
