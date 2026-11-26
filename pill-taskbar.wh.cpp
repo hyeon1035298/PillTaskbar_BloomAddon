@@ -316,7 +316,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - appSpacing: 4
     $name: 앱 사이 간격 (px)
     $description: 열린 폴더의 앱 사이 간격 (0~40)
-  - popupSide: below
+  - popupSide: auto
     $name: 폴더가 열리는 쪽
     $options:
     - auto: 작업표시줄 반대쪽
@@ -15489,7 +15489,12 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop, d
         if (!g_popup->selfClose) GiveBackLater();
         ReleasePopupHold();
     }));
-    bool below = p.look.side == Look::Side::Auto ? taskbarOnTop : p.look.side == Look::Side::Below;
+    // A horizontal taskbar's popup opens away from its edge whatever side is set: toward the
+    // edge it is off its monitor, and XAML pushes it back over the taskbar, where CutOverTaskbar
+    // leaves only its rim (a side set for a top taskbar, kept after the taskbar moved down).
+    bool below = p.look.side == Look::Side::Auto || !core::g_vertical
+                     ? taskbarOnTop
+                     : p.look.side == Look::Side::Below;
     // `gap` is from the pill's edge, not the button's: a button may stop short of it (the
     // usage meter does). The pill is the taskbar's XAML root less its pieces' margin (the
     // apps piece keeps the tray's).
