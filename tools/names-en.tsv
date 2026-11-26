@@ -163,10 +163,6 @@ folders.iconSize	Folder icon size (px)
 folders.iconSize#about	App icon size inside open folders (16–96)
 folders.appSpacing	App spacing (px)
 folders.appSpacing#about	Spacing between apps inside open folders (0–40)
-folders.popupSide	Folder open direction
-folders.popupSide=auto	Away from taskbar
-folders.popupSide=above	Above taskbar
-folders.popupSide=below	Below taskbar
 folders.popupGap	Distance from taskbar (px)
 folders.popupGap#about	Gap between the taskbar and the open folder popup or its menu (0–200)
 folders.cornerRadius	Corner radius (px)

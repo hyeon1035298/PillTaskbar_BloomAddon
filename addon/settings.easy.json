@@ -590,15 +590,6 @@
       "name": { "ko": "앱 사이 간격", "en": "App spacing", "ja": "アプリ間の間隔", "zh": "应用间距" },
       "about": ""
     },
-    "folders.popupSide": {
-      "name": { "ko": "폴더가 열리는 쪽", "en": "Folder open direction", "ja": "フォルダーが開く方向", "zh": "文件夹展开方向" },
-      "about": "",
-      "options": {
-        "auto": { "name": { "ko": "작업표시줄 반대쪽", "en": "Away from taskbar", "ja": "タスクバーの反対側", "zh": "背离任务栏方向" } },
-        "above": { "name": { "ko": "작업표시줄 위", "en": "Above taskbar", "ja": "タスクバーの上", "zh": "任务栏上方" } },
-        "below": { "name": { "ko": "작업표시줄 아래", "en": "Below taskbar", "ja": "タスクバーの下", "zh": "任务栏下方" } }
-      }
-    },
     "folders.popupGap": {
       "name": { "ko": "작업표시줄과의 거리", "en": "Distance from taskbar", "ja": "タスクバーからの距離", "zh": "与任务栏的距离" },
       "about": ""

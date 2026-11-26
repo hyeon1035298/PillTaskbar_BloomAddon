@@ -316,12 +316,6 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
   - appSpacing: 4
     $name: 앱 사이 간격 (px)
     $description: 열린 폴더의 앱 사이 간격 (0~40)
-  - popupSide: auto
-    $name: 폴더가 열리는 쪽
-    $options:
-    - auto: 작업표시줄 반대쪽
-    - above: 작업표시줄 위
-    - below: 작업표시줄 아래
   - popupGap: 8
     $name: 작업표시줄과의 거리 (px)
     $description: 작업표시줄과 열린 폴더나 그 메뉴 사이의 거리 (0~200)
@@ -480,7 +474,6 @@ enum class Style { kBloom, kGlass, kWindowGlass };
 enum class Theme { kSystem, kDark, kLight };
 enum class Bell { kShown, kWhenNew, kHidden };
 enum class Clock { kTimeDate, kTime, kHidden };
-enum class FolderSide { kAuto, kAbove, kBelow };
 enum class LogoColor { kMono, kBrand };
 enum class StartMode { kWindows, kHidden, kBloom };
 enum class Edge { kWindows, kTop, kBottom };
@@ -566,7 +559,6 @@ struct Settings {
         bool showLabels;
         int iconSize, appSpacing, popupGap, cornerRadius;  // px
         int cornerSmoothing, popupScale;                   // %
-        FolderSide popupSide;
         bool autoRunning;
         std::wstring runningName;
         bool operator==(const Folders&) const = default;
@@ -679,8 +671,6 @@ void Load() {
     f.showLabels = Wh_GetIntSetting(L"folders.showLabels");
     f.iconSize = Clamped(L"folders.iconSize", 16, 96);
     f.appSpacing = Clamped(L"folders.appSpacing", 0, 40);
-    f.popupSide =
-        (FolderSide)Choice(L"folders.popupSide", {L"auto", L"above", L"below"});
     f.popupGap = Clamped(L"folders.popupGap", 0, 200);
     f.cornerRadius = Clamped(L"folders.cornerRadius", 0, 40);
     f.cornerSmoothing = Clamped(L"folders.cornerSmoothing", 0, 100);
@@ -11880,11 +11870,9 @@ std::atomic<bool> g_unloading;
 std::atomic<int> g_mergeDelayMs = 500;
 // How an open folder and its menu look, from the settings.
 struct Look {
-    enum class Side { Auto, Above, Below };
     bool labels = true;
     int iconSize = 32, spacing = 4, gap = 8, radius = 20, smoothing = 60;  // DIPs, smoothing %
     int scale = 100;  // % of the whole popup; the gap stays as set
-    Side side = Side::Auto;
 };
 Look g_look;  // under g_lock
 bool g_looseOn;            // under g_lock
@@ -15489,12 +15477,9 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop, d
         if (!g_popup->selfClose) GiveBackLater();
         ReleasePopupHold();
     }));
-    // A horizontal taskbar's popup opens away from its edge whatever side is set: toward the
-    // edge it is off its monitor, and XAML pushes it back over the taskbar, where CutOverTaskbar
-    // leaves only its rim (a side set for a top taskbar, kept after the taskbar moved down).
-    bool below = p.look.side == Look::Side::Auto || !core::g_vertical
-                     ? taskbarOnTop
-                     : p.look.side == Look::Side::Below;
+    // Always away from the taskbar's edge: toward it the popup is off its monitor, and XAML
+    // pushes it back over the taskbar, where CutOverTaskbar leaves only its rim.
+    bool below = taskbarOnTop;
     // `gap` is from the pill's edge, not the button's: a button may stop short of it (the
     // usage meter does). The pill is the taskbar's XAML root less its pieces' margin (the
     // apps piece keeps the tray's).
@@ -17406,9 +17391,6 @@ void ApplySettings() {
     look.radius = f.cornerRadius;
     look.smoothing = f.cornerSmoothing;
     look.scale = f.popupScale;
-    look.side = f.popupSide == settings::FolderSide::kAbove   ? Look::Side::Above
-                : f.popupSide == settings::FolderSide::kBelow ? Look::Side::Below
-                                                              : Look::Side::Auto;
     AcquireSRWLockExclusive(&g_lock);
     g_look = look;
     g_root = root;
@@ -25827,7 +25809,6 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> on
     folders::g_folderTaskbar = taskbar;
     folders::Popup& p = folders::NewPopup(kKey, anchor);
     p.look.scale = 100;  // Bloom's sizes, not the folder popup's
-    p.look.side = folders::Look::Side::Auto;  // away from the taskbar, whichever side folders open on
     Open& open = g_open.emplace();
     open.dark = p.colors != &folders::kLightPalette;
     open.colors = MakeColors(open.dark);
