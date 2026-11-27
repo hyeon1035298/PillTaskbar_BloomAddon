@@ -9011,6 +9011,7 @@ struct Island {
 
     com_ptr<ID2D1Factory1> d2d;
     com_ptr<ID2D1Device> device;
+    com_ptr<ID3D11Device> d3d;  // under `device`, asked whether it was removed
     com_ptr<IDWriteFactory> dwrite;
     com_ptr<IWICImagingFactory> wic;
 
@@ -9549,6 +9550,7 @@ void CreateDevice(Island& g) {
     com_ptr<ID2D1Device> device;
     check_hresult(g.d2d->CreateDevice(d3d.as<IDXGIDevice>().get(), device.put()));
     g.device = device;
+    g.d3d = d3d;
 }
 
 bool DeviceLost(winrt::hresult hr) {
@@ -10467,14 +10469,21 @@ bool Layout(Island& g) {
 }
 
 bool LayoutRecovering(Island& g) {
-    try {
-        return Layout(g);
-    } catch (winrt::hresult_error const& e) {
-        if (!DeviceLost(e.code())) {
-            throw;
+    // The device is asked first: after a GPU reset BeginDraw may go on succeeding on
+    // the removed device, and the island stayed an empty black body.
+    HRESULT lost = g.d3d ? g.d3d->GetDeviceRemovedReason() : S_OK;
+    if (SUCCEEDED(lost)) {
+        try {
+            return Layout(g);
+        } catch (winrt::hresult_error const& e) {
+            if (!DeviceLost(e.code())) {
+                throw;
+            }
+            lost = e.code();
         }
-        Wh_Log(L"Island device lost");
     }
+    Wh_Log(L"Island device lost: %08X", lost);
+    core::DiagLine(L"Island %d device lost: %08X", g.id, lost);
     Recover(g);
     g.shape = {};
     g.filletSize = 0;
