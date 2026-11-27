@@ -14287,6 +14287,7 @@ bool JustClosed(const std::wstring& folder) {
 }
 
 void RunFolderMenuIn(HWND owner, const std::wstring& folder, POINT pt);
+bool TaskbarOnTop(POINT pt);
 
 void RunFolderMenu(const std::wstring& folder, POINT pt) {
     if (IsLoose(folder)) return;  // no files to list
@@ -14297,15 +14298,17 @@ void RunFolderMenu(const std::wstring& folder, POINT pt) {
 void RunFolderMenuIn(HWND owner, const std::wstring& folder, POINT pt) {
     int iconSize = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForWindow(owner));
 
-    // Open from the taskbar edge rather than under the cursor.
+    // Open away from the taskbar, from the work area's edge when the taskbar keeps one. The
+    // side comes from the monitor, not the work area: an auto-hiding taskbar keeps none, and
+    // the menu then opens at the pointer.
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &monitor);
     UINT flags = TPM_RETURNCMD | TPM_CENTERALIGN;
-    if (pt.y >= monitor.rcWork.bottom) {
-        pt.y = monitor.rcWork.bottom;
+    if (TaskbarOnTop(pt)) {
+        pt.y = std::max(pt.y, monitor.rcWork.top);
+    } else {
+        pt.y = std::min(pt.y, monitor.rcWork.bottom);
         flags |= TPM_BOTTOMALIGN;
-    } else if (pt.y < monitor.rcWork.top) {
-        pt.y = monitor.rcWork.top;
     }
 
     for (bool reopen = true; reopen && !g_unloading;) {
@@ -25798,8 +25801,11 @@ void Refresh() {
     }
 }
 
+bool TaskbarAtTop(HWND taskbar);
+
 // Opens the details over the meter, or closes them when the click that just
-// closed them was on the meter.
+// closed them was on the meter. Without `onTop` the side is the taskbar's own, not
+// the pointer's monitor's (a touch, or a pointer that has moved on).
 void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> onTop) {
     if (folders::JustClosed(kKey)) {
         return;
@@ -25813,8 +25819,6 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> on
         core::g_popupDropsTimer = folders::PopupDropsTimer;
         g_ownsTimerHook = true;
     }
-    POINT pt;
-    GetCursorPos(&pt);
     folders::g_folderTaskbar = taskbar;
     folders::Popup& p = folders::NewPopup(kKey, anchor);
     p.look.scale = 100;  // Bloom's sizes, not the folder popup's
@@ -25862,7 +25866,7 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> on
             open.room.Padding(RoomPadding(false));
             shift = (open.spareRight - open.spareLeft) / 2;
         }
-        folders::Present(p, anchor, onTop ? *onTop : folders::TaskbarOnTop(pt), shift);
+        folders::Present(p, anchor, onTop ? *onTop : TaskbarAtTop(taskbar), shift);
         folders::Keep(p, flyout.Opened(winrt::auto_revoke, [](auto&&, auto&&) {
             core::Guard(L"Usage details opened", [] {
                 if (Ours() && !std::exchange(g_open->shownOnce, true) && folders::g_popup->content &&
