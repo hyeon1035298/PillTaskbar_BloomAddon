@@ -2755,9 +2755,10 @@ void Restore() {
 namespace widgets {
 // ============================================================================
 // The media player and the usage meter sit in horizontal panels inserted in
-// each taskbar's tray (StackPanel#SystemTrayFrameGrid), one before the tray
-// icons and one after the clock, so they are part of the tray piece of the
-// pill. Every taskbar gets elements of its own: one can't be in two trees.
+// each taskbar's tray (SystemTrayFrameGrid: a StackPanel on newer builds, a
+// Grid with a column for each part on older ones), one before the tray icons
+// and one after the clock, so they are part of the tray piece of the pill.
+// Every taskbar gets elements of its own: one can't be in two trees.
 // Taskbar thread only.
 
 enum class Side { kStart, kEnd };
@@ -2804,13 +2805,18 @@ Bar& BarOf(HWND hwnd) {
     return bar;
 }
 
+// A place in the tray is a slot: a child index in a StackPanel, a column in a
+// Grid.
+
 // Just after the child holding the clock and the show-desktop sliver that
 // follows it, so the pill ends with the widgets; else at the end.
-uint32_t EndIndex(Controls::StackPanel const& tray) {
+uint32_t EndSlot(Controls::Panel const& tray) {
+    using G = Controls::Grid;
     auto children = tray.Children();
-    auto named = [&](uint32_t i, PCWSTR name) {
-        auto child = children.GetAt(i).try_as<FrameworkElement>();
-        return child && child.Name() == name;
+    auto grid = tray.try_as<G>();
+    auto after = [&](uint32_t i) {
+        auto child = children.GetAt(i).as<FrameworkElement>();
+        return grid ? uint32_t(G::GetColumn(child) + G::GetColumnSpan(child)) : i + 1;
     };
     for (uint32_t i = 0; i < children.Size(); i++) {
         auto child = children.GetAt(i).try_as<FrameworkElement>();
@@ -2819,11 +2825,78 @@ uint32_t EndIndex(Controls::StackPanel const& tray) {
                           child,
                           [](auto& e) { return e.Name() == L"NotificationCenterButton"; },
                           3))) {
-            return i + 1 < children.Size() && named(i + 1, L"ShowDesktopStack") ? i + 2
-                                                                                : i + 1;
+            uint32_t slot = after(i);
+            uint32_t desk;
+            auto sliver = core::ChildNamed(tray, L"ShowDesktopStack");
+            if (sliver && children.IndexOf(sliver, desk) &&
+                (grid ? uint32_t(G::GetColumn(sliver)) : desk) == slot) {
+                slot = after(desk);
+            }
+            return slot;
         }
     }
-    return children.Size();
+    return grid ? grid.ColumnDefinitions().Size() : children.Size();
+}
+
+// As a column is made (`by` 1) or taken (`by` -1) at `column` of a Grid: the
+// children from there on move with it, and one lying across it grows or
+// shrinks.
+void ShiftColumns(Controls::Grid const& grid, int column, int by) {
+    using G = Controls::Grid;
+    for (auto const& child : grid.Children()) {
+        auto e = child.try_as<FrameworkElement>();
+        if (!e) {
+            continue;
+        }
+        int start = G::GetColumn(e), span = G::GetColumnSpan(e);
+        if (by > 0 ? start >= column : start > column) {
+            G::SetColumn(e, start + by);
+        } else if (start < column && start + span > column) {
+            G::SetColumnSpan(e, std::max(1, span + by));
+        }
+    }
+}
+
+// Puts `host` in the tray at `slot`. A Grid gets a column of the host's own
+// width there.
+void InsertInTray(Controls::Panel const& tray,
+                  uint32_t slot,
+                  FrameworkElement const& host) {
+    auto children = tray.Children();
+    auto grid = tray.try_as<Controls::Grid>();
+    if (!grid) {
+        children.InsertAt(std::min(slot, children.Size()), host);
+        return;
+    }
+    auto columns = grid.ColumnDefinitions();
+    slot = std::min(slot, columns.Size());
+    Controls::ColumnDefinition definition;
+    definition.Width(GridLengthHelper::Auto());
+    columns.InsertAt(slot, definition);
+    ShiftColumns(grid, (int)slot, 1);
+    Controls::Grid::SetColumn(host, (int)slot);
+    children.Append(host);
+}
+
+// Takes `host` out of the tray; a Grid loses the column made for it.
+void TakeFromTray(FrameworkElement const& host) {
+    auto tray = core::Parent(host).try_as<Controls::Panel>();
+    uint32_t index;
+    if (!tray || !tray.Children().IndexOf(host, index)) {
+        return;
+    }
+    tray.Children().RemoveAt(index);
+    auto grid = tray.try_as<Controls::Grid>();
+    if (!grid) {
+        return;
+    }
+    int column = Controls::Grid::GetColumn(host);
+    auto columns = grid.ColumnDefinitions();
+    if (column < 0 || column >= (int)columns.Size()) {
+        return;
+    }
+    columns.RemoveAt(column);
+    ShiftColumns(grid, column, -1);
 }
 
 Controls::StackPanel Host(Bar& bar, Side side) {
@@ -2837,13 +2910,16 @@ Controls::StackPanel Host(Bar& bar, Side side) {
         content, [](auto& e) { return core::IsClass(e, L"SystemTray.SystemTrayFrame"); },
         8);
     auto tray = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid")
-                    .try_as<Controls::StackPanel>();
-    if (!tray) {
-        // shortcut: older builds have a Grid here; add a column there to
-        // support them.
+                    .try_as<Controls::Panel>();
+    auto grid = tray.try_as<Controls::Grid>();
+    // Another kind of panel, or a Grid without columns, lays its children
+    // out in a way not known here.
+    if (!tray || !(tray.try_as<Controls::StackPanel>() ||
+                   (grid && grid.ColumnDefinitions().Size() > 0))) {
         if (!std::exchange(bar.noTray, true)) {
-            Wh_Log(L"No StackPanel tray for widgets on %08X",
-                   (DWORD)(ULONG_PTR)bar.hwnd);
+            Wh_Log(L"No tray panel for widgets on %08X: %s",
+                   (DWORD)(ULONG_PTR)bar.hwnd,
+                   tray ? winrt::get_class_name(tray).c_str() : L"none");
         }
         return nullptr;
     }
@@ -2859,10 +2935,10 @@ Controls::StackPanel Host(Bar& bar, Side side) {
     host.Spacing(8);
     if (side == Side::kStart) {
         host.Margin({0, 0, kHostGap, 0});
-        tray.Children().InsertAt(0, host);
+        InsertInTray(tray, 0, host);
     } else {
         host.Margin({kHostGap, 0, 0, 0});
-        tray.Children().InsertAt(EndIndex(tray), host);
+        InsertInTray(tray, EndSlot(tray), host);
     }
     cached = host;
     for (auto& item : bar.items) {
@@ -2956,12 +3032,7 @@ void Restore() {
     for (auto& bar : g_bars) {
         for (auto& cached : bar.hosts) {
             if (auto host = cached.get()) {
-                if (auto tray = core::Parent(host).try_as<Controls::Panel>()) {
-                    uint32_t index;
-                    if (tray.Children().IndexOf(host, index)) {
-                        tray.Children().RemoveAt(index);
-                    }
-                }
+                TakeFromTray(host);
             }
         }
     }
