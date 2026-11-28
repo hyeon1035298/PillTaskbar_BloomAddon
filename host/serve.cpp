@@ -37,6 +37,9 @@ constexpr DWORD kWindhawkPollMs = 5000;
 constexpr int kContinue = -100;
 // How long the runtime in ShellHost gets to bring the mod up.
 constexpr DWORD kPanelStartMs = 15000;
+// How long a new host waits for one that is stopping (or stepping down for an update)
+// to exit: the old host needs up to kUnloadWaitMs to unload, so a little more.
+constexpr DWORD kOldHostExitMs = 15000;
 
 // Checks that pid is a running Bloom.exe, and the same file as --bloom when given.
 bool OpenBloom(DWORD pid, const std::wstring& exe, Handle& out, std::wstring& why) {
@@ -89,8 +92,8 @@ public:
     int Run();
     int DryRun();
 
-    // Window procedure side.
-    void OnCommand(std::wstring line) { commands_.push_back(std::move(line)); }
+    // Window procedure side. False refuses the line.
+    bool OnCommand(std::wstring line);
     void OnTaskbarCreated() { taskbarCreated_ = true; }
     UINT taskbarCreatedMsg = 0;
 
@@ -140,6 +143,10 @@ private:
     HWND window_ = nullptr;
     std::deque<std::wstring> commands_;
     bool stopAsked_ = false, safeModeAsked_ = false;
+    // Set when the host has decided to end, before anything is torn down; from then on a
+    // forwarded --serve is refused, so the host that sent it waits for this one to exit
+    // and serves that Bloom itself.
+    bool leaving_ = false;
     bool taskbarCreated_ = false;
     bool wakeOnTaskbar_ = false;      // only the main loop's wait returns on TaskbarCreated
 
@@ -170,8 +177,9 @@ LRESULT CALLBACK HostWndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         auto* cds = (const COPYDATASTRUCT*)lp;
         if (cds && cds->dwData == addon::kCopyDataCommand && cds->lpData && cds->cbData % sizeof(wchar_t) == 0 &&
             cds->cbData <= 64 * 1024) {
-            g_host->OnCommand(std::wstring((const wchar_t*)cds->lpData, cds->cbData / sizeof(wchar_t)));
-            return TRUE;
+            return g_host->OnCommand(std::wstring((const wchar_t*)cds->lpData, cds->cbData / sizeof(wchar_t)))
+                       ? TRUE
+                       : FALSE;
         }
         return FALSE;
     }
@@ -208,19 +216,36 @@ int Host::AcquireInstance() {
     other.Load();
     const std::wstring& running = other.state().version;
     if (running.empty() || running == addon::kVersion) {
-        bool sent = ForwardToHost(GetCommandLineW());
-        Log(sent ? L"a host is running; handed it this command line" : L"a host is running but did not answer");
-        return sent ? addon::kExitOk : addon::kExitError;
+        if (ForwardToHost(GetCommandLineW())) {
+            Log(L"a host is running; handed it this command line");
+            return addon::kExitOk;
+        }
+        // A host that has decided to stop refuses the line, and one that is ending may
+        // have no window left: this one takes over once it has exited.
+        Log(L"a host is running but did not take this command line; waiting for it to exit");
+    } else {
+        // An add-on update: the old host steps down and this one takes over.
+        Log(L"host %ls is running; asking it to stop", running.c_str());
+        ForwardToHost(L"--stop");
     }
-    // An add-on update: the old host steps down and this one takes over.
-    Log(L"host %ls is running; asking it to stop", running.c_str());
-    ForwardToHost(L"--stop");
-    DWORD r = WaitForSingleObject(mutex_.get(), 15000);
+    DWORD r = WaitForSingleObject(mutex_.get(), kOldHostExitMs);
     if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) {
         Log(L"the old host did not stop");
         return addon::kExitError;
     }
     return kContinue;
+}
+
+bool Host::OnCommand(std::wstring line) {
+    if (leaving_) {
+        Args a;
+        if (ParseArgs(SplitCommandLine(line), a) && a.command == Command::Serve) {
+            Log(L"forwarded --serve refused: this host is stopping");
+            return false;
+        }
+    }
+    commands_.push_back(std::move(line));
+    return true;
 }
 
 void Host::ProcessCommands() {
@@ -313,6 +338,7 @@ addon::Config Host::MakeConfig() const {
 }
 
 int Host::Finish(int code, const std::wstring& reason) {
+    leaving_ = true;
     StopPanel();
     HostState& s = state_.state();
     if (code == addon::kExitCrashes) s.safeMode = true;
@@ -325,6 +351,7 @@ int Host::Finish(int code, const std::wstring& reason) {
 
 // Takes the runtime out (if one is in) and ends the host.
 int Host::Shutdown(int code) {
+    leaving_ = true;
     state_.SetPhase(L"stopping");
     std::wstring reason;
     // A stop that cut the hook wait short can race a runtime that was just arriving.
@@ -885,6 +912,7 @@ int Host::Run() {
                     injectNotBefore_ = 0;
                     r = StartExplorer(t);
                     if (r != kContinue) {
+                        leaving_ = true;
                         // Leave nothing behind when giving up with a runtime inside.
                         if (haveExplorer_ && ex_.runtimeIn) UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
                         if (!ex_.runtimeIn) state_.state().loaded.reset();
