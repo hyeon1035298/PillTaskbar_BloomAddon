@@ -318,13 +318,13 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 ### `prefs.json`
 
 ```json
-{ "islandPositions": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "x": 500 } },
+{ "islandPositions": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "x": 500, "y": 500 } },
   "taskbarEdges": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "edge": 0 } },
   "perMonitorEdges": true }
 ```
 
-- `islandPositions`: 모니터마다 숨김 아일랜드가 가장자리의 어디에 있는지. `x`는 0(왼쪽 끝)~1000(오른쪽 끝), 500이 가운데. 키는 모니터 장치 경로의 하드웨어·인스턴스 부분(영숫자와 `-`, 나머지는 `_`), `name`은 Bloom이 보이는 이름.
-- 모드는 아일랜드를 처음 놓는 모니터를 가운데(500)로 더하고, Ctrl을 누른 채 끌어 놓거나 Ctrl+우클릭으로 가운데로 돌릴 때 그 모니터의 항목을 쓴다. 다른 필드와 다른 모니터 항목은 그대로 둔다.
+- `islandPositions`: 모니터마다 숨김 아일랜드가 가장자리의 어디에 있는지. `x`는 위·아래 가장자리에서 0(왼쪽 끝)~1000(오른쪽 끝), `y`는 왼쪽·오른쪽 가장자리에서 0(위 끝)~1000(아래 끝), 둘 다 500이 가운데. 없는 필드는 500으로 본다. 키는 모니터 장치 경로의 하드웨어·인스턴스 부분(영숫자와 `-`, 나머지는 `_`), `name`은 Bloom이 보이는 이름.
+- 모드는 아일랜드를 처음 놓는 모니터를 가운데(500)로 더하고, Ctrl을 누른 채 끌어 놓거나 Ctrl+우클릭으로 가운데로 돌릴 때 그 모니터의 항목을 쓴다(`x`와 `y`를 함께 쓰고, 그 가장자리 쪽 값만 바뀐다). 항목의 다른 필드, 다른 필드와 다른 모니터 항목은 그대로 둔다.
 - `taskbarEdges`: 모니터마다 작업표시줄을 둘 가장자리. `edge`는 0(공통 설정 `pill.edge`를 따름), 1(위), 2(아래), 3(왼쪽), 4(오른쪽). 공통 설정이 `windows`이고 `edge`가 0이면 그 모니터는 Windows 설정 위치 그대로다. 키와 `name`은 `islandPositions`와 같다.
 - 모드는 작업표시줄이 있는 모니터마다 항목이 없으면 `edge` 0으로 더한다(Windows 자체 위치 기능이 있고 모니터마다의 심볼 세 개, `CSecondaryTray::_LoadSettings`·`CSecondaryTray::_CreateSecondaryTray`·`TaskbarSettings` 생성자를 모두 찾은 빌드에서만). 있는 값과 다른 필드, 다른 항목은 그대로 둔다. Bloom은 있는 항목의 `edge`만 바꾸고 항목을 더하거나 지우지 않는다.
 - `perMonitorEdges`: 이 Windows 빌드에서 모니터마다 가장자리를 정할 수 있는지(위 조건). 모드가 `true`나 `false`로 쓰고, 파일의 값과 다를 때만 쓴다. Bloom은 이 값이 `true`이고 `taskbarEdges` 항목이 둘 이상일 때만 모니터별 줄을 보인다. 없으면 `false`로 본다. 이전 빌드에서 남은 항목은 `false`인 동안 아무 일도 하지 않는다.
