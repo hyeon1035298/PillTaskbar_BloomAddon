@@ -4540,9 +4540,43 @@ void NotificationIcon(FrameworkElement const& iconView) {
 
 // ---- entry points ---------------------------------------------------------------
 
+// Explorer moves the tray's views between containers when a taskbar turns
+// between a row and a column: they leave the tree and come back later, after
+// the passes that hid what was there then, and raise Loaded again. Each view
+// looked at is looked at again whenever it's loaded anew, while the feature is
+// on; the list outlives the passes, as the views out of the tree during one are
+// the ones it can't reach, and goes at unload.
+bool g_on;  // taskbar thread: Apply ran since the last Restore
+struct Return {
+    winrt::weak_ref<FrameworkElement> view;
+    FrameworkElement::Loaded_revoker loaded;
+};
+std::list<Return> g_returns;
+
+void OnIcon(FrameworkElement const& icon);
+
+void NoteReturn(FrameworkElement const& view) {
+    std::erase_if(g_returns, [](auto& r) { return !r.view.get(); });
+    if (std::any_of(g_returns.begin(), g_returns.end(),
+                    [&](auto& r) { return r.view.get() == view; })) {
+        return;
+    }
+    g_returns.push_back(
+        {winrt::make_weak(view),
+         view.Loaded(winrt::auto_revoke, [](auto&& sender, auto&&) {
+             auto view = sender.template try_as<FrameworkElement>();
+             if (!view || !g_on || core::g_unloading) {
+                 return;
+             }
+             Wh_Log(L"Tray icon %p back in the tree", winrt::get_abi(view));
+             core::Guard(L"Tray icon back", [&] { OnIcon(view); });
+         })});
+}
+
 void OnIcon(FrameworkElement const& icon) {
     auto cls = winrt::get_class_name(icon);
     if (cls == L"SystemTray.CopilotIcon") {
+        NoteReturn(icon);
         if (S().hideCopilot) {
             Show(icon, false);
         }
@@ -4551,6 +4585,7 @@ void OnIcon(FrameworkElement const& icon) {
     if (cls != L"SystemTray.IconView" || icon.Name() != L"SystemTrayIcon") {
         return;
     }
+    NoteReturn(icon);
     if (core::AncestorNamed(icon, L"MainStack")) {
         MainIcon(icon);
     } else if (core::AncestorNamed(icon, L"NonActivatableStack")) {
@@ -4563,6 +4598,7 @@ void OnIcon(FrameworkElement const& icon) {
 }
 
 void Apply(HWND hwnd) {
+    g_on = true;
     auto root = core::TaskbarRoot(hwnd);
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
     core::FindDescendant(
@@ -4578,6 +4614,10 @@ void Apply(HWND hwnd) {
 }
 
 void Restore() {
+    g_on = false;
+    if (core::g_unloading) {
+        g_returns.clear();
+    }
     g_panels.clear();
     g_bellWaits.clear();
     g_controlCenterWaits.clear();
