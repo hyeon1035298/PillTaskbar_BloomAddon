@@ -398,10 +398,10 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   settings  Windhawk 설정 읽기와 theme 상수
 //   core      UI 스레드, 작업표시줄 찾기, restore 목록, XAML 도우미
 //   region    F1 클릭 통과 (SetWindowRgn)
-//   pill      F1 알약 배경, 모서리, 두 조각 배치
+//   pill      F1 알약 배경, 모서리, 두 조각 배치 (옆쪽 작업표시줄은 두 조각을 위아래로 쌓기)
 //   widgets   F6·F7 위젯을 담는 트레이 앞 자리
 //   tray      F3 트레이 시스템 아이콘, 알림 벨, 시계
-//   size      F2 높이, 아이콘 크기, 버튼 폭
+//   size      F2 높이(옆쪽은 두께), 아이콘 크기, 버튼 폭
 //   autohide  F4 위쪽 자동 숨김, 나오는 구간, 지연, 애니메이션
 //   media     F6 미디어 플레이어 (GSMTC)
 //   usage     F7 Bloom 주간 사용량
@@ -413,7 +413,8 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   entry     Wh_Mod* 진입점
 // 의존 방향: hooks → 기능 구역 → core, settings. 기능 구역끼리는 region만 pill이 부르고,
 // island는 autohide, media, usage의 상태를 쓰고, autohide는 island가 알려 주는 범위와
-// start의 Bloom 런처 확인(LauncherAhead)을 쓴다.
+// start의 Bloom 런처 확인(LauncherAhead)을 쓴다. 옆쪽 작업표시줄의 진단 줄을 한 번씩만 쓰는
+// pill::SideOnce는 tray와 size도 쓴다.
 // prefs는 core와 usage의 JSON 도우미, Bloom 폴더 이름을 쓰고, island, usage, position이
 // prefs를 쓴다(아일랜드 자리, 숨긴 계정, 모니터별 가장자리가 한 파일에 있다).
 // folders는 settings만 쓰고 작업 스레드와 작업표시줄 큐를 스스로 둔다.
@@ -2114,10 +2115,12 @@ Luminosity LuminosityFor(winrt::Windows::UI::Color tint) {
     return {(uint8_t)grey, std::clamp(amount, 0.0f, 1.0f)};
 }
 
-wuc::CompositionGradientBrush Sheen(wuc::Compositor const& compositor) {
+// The glass runs across the pill's short side: top to bottom on a horizontal
+// taskbar, left to right on a side one (`side`).
+wuc::CompositionGradientBrush Sheen(wuc::Compositor const& compositor, bool side) {
     auto sheen = compositor.CreateLinearGradientBrush();
     sheen.StartPoint({0, 0});
-    sheen.EndPoint({0, 1});
+    sheen.EndPoint(side ? wf::Numerics::float2{1, 0} : wf::Numerics::float2{0, 1});
     auto stops = sheen.ColorStops();
     for (auto [offset, color] : theme::kGlassSheen) {
         stops.Append(compositor.CreateColorGradientStop(offset, color));
@@ -2215,12 +2218,14 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
    public:
     // With `host` the owner sits in a window of its own (a popup), which has
     // nothing behind it in its tree: the glass shows the desktop through DWM.
-    explicit GlassBrush(FrameworkElement const& owner, bool host = false)
+    // `side`: a piece of a side taskbar's pill, whose sheen is turned (Sheen).
+    explicit GlassBrush(FrameworkElement const& owner, bool host = false, bool side = false)
         : m_compositor(
               Hosting::ElementCompositionPreview::GetElementVisual(owner)
                   .Compositor()),
           m_owner(owner),
-          m_host(host) {
+          m_host(host),
+          m_side(side) {
         g_glassBrushes++;
         static int counter;
         m_key = L"PillTaskbarTint" + std::to_wstring(++counter);
@@ -2351,7 +2356,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
                                     : m_compositor.CreateBackdropBrush());
         }
         if (sheen) {
-            brush.SetSourceParameter(L"sheen", Sheen(m_compositor));
+            brush.SetSourceParameter(L"sheen", Sheen(m_compositor, m_side));
         }
         return brush;
     }
@@ -2366,6 +2371,7 @@ class GlassBrush : public Media::XamlCompositionBrushBaseT<GlassBrush> {
     wuc::Compositor m_compositor;
     winrt::weak_ref<FrameworkElement> m_owner;
     bool m_host;
+    bool m_side;
     Media::SolidColorBrush m_tint{nullptr};
     int64_t m_tintWatch = 0;  // the tint's callback
     Media::SolidColorBrush m_edge{nullptr};
@@ -2394,6 +2400,39 @@ CornerRadius Corners(double l, double r) {
     return {l, r, r, l};
 }
 
+// ---- side taskbar (A 쌓기) ------------------------------------------------------
+// A side taskbar's pill is the horizontal one turned across its diagonal: the apps
+// piece over the tray piece in one column, every margin, padding, border and
+// corner moved from the row's ends to the column's, so what keeps off the screen
+// edge across the row keeps off it across the column. Left and right are alike.
+
+Thickness Turned(Thickness t) {
+    return {t.Top, t.Left, t.Bottom, t.Right};
+}
+
+CornerRadius Turned(CornerRadius c) {
+    return {c.TopLeft, c.BottomLeft, c.BottomRight, c.TopRight};
+}
+
+// Diagnostics for the vertical tree, which this build has not been seen with:
+// each kind is written to the mod's log once per taskbar window.
+bool SideOnce(std::vector<HWND>& seen, HWND taskbar) {
+    if (std::ranges::find(seen, taskbar) != seen.end()) {
+        return false;
+    }
+    if (seen.size() >= 16) {
+        seen.clear();
+    }
+    seen.push_back(taskbar);
+    return true;
+}
+
+// The side taskbar a XAML element is in; null for a horizontal one's.
+HWND SideTaskbarOf(FrameworkElement const& e) {
+    auto root = e ? e.XamlRoot() : nullptr;
+    return core::IsSide(root) ? core::TaskbarOf(root) : nullptr;
+}
+
 // The glass and Bloom styles' edge is one physical pixel: a hairline disappears at 100%
 // scale, and a whole DIP at a fractional scale spills into a second,
 // half-covered pixel row that reads as a rough edge.
@@ -2404,10 +2443,11 @@ double PhysicalPixel(FrameworkElement const& element) {
     return 1.0;
 }
 
-Media::LinearGradientBrush Rim() {
+// The glass style's edge, turned on a side taskbar like the sheen.
+Media::LinearGradientBrush Rim(bool side = false) {
     Media::LinearGradientBrush gradient;
     gradient.StartPoint({0, 0});
-    gradient.EndPoint({0, 1});
+    gradient.EndPoint(side ? wf::Point{1, 0} : wf::Point{0, 1});
     for (auto [offset, color] : theme::kGlassRim) {
         Media::GradientStop stop;
         stop.Offset(offset);
@@ -2419,14 +2459,16 @@ Media::LinearGradientBrush Rim() {
 
 // Margin, padding, border, corners and background of a pill piece: a Grid
 // (RootGrid, older tray) or a StackPanel (newer tray).
+// `side`: a side taskbar's piece, the values given already turned.
 void StylePiece(FrameworkElement const& piece,
                 Thickness margin,
                 Thickness padding,
                 Thickness border,
-                CornerRadius corners) {
+                CornerRadius corners,
+                bool side = false) {
     core::Set(piece, FrameworkElement::MarginProperty(), box_value(margin),
               L"Margin");
-    auto glass = winrt::make_self<GlassBrush>(piece);
+    auto glass = winrt::make_self<GlassBrush>(piece, false, side);
     auto brush = glass.as<Media::Brush>();
     Media::Brush edge{nullptr};
     if (settings::g.pill.style != settings::Style::kWindowGlass) {
@@ -2434,7 +2476,7 @@ void StylePiece(FrameworkElement const& piece,
         auto full = [pixel](double v) { return v > 0 ? pixel : 0.0; };
         border = {full(border.Left), full(border.Top), full(border.Right),
                   full(border.Bottom)};
-        edge = settings::g.pill.style == settings::Style::kGlass ? Rim() : glass->Edge();
+        edge = settings::g.pill.style == settings::Style::kGlass ? Rim(side) : glass->Edge();
     }
     if (piece.try_as<Controls::Grid>()) {
         using G = Controls::Grid;
@@ -2469,19 +2511,49 @@ FrameworkElement TrayFrameNextTo(FrameworkElement const& frame) {
     return core::ChildOfClass(core::Parent(frame), L"SystemTray.SystemTrayFrame");
 }
 
-void StyleAppsPiece(FrameworkElement const& frame, bool withTray) {
+void StyleAppsPiece(FrameworkElement const& frame, bool withTray, bool side = false) {
     auto rootGrid = core::ChildNamed(frame, L"RootGrid");
     if (!rootGrid) {
         Wh_Log(L"No RootGrid");
         return;
     }
     double r = settings::g.pill.cornerRadius;
+    if (side) {
+        // Apps over the tray: the top end is the rounded one.
+        if (withTray) {
+            StylePiece(rootGrid, Turned(theme::kAppsMargin), Turned(theme::kAppsPadding),
+                       Turned(theme::kAppsBorder), Turned(Corners(r, 0)), true);
+        } else {
+            StylePiece(rootGrid, Turned(theme::kSoloMargin), Turned(theme::kSoloPadding),
+                       Turned(theme::kSoloBorder), Corners(r, r), true);
+        }
+        return;
+    }
     if (withTray) {
         StylePiece(rootGrid, theme::kAppsMargin, theme::kAppsPadding,
                    theme::kAppsBorder, Corners(r, 0));
     } else {
         StylePiece(rootGrid, theme::kSoloMargin, theme::kSoloPadding,
                    theme::kSoloBorder, Corners(r, r));
+    }
+}
+
+// The tray piece of a side taskbar: the row under the apps (StyleSideFrame), its
+// bottom end rounded. Its width stays the taskbar's (size gives it the thickness).
+void StyleSideTray(FrameworkElement const& trayFrame) {
+    core::Set(trayFrame, Controls::Grid::RowProperty(), box_value(2));
+    core::Set(trayFrame, Controls::Grid::ColumnProperty(), box_value(0));
+    core::Set(trayFrame, FrameworkElement::HeightProperty(),
+              box_value(std::numeric_limits<double>::quiet_NaN()));
+    core::Set(trayFrame, FrameworkElement::VerticalAlignmentProperty(),
+              box_value(VerticalAlignment::Top));
+    core::Set(trayFrame, FrameworkElement::MarginProperty(), box_value(Thickness{}));
+    if (auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid")) {
+        double r = settings::g.pill.cornerRadius;
+        StylePiece(grid, Turned(settings::TrayMargin()), Turned(theme::kTrayPadding),
+                   Turned(theme::kTrayBorder), Turned(Corners(0, r)), true);
+    } else {
+        Wh_Log(L"Side taskbar: no SystemTrayFrameGrid");
     }
 }
 
@@ -2583,11 +2655,123 @@ void RelightAll() {
     g_unlit.clear();
 }
 
-void StyleTaskButton(FrameworkElement const& button) {
-    // Side taskbar: the pill's task buttons step back.
-    if (core::IsSide(button.XamlRoot())) {
+// ---- side taskbar: the running line under the icon ----------------------------
+// Windows draws a side taskbar's running line beside the icon, along the screen
+// edge; the side pill keeps it under the icon, as the horizontal pill has it (the
+// short grey line, the long white one for the active window). The line is turned
+// a quarter about its middle and moved there, whatever length its states give it:
+// its own size stays the template's, so the states' animations keep working.
+
+struct SideLine {
+    winrt::weak_ref<FrameworkElement> line;
+    winrt::weak_ref<FrameworkElement> button;
+    std::optional<bool> turn;  // known once the line has a size: taller than wide
+    Media::CompositeTransform transform{nullptr};
+    bool own = false;  // the transform is the mod's, not the template's
+    FrameworkElement::SizeChanged_revoker sized;
+};
+
+[[clang::no_destroy]] std::list<SideLine> g_sideLines;
+std::vector<HWND> g_loggedLines;
+
+// Where the icon of a task button ends, in the button's space; else a guess from
+// its middle.
+double IconBottom(FrameworkElement const& button) {
+    auto icon = core::FindDescendant(
+        button, [](FrameworkElement const& e) { return e.Name() == L"Icon"; }, 6);
+    if (icon && icon.ActualHeight() > 0) {
+        return icon.TransformToVisual(button).TransformPoint({0, (float)icon.ActualHeight()}).Y;
+    }
+    return button.ActualHeight() / 2 + 16;
+}
+
+void PlaceSideLine(SideLine& s) {
+    auto line = s.line.get();
+    auto button = s.button.get();
+    auto parent = line ? core::Parent(line) : nullptr;
+    double w = line ? line.ActualWidth() : 0, h = line ? line.ActualHeight() : 0;
+    if (!parent || !button || w <= 0 || h <= 0 || button.ActualHeight() <= 0) {
+        return;  // not shown (not running) or not laid out yet
+    }
+    if (!s.turn) {
+        s.turn = h > w;
+    }
+    if (!s.transform) {
+        // A transform from the template may be one its states animate: only one
+        // to turn and move is used, else the line keeps Windows' place.
+        auto own = line.RenderTransform();
+        auto matrix = own.try_as<Media::MatrixTransform>();
+        if (!own || (matrix && Media::MatrixHelper::GetIsIdentity(matrix.Matrix()))) {
+            s.transform = Media::CompositeTransform();
+            s.own = true;
+            core::Set(line, UIElement::RenderTransformProperty(), s.transform);
+        } else if (auto composite = own.try_as<Media::CompositeTransform>()) {
+            s.transform = composite;
+        } else {
+            if (HWND taskbar = SideTaskbarOf(button); SideOnce(g_loggedLines, taskbar)) {
+                Wh_Log(L"Side taskbar %p: running line has a %s, left in place", taskbar,
+                       winrt::get_class_name(own).c_str());
+            }
+            s.turn = false;
+            return;
+        }
+        core::Set(line, UIElement::RenderTransformOriginProperty(),
+                  box_value(wf::Point{0.5f, 0.5f}));
+    }
+    // The line's own middle as laid out (the transform left out), in the button.
+    auto offset = line.ActualOffset();
+    auto middle = parent.TransformToVisual(button).TransformPoint(
+        {offset.x + (float)w / 2, offset.y + (float)h / 2});
+    double thickness = *s.turn ? w : h;
+    double bottom = button.ActualHeight();
+    double y = std::min((IconBottom(button) + bottom) / 2, bottom - thickness / 2 - 1);
+    // The template's own transform gets its values back at Restore.
+    using T = Media::CompositeTransform;
+    for (auto [prop, value] : {std::pair{T::RotationProperty(), *s.turn ? 90.0 : 0.0},
+                               std::pair{T::TranslateXProperty(), button.ActualWidth() / 2 - middle.X},
+                               std::pair{T::TranslateYProperty(), y - middle.Y}}) {
+        if (s.own) {
+            s.transform.SetValue(prop, box_value(value));
+        } else {
+            core::Set(s.transform, prop, box_value(value));
+        }
+    }
+}
+
+void StyleSideLine(FrameworkElement const& button) {
+    auto line = core::FindDescendant(
+        button, [](FrameworkElement const& e) { return e.Name() == L"RunningIndicator"; }, 6);
+    if (!line) {
         return;
     }
+    std::erase_if(g_sideLines, [](SideLine const& s) { return !s.line.get(); });
+    auto it = std::ranges::find_if(g_sideLines,
+                                   [&](SideLine const& s) { return s.line.get() == line; });
+    if (it == g_sideLines.end()) {
+        if (HWND taskbar = SideTaskbarOf(button); SideOnce(g_loggedLines, taskbar)) {
+            auto panel = core::Parent(line);
+            Wh_Log(L"Side taskbar %p: task button %.0fx%.0f, line in %s %.0fx%.0f, line "
+                   L"%.0fx%.0f align %d/%d, icon bottom %.1f",
+                   taskbar, button.ActualWidth(), button.ActualHeight(),
+                   panel ? panel.Name().c_str() : L"-", panel ? panel.ActualWidth() : 0.0,
+                   panel ? panel.ActualHeight() : 0.0, line.ActualWidth(), line.ActualHeight(),
+                   (int)line.HorizontalAlignment(), (int)line.VerticalAlignment(),
+                   IconBottom(button));
+        }
+        auto& s = g_sideLines.emplace_back();
+        s.line = winrt::make_weak(line);
+        s.button = winrt::make_weak(button);
+        SideLine* p = &s;  // std::list keeps it in place
+        s.sized = line.SizeChanged(winrt::auto_revoke, [p](auto&&, auto&&) {
+            core::Guard(L"Side running line", [p] { PlaceSideLine(*p); });
+        });
+        it = std::prev(g_sideLines.end());
+    }
+    PlaceSideLine(*it);
+}
+
+void StyleTaskButton(FrameworkElement const& button) {
+    bool side = core::IsSide(button.XamlRoot());
     auto control = button.try_as<Controls::Control>();
     if (control) {
         Unlight(control);
@@ -2598,9 +2782,13 @@ void StyleTaskButton(FrameworkElement const& button) {
         core::Set(control, Controls::Control::CornerRadiusProperty(),
                   box_value(r));
     }
+    if (side) {
+        StyleSideLine(button);
+    }
 }
 
-void StyleTrayButton(FrameworkElement const& e) {
+// `side`: a side taskbar's, whose tray buttons stand in a column.
+void StyleTrayButton(FrameworkElement const& e, bool side = false) {
     auto control = e.try_as<Controls::Control>();
     if (!control) {
         return;
@@ -2608,14 +2796,80 @@ void StyleTrayButton(FrameworkElement const& e) {
     using C = Controls::Control;
     double r = theme::kTrayButtonRadius;
     core::Set(control, C::PaddingProperty(),
-              box_value(theme::kTrayButtonPadding));
+              box_value(side ? Turned(theme::kTrayButtonPadding) : theme::kTrayButtonPadding));
     core::Set(control, C::CornerRadiusProperty(),
               box_value(CornerRadius{r, r, r, r}));
     core::Set(control, FrameworkElement::MarginProperty(),
-              box_value(theme::kTrayButtonMargin));
+              box_value(side ? Turned(theme::kTrayButtonMargin) : theme::kTrayButtonMargin));
 }
 
-void StyleClock(FrameworkElement const& icon) {
+// ---- side taskbar: the hidden-icons chevron ----------------------------------------
+// It points into the screen: right on a left taskbar, left on a right one, and the
+// other way while the hidden icons are open. Windows' up and down arrows are
+// written over; one already sideways is left as it is.
+
+wchar_t SideChevron(wchar_t glyph, bool left) {
+    // Up and down (closed, open) in three sizes, with their right and left.
+    struct Turn {
+        wchar_t up, down, right, leftward;
+    };
+    static constexpr Turn kTurns[] = {{L'\uE70E', L'\uE70D', L'\uE76C', L'\uE76B'},
+                                      {L'\uE96D', L'\uE96E', L'\uE970', L'\uE96F'},
+                                      {L'\uE971', L'\uE972', L'\uE974', L'\uE973'}};
+    for (auto& t : kTurns) {
+        if (glyph == t.up) {
+            return left ? t.right : t.leftward;
+        }
+        if (glyph == t.down) {
+            return left ? t.leftward : t.right;
+        }
+    }
+    return glyph;
+}
+
+std::vector<HWND> g_loggedChevrons;
+
+void TurnChevron(Controls::TextBlock const& glyph, HWND taskbar) {
+    std::wstring text(glyph.Text());
+    if (text.size() != 1) {
+        return;
+    }
+    wchar_t turned = SideChevron(text[0], core::EdgeOf(taskbar) == ABE_LEFT);
+    if (turned != text[0]) {
+        core::Set(glyph, Controls::TextBlock::TextProperty(),
+                  box_value(winrt::hstring(&turned, 1)));
+    }
+}
+
+void StyleSideChevron(FrameworkElement const& icon, HWND taskbar) {
+    auto glyph = core::FindDescendant(
+                     icon,
+                     [](FrameworkElement const& e) {
+                         auto t = e.try_as<Controls::TextBlock>();
+                         return t && t.Text().size() == 1;
+                     },
+                     8)
+                     .try_as<Controls::TextBlock>();
+    if (SideOnce(g_loggedChevrons, taskbar)) {
+        Wh_Log(L"Side taskbar %p: chevron glyph %04X", taskbar,
+               glyph ? (unsigned)glyph.Text()[0] : 0u);
+    }
+    if (!glyph) {
+        return;
+    }
+    TurnChevron(glyph, taskbar);
+    // Windows writes the glyph again as the hidden icons open and close.
+    core::Watch(
+        glyph, Controls::TextBlock::TextProperty(),
+        [taskbar](DependencyObject const& sender) {
+            TurnChevron(sender.as<Controls::TextBlock>(), taskbar);
+        },
+        L"pill");
+}
+
+// `side`: on a side taskbar the time stands in the middle of its column, over
+// its seconds (tray::FormatClock).
+void StyleClock(FrameworkElement const& icon, bool side = false) {
     auto find = [&](PCWSTR name) {
         return core::FindDescendant(
                    icon, [&](auto& e) { return e.Name() == name; }, 8)
@@ -2631,6 +2885,10 @@ void StyleClock(FrameworkElement const& icon) {
         core::Set(time, T::PaddingProperty(), box_value(Thickness{}));
         core::Set(time, UIElement::RenderTransformProperty(),
                   Media::TranslateTransform());
+        if (side) {
+            core::Set(time, T::TextAlignmentProperty(), box_value(TextAlignment::Center));
+            core::Set(time, T::MaxLinesProperty(), box_value(0));
+        }
     }
 }
 
@@ -2645,36 +2903,38 @@ bool ShowDesktopCorner() {
 }
 
 // A tray icon view (SystemTray.IconView and the classes built on it).
+// A side taskbar's icons get the same values turned (A 쌓기: one column).
 void StyleIcon(FrameworkElement const& icon) {
-    // Side taskbar: the pill's tray icons step back.
-    if (core::IsSide(icon.XamlRoot())) {
-        return;
-    }
+    HWND side = SideTaskbarOf(icon);
+    auto turned = [&](Thickness t) { return side ? Turned(t) : t; };
     auto cls = winrt::get_class_name(icon);
     if (cls == L"SystemTray.ChevronIconView" ||
         (cls == L"SystemTray.NotifyIconView" && icon.Name() == L"NotifyItemIcon")) {
-        StyleTrayButton(icon);
+        StyleTrayButton(icon, side != nullptr);
+        if (side && cls == L"SystemTray.ChevronIconView") {
+            StyleSideChevron(icon, side);
+        }
         return;
     }
     if (cls == L"SystemTray.CopilotIcon") {
         auto control = icon.try_as<Controls::Control>();
         if (control) {
             core::Set(control, Controls::Control::PaddingProperty(),
-                      box_value(theme::kTrayButtonPadding));
+                      box_value(turned(theme::kTrayButtonPadding)));
             core::Set(control, FrameworkElement::MarginProperty(),
-                      box_value(theme::kTrayButtonMargin));
+                      box_value(turned(theme::kTrayButtonMargin)));
         }
         return;
     }
     // The clock's text blocks sit in different icon views across builds.
-    StyleClock(icon);
+    StyleClock(icon, side != nullptr);
     if (icon.Name() != L"SystemTrayIcon") {
         return;
     }
 
     if (auto omni = core::FindAncestor(
             icon, [](auto& p) { return core::IsClass(p, L"SystemTray.OmniButton"); })) {
-        StyleTrayButton(omni);
+        StyleTrayButton(omni, side != nullptr);
     }
 
     auto container = core::ChildNamed(icon, L"ContainerGrid");
@@ -2682,7 +2942,7 @@ void StyleIcon(FrameworkElement const& icon) {
         if (auto grid =
                 core::ChildOfClass(icon, L"Windows.UI.Xaml.Controls.Grid")) {
             core::Set(grid, Controls::Grid::PaddingProperty(),
-                      box_value(theme::kBellPadding));
+                      box_value(turned(theme::kBellPadding)));
         }
     }
 
@@ -2812,6 +3072,197 @@ void StyleFrame(FrameworkElement const& frame, HWND hwnd) {
     region::Track(frame, hwnd);
 }
 
+// ---- side taskbar: the column ----------------------------------------------------
+// The frame over the tray in one column of the content grid, the two Auto rows
+// between free ones that put the pill at the top, in the middle or at the bottom
+// (pill.align left, center, right). A build whose frame is the whole content
+// (the tray an item of its own list) has the frame keep to that place itself.
+
+struct SavedRows {
+    winrt::weak_ref<Controls::Grid> grid;
+    std::vector<Controls::RowDefinition> rows;
+};
+
+std::vector<SavedRows> g_savedRows;
+
+// Replaces a grid's rows, keeping the original definitions for Restore.
+void SetRows(Controls::Grid const& grid, std::initializer_list<GridLength> heights) {
+    auto rows = grid.RowDefinitions();
+    if (std::ranges::none_of(g_savedRows, [&](auto& s) { return s.grid.get() == grid; })) {
+        SavedRows saved{winrt::make_weak(grid)};
+        for (auto const& r : rows) {
+            saved.rows.push_back(r);
+        }
+        g_savedRows.push_back(std::move(saved));
+    }
+    rows.Clear();
+    for (auto h : heights) {
+        Controls::RowDefinition r;
+        r.Height(h);
+        rows.Append(r);
+    }
+}
+
+void RestoreRows() {
+    for (auto& s : g_savedRows) {
+        if (auto grid = s.grid.get()) {
+            core::Guard(L"Side rows", [&] {
+                auto rows = grid.RowDefinitions();
+                rows.Clear();
+                for (auto& r : s.rows) {
+                    rows.Append(r);
+                }
+            });
+        }
+    }
+    g_savedRows.clear();
+}
+
+// Side taskbars whose column the pill holds: only these lose their own
+// background (a tree the pill doesn't know keeps Windows' look whole).
+std::vector<HWND> g_sideStyled;
+
+bool SideStyled(HWND taskbar) {
+    return taskbar && std::ranges::find(g_sideStyled, taskbar) != g_sideStyled.end();
+}
+
+std::list<Container> g_sideContainers;
+std::vector<HWND> g_loggedFrames;
+
+// The tray as an item of the frame's own list (TaskbarFrameRepeater), on builds
+// that put it there rather than beside the frame.
+FrameworkElement TrayInFrame(FrameworkElement const& frame) {
+    auto repeater =
+        core::ChildNamed(core::ChildNamed(frame, L"RootGrid"), L"TaskbarFrameRepeater");
+    FrameworkElement tray{nullptr};
+    if (!repeater) {
+        return tray;
+    }
+    core::FindChild(repeater, [&](FrameworkElement const& child) {
+        auto item = core::IsClass(child, L"Taskbar.TaskbarExtensionElement")
+                        ? child.try_as<Controls::ContentControl>()
+                        : nullptr;
+        auto content = item ? item.Content().try_as<FrameworkElement>() : nullptr;
+        if (content && core::IsClass(content, L"SystemTray.SystemTrayFrame")) {
+            tray = content;
+        }
+        return (bool)tray;
+    });
+    return tray;
+}
+
+double FrameMaxHeight(FrameworkElement const& frame, FrameworkElement const& container) {
+    double height = container ? container.ActualHeight() : 0;
+    if (!(height > 0)) {
+        auto root = frame.XamlRoot();
+        height = root ? root.Size().Height : 0;
+    }
+    return height > 0 ? height : std::numeric_limits<double>::infinity();
+}
+
+// Once per side taskbar: what the column is made of, as this build lays it out.
+void LogSideTree(HWND hwnd,
+                 FrameworkElement const& frame,
+                 FrameworkElement const& container,
+                 FrameworkElement const& tray,
+                 bool trayInside) {
+    if (!SideOnce(g_loggedFrames, hwnd)) {
+        return;
+    }
+    auto grid = container.try_as<Controls::Grid>();
+    auto rootGrid = core::ChildNamed(frame, L"RootGrid");
+    auto repeater = core::ChildNamed(rootGrid, L"TaskbarFrameRepeater");
+    auto trayGrid = core::ChildNamed(tray, L"SystemTrayFrameGrid");
+    auto stack = trayGrid.try_as<Controls::StackPanel>();
+    Wh_Log(L"Side taskbar %p (edge %d): container %s %d rows %d columns %.0fx%.0f; frame "
+           L"%.0fx%.0f (W %.0f H %.0f); RootGrid %s %.0fx%.0f; repeater %d items; tray %s "
+           L"%.0fx%.0f, grid %s %s",
+           hwnd, core::EdgeOf(hwnd),
+           container ? winrt::get_class_name(container).c_str() : L"none",
+           grid ? (int)grid.RowDefinitions().Size() : -1,
+           grid ? (int)grid.ColumnDefinitions().Size() : -1,
+           container ? container.ActualWidth() : 0.0, container ? container.ActualHeight() : 0.0,
+           frame.ActualWidth(), frame.ActualHeight(), frame.Width(), frame.Height(),
+           rootGrid ? L"yes" : L"no", rootGrid ? rootGrid.ActualWidth() : 0.0,
+           rootGrid ? rootGrid.ActualHeight() : 0.0,
+           repeater ? (int)Media::VisualTreeHelper::GetChildrenCount(repeater) : -1,
+           tray ? (trayInside ? L"in the frame" : L"beside") : L"none",
+           tray ? tray.ActualWidth() : 0.0, tray ? tray.ActualHeight() : 0.0,
+           trayGrid ? winrt::get_class_name(trayGrid).c_str() : L"none",
+           stack ? (stack.Orientation() == Controls::Orientation::Vertical ? L"vertical"
+                                                                            : L"horizontal")
+                 : L"");
+}
+
+void StyleSideFrame(FrameworkElement const& frame, HWND hwnd) {
+    auto container = core::Parent(frame);
+    auto grid = container.try_as<Controls::Grid>();
+    auto tray = TrayFrameNextTo(frame);
+    auto inside = tray ? nullptr : TrayInFrame(frame);
+    LogSideTree(hwnd, frame, container, tray ? tray : inside, (bool)inside);
+
+    auto align = settings::PillAlign();
+    auto end = [](bool open) {
+        return open ? GridLength{1, GridUnitType::Star} : GridLength{0, GridUnitType::Pixel};
+    };
+    if (grid) {
+        core::SetColumns(grid, {GridLength{1, GridUnitType::Star}});
+        SetRows(grid, {end(align != settings::Align::kLeft), GridLength{1, GridUnitType::Auto},
+                       GridLength{1, GridUnitType::Auto}, end(align != settings::Align::kRight)});
+        core::Set(frame, Controls::Grid::RowProperty(), box_value(1));
+        core::Set(frame, Controls::Grid::ColumnProperty(), box_value(0));
+    } else {
+        core::Set(frame, FrameworkElement::VerticalAlignmentProperty(),
+                  box_value(align == settings::Align::kLeft    ? VerticalAlignment::Top
+                            : align == settings::Align::kRight ? VerticalAlignment::Bottom
+                                                               : VerticalAlignment::Center));
+    }
+    // Only as tall as its buttons, so the column around the pill is free.
+    core::Keep(frame, FrameworkElement::HeightProperty(),
+               box_value(std::numeric_limits<double>::quiet_NaN()));
+    core::Set(frame, FrameworkElement::MinHeightProperty(), box_value(theme::kFrameMinWidth));
+    core::Set(frame, FrameworkElement::MaxHeightProperty(),
+              box_value(FrameMaxHeight(frame, container)));
+    if (container && std::ranges::none_of(g_sideContainers,
+                                          [&](auto& c) { return c.grid.get() == container; })) {
+        auto& c = g_sideContainers.emplace_back();
+        c.grid = container;
+        c.sizeChanged = container.SizeChanged(
+            winrt::auto_revoke,
+            [weakFrame = winrt::make_weak(frame)](auto&& sender, auto&&) {
+                auto frame = weakFrame.get();
+                auto container = sender.template try_as<FrameworkElement>();
+                if (frame && container) {
+                    core::Guard(L"Side frame height", [&] {
+                        core::Set(frame, FrameworkElement::MaxHeightProperty(),
+                                  box_value(FrameMaxHeight(frame, container)));
+                    });
+                }
+            });
+    }
+
+    // The tray goes to its row first, as in StyleFrame.
+    if (tray) {
+        core::Guard(L"Side tray", [&] { StyleSideTray(tray); });
+    }
+    core::Guard(L"Side apps piece", [&] {
+        StyleAppsPiece(frame, (bool)tray, true);
+        if (inside) {
+            // A tray inside the frame is drawn relative to the frame, past the
+            // RootGrid's margin: the margin goes on the frame instead.
+            if (auto rootGrid = core::ChildNamed(frame, L"RootGrid")) {
+                core::Set(rootGrid, FrameworkElement::MarginProperty(), box_value(Thickness{}));
+            }
+            core::Set(frame, FrameworkElement::MarginProperty(),
+                      box_value(Turned(theme::kSoloMargin)));
+        }
+    });
+    if (!SideStyled(hwnd)) {
+        g_sideStyled.push_back(hwnd);
+    }
+    region::Track(frame, hwnd);
+}
+
 // How deep under the root explorer's own theme settings are looked for: the tray's
 // panels, where the widgets sit, are the deepest that draw in the theme.
 constexpr int kThemeDepth = 14;
@@ -2838,25 +3289,39 @@ void HoldTheme(FrameworkElement const& content, ElementTheme theme) {
 }
 
 // Everything already in a taskbar's tree.
+// A side taskbar gets the column (StyleSideFrame); its background goes only once
+// that is in place.
 void StyleRoot(XamlRoot const& root, HWND hwnd) {
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-    // Side taskbar: the pill steps back, frame, background, buttons and theme.
-    if (!content || (hwnd ? core::IsSide(hwnd) : core::IsSide(root))) {
+    if (!content) {
         return;
+    }
+    bool side = hwnd ? core::IsSide(hwnd) : core::IsSide(root);
+    if (side && !hwnd) {
+        hwnd = core::TaskbarOf(root);
     }
     // A theme set (Bloom's own) over Windows': all under the root follows it.
     if (auto set = settings::g.pill.theme; set != settings::Theme::kSystem) {
         HoldTheme(content, set == settings::Theme::kDark ? ElementTheme::Dark : ElementTheme::Light);
     }
-    if (auto frame = core::FindDescendant(
-            content, [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); },
-            8)) {
-        core::Guard(L"Frame", [&] { StyleFrame(frame, hwnd); });
+    // A side taskbar's frame may be the whole content (the tray in its list).
+    auto isFrame = [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); };
+    if (auto frame = side && isFrame(content) ? content : core::FindDescendant(content, isFrame, 8)) {
+        if (side) {
+            core::Guard(L"Side frame", [&] { StyleSideFrame(frame, hwnd); });
+        } else {
+            core::Guard(L"Frame", [&] { StyleFrame(frame, hwnd); });
+        }
     } else {
-        Wh_Log(L"No TaskbarFrame");
+        if (side) {
+            Wh_Log(L"Side taskbar %p: no TaskbarFrame", hwnd);
+        } else {
+            Wh_Log(L"No TaskbarFrame");
+        }
     }
     if (auto bg = core::FindDescendant(
-            content, [](auto& e) { return e.Name() == L"BackgroundControl"; }, 8)) {
+            content, [](auto& e) { return e.Name() == L"BackgroundControl"; }, 8);
+        bg && (!side || SideStyled(hwnd))) {
         core::Guard(L"Background", [&] { StyleBackground(bg); });
     }
     core::FindDescendant(
@@ -2889,35 +3354,49 @@ void OnFrameTemplate(FrameworkElement const& frame) {
 
 // A tray icon view loaded. The tray of a new taskbar shows up this way, once
 // its first icon loads, so the tray piece is styled here too.
+// On a side taskbar only a tray beside the frame is a piece of its own, and only
+// once the pill holds that taskbar's column.
 void OnIconLoaded(FrameworkElement const& icon) {
-    // Side taskbar: the pill's tray and apps pieces step back.
-    if (core::IsSide(icon.XamlRoot())) {
+    StyleIcon(icon);
+    HWND side = SideTaskbarOf(icon);
+    if (side && !SideStyled(side)) {
         return;
     }
-    StyleIcon(icon);
     auto trayFrame = core::FindAncestor(icon, [](auto& p) {
         return core::IsClass(p, L"SystemTray.SystemTrayFrame");
     });
     auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid");
+    auto margin = side ? Turned(settings::TrayMargin()) : settings::TrayMargin();
     if (!grid || core::SameValue(grid.ReadLocalValue(FrameworkElement::MarginProperty()),
-                                 box_value(settings::TrayMargin()))) {
+                                 box_value(margin))) {
         return;  // styled already
     }
+    auto frame = core::ChildOfClass(core::Parent(trayFrame), L"Taskbar.TaskbarFrame");
+    if (side) {
+        if (frame) {
+            StyleSideTray(trayFrame);
+            StyleAppsPiece(frame, true, true);
+        }
+        return;
+    }
     StyleTray(trayFrame);
-    if (auto frame = core::ChildOfClass(core::Parent(trayFrame),
-                                        L"Taskbar.TaskbarFrame")) {
+    if (frame) {
         StyleAppsPiece(frame, true);
     }
 }
 
 void Apply(HWND hwnd) {
-    StyleRoot(core::TaskbarRoot(hwnd), hwnd);  // which steps back on a side taskbar
+    StyleRoot(core::TaskbarRoot(hwnd), hwnd);  // a side taskbar gets its column
 }
 
 void Restore() {
     g_pendingLoads.clear();
     g_containers.clear();
+    g_sideContainers.clear();
+    g_sideLines.clear();
+    g_sideStyled.clear();
     RelightAll();
+    RestoreRows();
     region::Clear();
 }
 
@@ -2930,8 +3409,9 @@ namespace widgets {
 // each taskbar's tray (SystemTrayFrameGrid: a StackPanel on newer builds, a
 // Grid with a column for each part on older ones), one before the tray icons
 // and one after the clock, so they are part of the tray piece of the pill.
-// Every taskbar gets elements of its own: one can't be in two trees.
-// Taskbar thread only.
+// On a side taskbar the panels stand upright, above the tray icons and under the
+// clock, and a Grid's parts are its rows. Every taskbar gets elements of its
+// own: one can't be in two trees. Taskbar thread only.
 
 enum class Side { kStart, kEnd };
 
@@ -2961,6 +3441,8 @@ struct Bar {
     std::vector<Item> items;  // sorted by order
     winrt::weak_ref<Controls::StackPanel> hosts[2];
     bool noTray = false;  // logged that it has no tray to hold them
+    bool rows = false;    // the hosts sit in rows of a Grid tray (a side taskbar's)
+    bool loggedSide = false;
 };
 
 std::list<Bar> g_bars;
@@ -2978,17 +3460,30 @@ Bar& BarOf(HWND hwnd) {
 }
 
 // A place in the tray is a slot: a child index in a StackPanel, a column in a
-// Grid.
+// Grid (a row with `rows`, a side taskbar's).
+
+using G = Controls::Grid;
+
+int LineOf(FrameworkElement const& e, bool rows) {
+    return rows ? G::GetRow(e) : G::GetColumn(e);
+}
+
+int SpanOf(FrameworkElement const& e, bool rows) {
+    return rows ? G::GetRowSpan(e) : G::GetColumnSpan(e);
+}
+
+uint32_t LineCount(Controls::Grid const& grid, bool rows) {
+    return rows ? grid.RowDefinitions().Size() : grid.ColumnDefinitions().Size();
+}
 
 // Just after the child holding the clock and the show-desktop sliver that
 // follows it, so the pill ends with the widgets; else at the end.
-uint32_t EndSlot(Controls::Panel const& tray) {
-    using G = Controls::Grid;
+uint32_t EndSlot(Controls::Panel const& tray, bool rows = false) {
     auto children = tray.Children();
     auto grid = tray.try_as<G>();
     auto after = [&](uint32_t i) {
         auto child = children.GetAt(i).as<FrameworkElement>();
-        return grid ? uint32_t(G::GetColumn(child) + G::GetColumnSpan(child)) : i + 1;
+        return grid ? uint32_t(LineOf(child, rows) + SpanOf(child, rows)) : i + 1;
     };
     for (uint32_t i = 0; i < children.Size(); i++) {
         auto child = children.GetAt(i).try_as<FrameworkElement>();
@@ -3001,43 +3496,55 @@ uint32_t EndSlot(Controls::Panel const& tray) {
             uint32_t desk;
             auto sliver = core::ChildNamed(tray, L"ShowDesktopStack");
             if (sliver && children.IndexOf(sliver, desk) &&
-                (grid ? uint32_t(G::GetColumn(sliver)) : desk) == slot) {
+                (grid ? uint32_t(LineOf(sliver, rows)) : desk) == slot) {
                 slot = after(desk);
             }
             return slot;
         }
     }
-    return grid ? grid.ColumnDefinitions().Size() : children.Size();
+    return grid ? LineCount(grid, rows) : children.Size();
 }
 
-// As a column is made (`by` 1) or taken (`by` -1) at `column` of a Grid: the
-// children from there on move with it, and one lying across it grows or
-// shrinks.
-void ShiftColumns(Controls::Grid const& grid, int column, int by) {
-    using G = Controls::Grid;
+// As a column (row with `rows`) is made (`by` 1) or taken (`by` -1) at `line`
+// of a Grid: the children from there on move with it, and one lying across it
+// grows or shrinks.
+void ShiftColumns(Controls::Grid const& grid, int column, int by, bool rows = false) {
     for (auto const& child : grid.Children()) {
         auto e = child.try_as<FrameworkElement>();
         if (!e) {
             continue;
         }
-        int start = G::GetColumn(e), span = G::GetColumnSpan(e);
+        int start = LineOf(e, rows), span = SpanOf(e, rows);
         if (by > 0 ? start >= column : start > column) {
-            G::SetColumn(e, start + by);
+            rows ? G::SetRow(e, start + by) : G::SetColumn(e, start + by);
         } else if (start < column && start + span > column) {
-            G::SetColumnSpan(e, std::max(1, span + by));
+            rows ? G::SetRowSpan(e, std::max(1, span + by))
+                 : G::SetColumnSpan(e, std::max(1, span + by));
         }
     }
 }
 
-// Puts `host` in the tray at `slot`. A Grid gets a column of the host's own
-// width there.
+// Puts `host` in the tray at `slot`. A Grid gets a column (a row with `rows`) of
+// the host's own size there.
 void InsertInTray(Controls::Panel const& tray,
                   uint32_t slot,
-                  FrameworkElement const& host) {
+                  FrameworkElement const& host,
+                  bool rows = false) {
     auto children = tray.Children();
     auto grid = tray.try_as<Controls::Grid>();
     if (!grid) {
         children.InsertAt(std::min(slot, children.Size()), host);
+        return;
+    }
+    if (rows) {
+        auto lines = grid.RowDefinitions();
+        slot = std::min(slot, lines.Size());
+        Controls::RowDefinition definition;
+        definition.Height(GridLengthHelper::Auto());
+        lines.InsertAt(slot, definition);
+        ShiftColumns(grid, (int)slot, 1, true);
+        Controls::Grid::SetRow(host, (int)slot);
+        children.Append(host);
         return;
     }
     auto columns = grid.ColumnDefinitions();
@@ -3050,8 +3557,8 @@ void InsertInTray(Controls::Panel const& tray,
     children.Append(host);
 }
 
-// Takes `host` out of the tray; a Grid loses the column made for it.
-void TakeFromTray(FrameworkElement const& host) {
+// Takes `host` out of the tray; a Grid loses the column (row) made for it.
+void TakeFromTray(FrameworkElement const& host, bool rows = false) {
     auto tray = core::Parent(host).try_as<Controls::Panel>();
     uint32_t index;
     if (!tray || !tray.Children().IndexOf(host, index)) {
@@ -3060,6 +3567,15 @@ void TakeFromTray(FrameworkElement const& host) {
     tray.Children().RemoveAt(index);
     auto grid = tray.try_as<Controls::Grid>();
     if (!grid) {
+        return;
+    }
+    if (rows) {
+        int row = Controls::Grid::GetRow(host);
+        auto lines = grid.RowDefinitions();
+        if (row >= 0 && row < (int)lines.Size()) {
+            lines.RemoveAt(row);
+            ShiftColumns(grid, row, -1, true);
+        }
         return;
     }
     int column = Controls::Grid::GetColumn(host);
@@ -3084,10 +3600,23 @@ Controls::StackPanel Host(Bar& bar, Side side) {
     auto tray = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid")
                     .try_as<Controls::Panel>();
     auto grid = tray.try_as<Controls::Grid>();
+    bool upright = core::IsSide(bar.hwnd);
+    // A side taskbar's Grid tray stacks its parts in rows.
+    bool rows = upright && grid && grid.RowDefinitions().Size() > 1;
+    if (upright && !std::exchange(bar.loggedSide, true)) {
+        auto stack = tray.try_as<Controls::StackPanel>();
+        Wh_Log(L"Side taskbar %p: widget tray %s, %d rows, %d columns, %s", bar.hwnd,
+               tray ? winrt::get_class_name(tray).c_str() : L"none",
+               grid ? (int)grid.RowDefinitions().Size() : -1,
+               grid ? (int)grid.ColumnDefinitions().Size() : -1,
+               stack ? (stack.Orientation() == Controls::Orientation::Vertical ? L"vertical"
+                                                                                : L"horizontal")
+                     : L"no stack");
+    }
     // Another kind of panel, or a Grid without columns, lays its children
     // out in a way not known here.
     if (!tray || !(tray.try_as<Controls::StackPanel>() ||
-                   (grid && grid.ColumnDefinitions().Size() > 0))) {
+                   (grid && (rows || grid.ColumnDefinitions().Size() > 0)))) {
         if (!std::exchange(bar.noTray, true)) {
             Wh_Log(L"No tray panel for widgets on %08X: %s",
                    (DWORD)(ULONG_PTR)bar.hwnd,
@@ -3102,15 +3631,28 @@ Controls::StackPanel Host(Bar& bar, Side side) {
     }
     Controls::StackPanel host;
     host.Name(name);
-    host.Orientation(Controls::Orientation::Horizontal);
-    host.VerticalAlignment(VerticalAlignment::Center);
     host.Spacing(8);
-    if (side == Side::kStart) {
-        host.Margin({0, 0, kHostGap, 0});
-        InsertInTray(tray, 0, host);
+    bar.rows = rows;
+    if (upright) {
+        host.Orientation(Controls::Orientation::Vertical);
+        host.HorizontalAlignment(HorizontalAlignment::Center);
+        if (side == Side::kStart) {
+            host.Margin({0, 0, 0, kHostGap});
+            InsertInTray(tray, 0, host, rows);
+        } else {
+            host.Margin({0, kHostGap, 0, 0});
+            InsertInTray(tray, EndSlot(tray, rows), host, rows);
+        }
     } else {
-        host.Margin({kHostGap, 0, 0, 0});
-        InsertInTray(tray, EndSlot(tray), host);
+        host.Orientation(Controls::Orientation::Horizontal);
+        host.VerticalAlignment(VerticalAlignment::Center);
+        if (side == Side::kStart) {
+            host.Margin({0, 0, kHostGap, 0});
+            InsertInTray(tray, 0, host);
+        } else {
+            host.Margin({kHostGap, 0, 0, 0});
+            InsertInTray(tray, EndSlot(tray), host);
+        }
     }
     cached = host;
     for (auto& item : bar.items) {
@@ -3139,8 +3681,7 @@ void Add(HWND taskbar,
          int order,
          FrameworkElement const& element,
          Side side = Side::kStart) {
-    // Side taskbar: the widget panels (media, usage) step back.
-    if (core::g_unloading || !taskbar || core::IsSide(taskbar)) {
+    if (core::g_unloading || !taskbar) {
         return;
     }
     auto& bar = BarOf(taskbar);
@@ -3177,10 +3718,6 @@ void PlaceWaiting() {
         return;
     }
     for (auto& bar : g_bars) {
-        // Side taskbar: the widget panels step back.
-        if (core::IsSide(bar.hwnd)) {
-            continue;
-        }
         for (Side side : {Side::kStart, Side::kEnd}) {
             auto host = bar.hosts[(int)side].get();
             if ((!host || !core::Parent(host)) && IsWindow(bar.hwnd) &&
@@ -3209,7 +3746,7 @@ void Restore() {
     for (auto& bar : g_bars) {
         for (auto& cached : bar.hosts) {
             if (auto host = cached.get()) {
-                TakeFromTray(host);
+                TakeFromTray(host, bar.rows);
             }
         }
     }
@@ -3727,10 +4264,65 @@ std::wstring ClockText(bool seconds) {
                : L"";
 }
 
+// Side taskbar (A 쌓기): the time without its seconds, and under it the seconds
+// smaller and in the muted text color. Writing the lines comes back here through
+// the text's watch, which this keeps from writing again.
+constexpr double kSideSecondsSize = 11;
+bool g_writingClock = false;
+std::vector<HWND> g_loggedClocks;
+
+void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
+    auto text = ClockText(false);
+    if (text.empty()) {
+        return;
+    }
+    if (pill::SideOnce(g_loggedClocks, taskbar)) {
+        Wh_Log(L"Side taskbar %p: clock \"%s\" %.0fx%.0f, seconds %d", taskbar,
+               std::wstring(time.Text()).c_str(), time.ActualWidth(), time.ActualHeight(),
+               seconds);
+    }
+    if (!seconds) {
+        if (text != std::wstring_view(time.Text())) {
+            time.Text(text);
+        }
+        return;
+    }
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    wchar_t second[4];
+    swprintf_s(second, L"%02u", (unsigned)now.wSecond);
+    g_writingClock = true;
+    core::Guard(L"Side clock", [&] {
+        auto inlines = time.Inlines();
+        inlines.Clear();
+        Documents::Run main;
+        main.Text(text);
+        inlines.Append(main);
+        inlines.Append(Documents::LineBreak());
+        Documents::Run rest;
+        rest.Text(second);
+        rest.FontSize(kSideSecondsSize);
+        bool dark = time.ActualTheme() == ElementTheme::Dark;
+        rest.Foreground(Media::SolidColorBrush(dark ? settings::theme::kUsageDark.muted
+                                                    : settings::theme::kUsageLight.muted));
+        inlines.Append(rest);
+    });
+    g_writingClock = false;
+}
+
 // Explorer writes the time again each minute; it's written over in the format set.
 void FormatClock(Controls::TextBlock const& time) {
+    if (g_writingClock) {
+        return;
+    }
     std::wstring shown(time.Text());
-    auto text = ClockText(std::ranges::count(shown, L':') >= 2);
+    bool seconds = std::ranges::count(shown, L':') >= 2;
+    auto root = time.XamlRoot();
+    if (core::IsSide(root)) {
+        SideClock(time, core::TaskbarOf(root), seconds);
+        return;
+    }
+    auto text = ClockText(seconds);
     if (!text.empty() && text != shown) {
         time.Text(text);
     }
@@ -3877,6 +4469,74 @@ bool SideFrame(void* abi) {
     return side;
 }
 
+// ---- side taskbars: the thickness across the column ---------------------------------
+// A side taskbar is as thick as a horizontal one is high (size.taskbarHeight). Its
+// frame and tray are given that width and its buttons the room inside it, the way
+// taskbar-vertical 1.5.1 gives Windows' own vertical layout a width (its native
+// path, here per taskbar: a horizontal one beside it keeps the height hooks
+// above). What Windows gave each is kept, to put back at unload.
+
+// Some taskbar is at a side; the per-button work is skipped while none is.
+bool AnySide() {
+    std::lock_guard guard(core::g_sidesLock);
+    return std::ranges::any_of(core::g_sides, [](auto const& s) { return s.second; });
+}
+
+// A side taskbar's buttons, as wide as the pill inside its margins and rim.
+double SideButtonSize() {
+    double size = g_height;
+    if (settings::g.pill.enabled) {
+        size -= theme::kAppsMargin.Top + theme::kAppsMargin.Bottom + 2;
+    }
+    return std::max(16.0, size);
+}
+
+// An element given a side width, with what Windows gave it (`abi`: a button's
+// TaskListButton, valid while the element is).
+struct SideSized {
+    winrt::weak_ref<FrameworkElement> element;
+    double native;
+    void* abi = nullptr;
+};
+
+std::vector<SideSized> g_sideFrames, g_sideTrays, g_sideButtons;
+// The frame size Windows gives a vertical frame's buttons, the same for all.
+double g_nativeButtonSize = std::numeric_limits<double>::quiet_NaN();
+
+SideSized* FindSized(std::vector<SideSized>& list, FrameworkElement const& e) {
+    std::erase_if(list, [](SideSized const& s) { return !s.element.get(); });
+    auto it = std::ranges::find_if(list, [&](SideSized const& s) { return s.element.get() == e; });
+    return it != list.end() ? &*it : nullptr;
+}
+
+// `fresh`: `native` is what Windows gives it now, not a value of the mod's,
+// which a known element doesn't take for Windows' own.
+void NoteSized(std::vector<SideSized>& list, FrameworkElement const& e, double native,
+               bool fresh, void* abi = nullptr) {
+    if (auto known = FindSized(list, e)) {
+        if (fresh) {
+            known->native = native;
+        }
+        return;
+    }
+    list.push_back({winrt::make_weak(e), native, abi});
+}
+
+// Once per kind (`what`) and side taskbar.
+void LogSideSize(FrameworkElement const& e, PCWSTR what, double native, double now) {
+    static std::vector<std::pair<PCWSTR, HWND>> seen;
+    auto root = e.XamlRoot();
+    HWND taskbar = root ? core::TaskbarOf(root) : nullptr;
+    if (!taskbar || std::ranges::find(seen, std::pair{what, taskbar}) != seen.end()) {
+        return;
+    }
+    if (seen.size() >= 64) {
+        seen.clear();
+    }
+    seen.emplace_back(what, taskbar);
+    Wh_Log(L"Side taskbar %p: %s %.1f, given %.1f", taskbar, what, native, now);
+}
+
 STDAPI GetDpiForMonitor(HMONITOR monitor, int type, UINT* dpiX, UINT* dpiY);
 
 int MonitorDpi(HWND hwnd) {
@@ -4001,12 +4661,16 @@ using TrayUI_GetMinSize_t = void(WINAPI*)(void* pThis, HMONITOR, SIZE*);
 TrayUI_GetMinSize_t TrayUI_GetMinSize_Original;
 void WINAPI TrayUI_GetMinSize_Hook(void* pThis, HMONITOR monitor, SIZE* size) {
     TrayUI_GetMinSize_Original(pThis, monitor, size);
-    // Keeps an auto-hidden secondary taskbar in place. Side taskbar: the custom
-    // height steps back.
-    if (g_height && !core::IsSide(core::TaskbarOn(monitor))) {
+    // Keeps an auto-hidden secondary taskbar in place; a side one takes the
+    // thickness as its width.
+    if (g_height) {
         UINT dpiX = 0, dpiY = 0;
         GetDpiForMonitor(monitor, 0, &dpiX, &dpiY);
-        size->cy = MulDiv(g_height, dpiY, 96);
+        if (core::IsSide(core::TaskbarOn(monitor))) {
+            size->cx = MulDiv(g_height, dpiX, 96);
+        } else {
+            size->cy = MulDiv(g_height, dpiY, 96);
+        }
     }
 }
 
@@ -4033,12 +4697,16 @@ using SHAppBarMessage_t = decltype(&SHAppBarMessage);
 SHAppBarMessage_t SHAppBarMessage_Original;
 UINT_PTR WINAPI SHAppBarMessage_Hook(DWORD message, PAPPBARDATA data) {
     auto ret = SHAppBarMessage_Original(message, data);
-    // Side taskbar: the custom height steps back for a rectangle at a side edge.
-    if (message == ABM_QUERYPOS && ret && !core::IsSideEdge(data->uEdge) && g_height) {
+    // A rectangle at a side edge gets the thickness as its width.
+    if (message == ABM_QUERYPOS && ret && g_height) {
         if (int dpi = MonitorDpi(data->hWnd)) {
             int height = MulDiv(g_height, dpi, 96);
             if (data->uEdge == ABE_TOP) {
                 data->rc.bottom = data->rc.top + height;
+            } else if (data->uEdge == ABE_LEFT) {
+                data->rc.right = data->rc.left + height;
+            } else if (data->uEdge == ABE_RIGHT) {
+                data->rc.left = data->rc.right - height;
             } else {
                 data->rc.top = data->rc.bottom - height;
             }
@@ -4162,21 +4830,25 @@ double WINAPI TaskbarConfiguration_GetFrameSize_Hook(int taskbarSize) {
     if (!g_originalHeight && regular) {
         g_originalHeight = TaskbarConfiguration_GetFrameSize_Original(taskbarSize);
     }
-    // Side taskbar: no taskbar is known here, so the custom height steps back only
-    // while every taskbar is at a side; a side one among horizontal ones gets it too.
-    if (g_height && regular && !core::AllSide()) {
+    // The thickness of every taskbar, horizontal or at a side (no taskbar is
+    // known here): a side frame is given it as its width (SizeSideFrame too).
+    if (g_height && regular) {
         return g_height;
     }
     return TaskbarConfiguration_GetFrameSize_Original(taskbarSize);
 }
 
+// Whether the frame UpdateFrameHeight works on is a side taskbar's, for the
+// setters it calls, which give no element to ask; unset outside it.
+thread_local std::optional<bool> g_updatingSideFrame;
+
 using TaskbarFrame_SetDouble_t = void(WINAPI*)(void* pThis, double value);
 TaskbarFrame_SetDouble_t TaskbarFrame_MaxHeight_Original;
 TaskbarFrame_SetDouble_t TaskbarFrame_Height_Original;
 void WINAPI TaskbarFrame_Height_Hook(void* pThis, double value) {
-    // Side taskbar: the frame's open height steps back while every taskbar is at a
-    // side (the call gives no element to ask; a vertical frame gets a width instead).
-    if (TaskbarFrame_MaxHeight_Original && !core::AllSide()) {
+    // Side taskbar: a side frame keeps its own height (it is given a width
+    // instead); a call from elsewhere asks whether every taskbar is at a side.
+    if (TaskbarFrame_MaxHeight_Original && !g_updatingSideFrame.value_or(core::AllSide())) {
         TaskbarFrame_MaxHeight_Original(pThis,
                                         std::numeric_limits<double>::infinity());
     }
@@ -4221,23 +4893,43 @@ double HeightMatchingWindow(FrameworkElement const& frame, int height) {
     return windowHeight / scale;
 }
 
+// A side frame or tray matches its width the same way.
 bool MatchWindowHeight(FrameworkElement const& frame) {
     int height = g_height;
-    // Side taskbar: the height match steps back.
-    if (core::g_unloading || !height || frame.Height() != height ||
-        core::IsSide(frame.XamlRoot())) {
+    if (core::g_unloading || !height) {
+        return false;
+    }
+    bool tall = frame.Height() == height;
+    if (!tall && frame.Width() != height) {
+        return false;
+    }
+    // A horizontal frame by its height, a side one by its width.
+    bool side = core::IsSide(frame.XamlRoot());
+    if (tall == side) {
         return false;
     }
     double matched = HeightMatchingWindow(frame, height);
     if (matched == height) {
         return false;
     }
-    frame.Height(matched);
+    if (side) {
+        frame.Width(matched);
+    } else {
+        frame.Height(matched);
+    }
     return true;
 }
 
-void MatchContentGridHeight(FrameworkElement const& frame) {
+void MatchContentGridHeight(FrameworkElement const& frame, bool side = false) {
     if (auto grid = core::Parent(frame)) {
+        if (side) {
+            double width = frame.Width();
+            double gridWidth = grid.Width();
+            if (gridWidth > 0 && gridWidth != width) {
+                grid.Width(width);
+            }
+            return;
+        }
         double height = frame.Height();
         double gridHeight = grid.Height();
         if (gridHeight > 0 && gridHeight != height) {
@@ -4246,19 +4938,73 @@ void MatchContentGridHeight(FrameworkElement const& frame) {
     }
 }
 
+// Taskbar thread. The buttons of a side frame that have not had their size yet
+// get it through their next visual state update, which their icon panel's new
+// width brings (UpdateVisualStates, below).
+void ResizeSideButtons(FrameworkElement const& frame) {
+    auto repeater =
+        core::ChildNamed(core::ChildNamed(frame, L"RootGrid"), L"TaskbarFrameRepeater");
+    if (!repeater) {
+        return;
+    }
+    double size = SideButtonSize();
+    core::FindChild(repeater, [&](FrameworkElement const& button) {
+        if (!core::IsClass(button, L"Taskbar.TaskListButton") || FindSized(g_sideButtons, button)) {
+            return false;
+        }
+        auto panel = core::ChildNamed(button, L"IconPanel");
+        double width = panel ? panel.Width() : std::numeric_limits<double>::quiet_NaN();
+        // A button with a label has an Auto icon panel.
+        if (!std::isnan(width) && width != size) {
+            if (std::isnan(g_nativeButtonSize)) {
+                g_nativeButtonSize = width;
+            }
+            panel.Width(size);
+        }
+        return false;
+    });
+}
+
+// A vertical frame is given a width and no height: the taskbar's thickness.
+void SizeSideFrame(FrameworkElement const& frame) {
+    double width = frame.Width();
+    if (std::isnan(width) || !std::isnan(frame.Height())) {
+        LogSideSize(frame, L"frame without a width of its own, height", frame.Height(), width);
+        return;
+    }
+    // The width the mod gave, or the one matched to the window, isn't Windows'.
+    bool ours = g_height && (width == g_height || width == HeightMatchingWindow(frame, g_height));
+    NoteSized(g_sideFrames, frame, width, !ours);
+    if (core::g_unloading || !g_height) {
+        return;
+    }
+    LogSideSize(frame, L"frame width", width, g_height);
+    if (width != g_height) {
+        frame.Width(g_height);
+    }
+    ResizeSideButtons(frame);
+}
+
 using TaskbarController_UpdateFrameHeight_t = void(WINAPI*)(void* pThis);
 TaskbarController_UpdateFrameHeight_t TaskbarController_UpdateFrameHeight_Original;
 void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
     LONG offset = TaskbarFrameOffset();
     void* frameImpl = offset ? *(void**)((BYTE*)pThis + offset) : nullptr;
     auto frame = frameImpl ? core::FromAbi(((IUnknown**)frameImpl)[1]) : nullptr;
-    // Side taskbar: the frame's open height steps back.
+    // A side frame keeps its own height and is given the thickness as its width.
     bool side = false;
     if (frame) {
         core::Guard(L"Frame side", [&] { side = core::IsSide(frame.XamlRoot()); });
     }
     if (!frame || side) {
+        if (frame) {
+            g_updatingSideFrame = true;
+        }
         TaskbarController_UpdateFrameHeight_Original(pThis);
+        g_updatingSideFrame.reset();
+        if (frame) {
+            core::Guard(L"Side frame width", [&] { SizeSideFrame(frame); });
+        }
         return;
     }
     core::Guard(L"Frame max height", [&] {
@@ -4276,7 +5022,7 @@ int WINAPI TaskbarFrame_MeasureOverride_Hook(void* pThis, Size size, Size* resul
     core::Guard(L"Frame measure", [&] {
         auto frame = core::FromAbi(pThis);
         if (frame && MatchWindowHeight(frame)) {
-            MatchContentGridHeight(frame);
+            MatchContentGridHeight(frame, core::IsSide(frame.XamlRoot()));
         }
     });
     int ret = TaskbarFrame_MeasureOverride_Original(pThis, size, result);
@@ -4430,8 +5176,68 @@ void UpdateButtonExtents(void* pThis) {
     }
 }
 
+// A vertical frame's buttons are given the frame size as their width (their icon
+// panel's); on a side taskbar that is the room inside the pill (SideButtonSize).
+using TaskListButton_TaskbarFrameSize_t = void(WINAPI*)(void* pThis, double frameSize);
+TaskListButton_TaskbarFrameSize_t TaskListButton_TaskbarFrameSize_Original;
+
+FrameworkElement ButtonOf(void* pThis) {
+    return core::FromAbi((IUnknown*)pThis + 3);
+}
+
+// A button in a side frame's own list, not the overflow flyout's.
+bool SideFrameButton(FrameworkElement const& button) {
+    auto repeater = core::Parent(button);
+    if (!repeater || repeater.Name() != L"TaskbarFrameRepeater") {
+        return false;
+    }
+    auto rootGrid = core::Parent(repeater);
+    auto frame = rootGrid ? core::Parent(rootGrid) : nullptr;
+    return frame && std::isnan(frame.Height()) && core::IsSide(button.XamlRoot());
+}
+
+void WINAPI TaskListButton_TaskbarFrameSize_Hook(void* pThis, double frameSize) {
+    if (!core::g_unloading && g_height && AnySide()) {
+        core::Guard(L"Side button size", [&] {
+            auto button = ButtonOf(pThis);
+            if (button && SideFrameButton(button)) {
+                double size = SideButtonSize();
+                if (frameSize != size) {
+                    g_nativeButtonSize = frameSize;
+                }
+                NoteSized(g_sideButtons, button, frameSize, frameSize != size, pThis);
+                LogSideSize(button, L"task button frame size", frameSize, size);
+                frameSize = size;
+            }
+        });
+    }
+    TaskListButton_TaskbarFrameSize_Original(pThis, frameSize);
+}
+
+// Buttons are given the frame size as they are made: those made before the mod
+// get it as they update their states.
+void SizeSideButton(void* pThis) {
+    auto button = ButtonOf(pThis);
+    if (!button || FindSized(g_sideButtons, button) || !SideFrameButton(button)) {
+        return;
+    }
+    auto panel = core::ChildNamed(button, L"IconPanel");
+    double native = panel ? panel.Width() : std::numeric_limits<double>::quiet_NaN();
+    double size = SideButtonSize();
+    if (std::isnan(g_nativeButtonSize) && !std::isnan(native) && native != size) {
+        g_nativeButtonSize = native;
+    }
+    NoteSized(g_sideButtons, button, native, false, pThis);
+    LogSideSize(button, L"task button icon panel", native, size);
+    TaskListButton_TaskbarFrameSize_Original(pThis, size);
+}
+
 // Called by the shared UpdateVisualStates hook.
 void UpdateVisualStates(void* pThis, void (*original)(void*)) {
+    if (TaskListButton_TaskbarFrameSize_Original && !core::g_unloading && g_height &&
+        AnySide()) {
+        core::Guard(L"Side button", [&] { SizeSideButton(pThis); });
+    }
     if (TaskListButton_UpdateIconColumnDefinition_Original &&
         (g_applying || g_buttonWidthCustomized)) {
         UpdateButtonExtents(pThis);
@@ -4616,13 +5422,25 @@ void UpdateToggleButtonWidth(void* pThis) {
     } else {
         return;
     }
+    double button_ = g_smallIconSize ? theme::kButtonWidthSmall : ButtonWidth();
+    // A side taskbar's toggle runs down the column: its height is the extent,
+    // where it has one; its width stays Windows'.
+    if (core::IsSide(button.XamlRoot())) {
+        double height = panel.Height();
+        LogSideSize(button, L"toggle button width", panel.Width(), height);
+        auto padding = panel.Padding();
+        double newHeight = button_ + padding.Top + padding.Bottom + extra;
+        if (height > 0 && newHeight != height) {
+            panel.Height(newHeight);
+        }
+        return;
+    }
     double width = panel.Width();
     if (!(width > 0)) {
         return;
     }
     // The start button's padding depends on the taskbar alignment.
     auto padding = panel.Padding();
-    double button_ = g_smallIconSize ? theme::kButtonWidthSmall : ButtonWidth();
     double newWidth = button_ + padding.Left + padding.Right + extra;
     if (newWidth != width) {
         panel.Width(newWidth);
@@ -4713,11 +5531,8 @@ LONG LastHeightOffset() {
 }
 
 void WINAPI SystemTrayController_UpdateFrameSize_Hook(void* pThis) {
-    // Side taskbar: the primary's tray (this controller's) keeps its height.
-    if (core::IsSide(core::PrimaryTaskbar())) {
-        SystemTrayController_UpdateFrameSize_Original(pThis);
-        return;
-    }
+    // The primary's tray (this controller's) on a side taskbar keeps its height
+    // (SideFrame) and is given the thickness as its width (the setter below).
     // Forgets the last height so the frame size is set again.
     if (LONG offset = LastHeightOffset()) {
         *(double*)((BYTE*)pThis + offset) = 0;
@@ -4748,15 +5563,282 @@ void WINAPI SystemTrayFrame_Height_Hook(void* pThis, double value) {
     SystemTrayFrame_Height_Original(pThis, value);
 }
 
+// A side taskbar's tray frame is given a width (and a horizontal one an Auto
+// width): the thickness, where `abi` is a side taskbar's tray frame.
+std::optional<double> SideTrayWidth(void* abi, double width) {
+    std::optional<double> given;
+    core::Guard(L"Side tray width", [&] {
+        auto tray = core::FromAbi(abi);
+        if (tray && core::IsClass(tray, L"SystemTray.SystemTrayFrame") &&
+            core::IsSide(tray.XamlRoot())) {
+            NoteSized(g_sideTrays, tray, width, width != g_height);
+            LogSideSize(tray, L"tray width", width, g_height);
+            given = g_height;
+        }
+    });
+    return given;
+}
+
 SetDouble_t SystemTrayFrame_SetDouble_Original;
 void WINAPI SystemTrayFrame_SetDouble_Hook(void* pThis, void* method, double* value) {
-    if (g_inTrayUpdateFrameSize && g_height &&
-        VcallThunkVtableOffset(method) == kPutHeightOffset && !SideFrame(*(void**)pThis)) {
-        double height = g_height;
-        SystemTrayFrame_SetDouble_Original(pThis, method, &height);
-        return;
+    if (g_inTrayUpdateFrameSize && g_height) {
+        size_t slot = VcallThunkVtableOffset(method);
+        if (slot == kPutHeightOffset && !SideFrame(*(void**)pThis)) {
+            double height = g_height;
+            SystemTrayFrame_SetDouble_Original(pThis, method, &height);
+            return;
+        }
+        if (slot == kPutWidthOffset && !std::isnan(*value) && !core::g_unloading) {
+            if (auto width = SideTrayWidth(*(void**)pThis, *value)) {
+                double given = *width;
+                SystemTrayFrame_SetDouble_Original(pThis, method, &given);
+                return;
+            }
+        }
     }
     SystemTrayFrame_SetDouble_Original(pThis, method, value);
+}
+
+// ---- SystemTray.dll: a side taskbar's tray layout ---------------------------------------
+// From taskbar-vertical 1.5.1's native path, per taskbar. The tray stands its icons
+// in one column (the compact layout) when the taskbar has room for one, in a grid
+// (the detailed layout) when for two or more.
+
+// A tray icon column of Windows' vertical taskbar without labels.
+constexpr double kTrayColumnWidth = 48;
+
+// Tray frames whose layout state setters were turned to minimum heights.
+std::vector<winrt::weak_ref<FrameworkElement>> g_sideTrayLayouts;
+
+// The detailed layout gives the clock button and the one beside it fixed
+// heights; they become minimum heights, so the buttons fit what they hold as in
+// the compact layout (`back`: the other way, at unload).
+void TrayButtonHeights(FrameworkElement const& trayFrame, bool back) {
+    auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid");
+    if (!grid) {
+        return;
+    }
+    PCWSTR from = back ? L"MinHeight" : L"Height";
+    PCWSTR to = back ? L"Height" : L"MinHeight";
+    for (auto const& group : VisualStateManager::GetVisualStateGroups(grid)) {
+        if (group.Name() != L"LayoutStates") {
+            continue;
+        }
+        for (auto const& state : group.States()) {
+            if (state.Name() != L"VerticalLayout") {
+                continue;
+            }
+            // Setters from markup keep their target as a name, which isn't
+            // exposed: only the property of the target path is replaced.
+            std::vector<TargetPropertyPath> paths;
+            for (auto const& base : state.Setters()) {
+                auto setter = base.try_as<Setter>();
+                auto target = setter ? setter.Target() : nullptr;
+                if (target && target.Path() && target.Path().Path() == from) {
+                    paths.push_back(target);
+                }
+            }
+            if (paths.empty()) {
+                continue;
+            }
+            // A state's setters come off with the property they target, so a
+            // state in use is left before it changes.
+            auto current = group.CurrentState();
+            auto control = trayFrame.try_as<Controls::Control>();
+            bool inUse = control && current && current.Name() == L"VerticalLayout";
+            if (inUse) {
+                VisualStateManager::GoToState(control, L"NormalLayout", false);
+            }
+            for (auto const& target : paths) {
+                target.Path(PropertyPath(to));
+            }
+            if (inUse) {
+                VisualStateManager::GoToState(control, L"VerticalLayout", false);
+            }
+        }
+    }
+}
+
+using SystemTrayFrame_UpdateLayoutState_t = void(WINAPI*)(void* pThis);
+SystemTrayFrame_UpdateLayoutState_t SystemTrayFrame_UpdateLayoutState_Original;
+void WINAPI SystemTrayFrame_UpdateLayoutState_Hook(void* pThis) {
+    if (!core::g_unloading && AnySide()) {
+        core::Guard(L"Side tray layout", [&] {
+            auto tray = core::FromAbi(((IUnknown**)pThis)[1]);
+            if (!tray || !core::IsSide(tray.XamlRoot())) {
+                return;
+            }
+            std::erase_if(g_sideTrayLayouts, [](auto& w) { return !w.get(); });
+            if (std::ranges::none_of(g_sideTrayLayouts, [&](auto& w) { return w.get() == tray; })) {
+                g_sideTrayLayouts.push_back(winrt::make_weak(tray));
+                TrayButtonHeights(tray, false);
+            }
+        });
+    }
+    SystemTrayFrame_UpdateLayoutState_Original(pThis);
+}
+
+// The tray reads the grouping mode for its layout: the compact one for the mode
+// that hides labels, else the detailed one. On a side taskbar it follows the
+// thickness instead, the detailed one only where two columns fit. The setting
+// gives no taskbar: while none is at a side it is Windows' own.
+using TaskbarSettings_GroupingMode_t = int(WINAPI*)(void* pThis);
+TaskbarSettings_GroupingMode_t TaskbarSettings_GroupingMode_Original;
+int WINAPI TaskbarSettings_GroupingMode_Hook(void* pThis) {
+    int mode = TaskbarSettings_GroupingMode_Original(pThis);
+    if (core::g_unloading || !g_height || !AnySide()) {
+        return mode;
+    }
+    if (g_height < kTrayColumnWidth * 2) {
+        return 0;  // always combined, no labels
+    }
+    return mode != 0 ? mode : 1;
+}
+
+// The detailed layout's icon grids: as many columns as fit the thickness, no more
+// than there are icons; the columns share the width, which lines up the grids.
+using SystemTrayFrame_ConfigureWrapGridColumns_t =
+    void(WINAPI*)(void* itemsHost, unsigned int count, double width);
+SystemTrayFrame_ConfigureWrapGridColumns_t SystemTrayFrame_ConfigureWrapGridColumns_Original;
+void WINAPI SystemTrayFrame_ConfigureWrapGridColumns_Hook(void* itemsHost,
+                                                          unsigned int count,
+                                                          double width) {
+    SystemTrayFrame_ConfigureWrapGridColumns_Original(itemsHost, count, width);
+    if (core::g_unloading || !g_height || !itemsHost) {
+        return;
+    }
+    core::Guard(L"Side tray grid", [&] {
+        DependencyObject host{nullptr};
+        winrt::copy_from_abi(host, *(void**)itemsHost);
+        auto wrap = host ? core::FindDescendant(
+                               host.try_as<FrameworkElement>(),
+                               [](FrameworkElement const& e) {
+                                   return (bool)e.try_as<Controls::WrapGrid>();
+                               },
+                               4)
+                               .try_as<Controls::WrapGrid>()
+                         : nullptr;
+        if (!wrap || !core::IsSide(wrap.XamlRoot())) {
+            return;
+        }
+        double room = g_height;
+        int columns = std::clamp((int)count, 1, std::max(1, (int)(room / kTrayColumnWidth)));
+        double scale = wrap.XamlRoot().RasterizationScale();
+        scale = scale > 0 ? scale : 1;
+        wrap.MaximumRowsOrColumns(columns);
+        wrap.ItemWidth(std::max(1.0, std::floor(room / columns * scale) / scale));
+    });
+}
+
+// Like Windows, the first and last icons of each grid row keep off the taskbar's
+// sides, for the grid's columns rather than Windows' three.
+bool SideTrayInsets(Controls::ItemsControl const& items, unsigned int count) {
+    auto wrap = items.ItemsPanelRoot().try_as<Controls::WrapGrid>();
+    if (!wrap || !core::IsSide(items.XamlRoot())) {
+        return false;
+    }
+    double itemWidth = wrap.ItemWidth();
+    int maxColumns = wrap.MaximumRowsOrColumns();
+    if (!(itemWidth > 0) || maxColumns < 1) {
+        return false;
+    }
+    constexpr double kInset = 4;
+    unsigned int columns = maxColumns;
+    unsigned int rows = (count + columns - 1) / columns;
+    double leftover = std::max(g_height - itemWidth * columns, 0.0);
+    for (unsigned int i = 0; i < count; i++) {
+        auto container = items.ContainerFromIndex((int)i).try_as<FrameworkElement>();
+        auto control = container ? core::FindDescendant(
+                                       container,
+                                       [](FrameworkElement const& e) {
+                                           return (bool)e.try_as<Controls::Control>();
+                                       },
+                                       4)
+                                       .try_as<Controls::Control>()
+                                 : nullptr;
+        if (!control) {
+            continue;
+        }
+        unsigned int row = i / columns, column = i % columns;
+        unsigned int inRow = row == rows - 1 ? count - row * columns : columns;
+        Thickness padding{};
+        if (column == 0) {
+            padding.Left = kInset;
+        }
+        if (column == inRow - 1) {
+            padding.Right = std::max(kInset - (inRow == columns ? leftover : 0), 0.0);
+        }
+        control.Padding(padding);
+        // The content of an icon with a background is inset with the background.
+        auto content = core::FindDescendant(
+            control, [](FrameworkElement const& e) { return e.Name() == L"ContentGrid"; }, 6);
+        if (!content) {
+            continue;
+        }
+        if (core::FindDescendant(
+                control, [](FrameworkElement const& e) { return e.Name() == L"BackgroundBorder"; },
+                6)) {
+            content.Margin(padding);
+        } else {
+            content.ClearValue(FrameworkElement::MarginProperty());
+        }
+    }
+    return true;
+}
+
+using SystemTrayFrame_ApplyPositionAwareHorizontalPadding_t =
+    void(WINAPI*)(void* itemsControl, unsigned int count);
+SystemTrayFrame_ApplyPositionAwareHorizontalPadding_t
+    SystemTrayFrame_ApplyPositionAwareHorizontalPadding_Original;
+void WINAPI SystemTrayFrame_ApplyPositionAwareHorizontalPadding_Hook(void* itemsControl,
+                                                                      unsigned int count) {
+    bool done = false;
+    if (!core::g_unloading && g_height && itemsControl) {
+        core::Guard(L"Side tray insets", [&] {
+            Controls::ItemsControl items{nullptr};
+            winrt::copy_from_abi(items, *(void**)itemsControl);
+            done = items && SideTrayInsets(items, count);
+        });
+    }
+    if (!done) {
+        SystemTrayFrame_ApplyPositionAwareHorizontalPadding_Original(itemsControl, count);
+    }
+}
+
+// Taskbar thread, after an apply: what the side taskbars were given follows the
+// height set now, or at unload goes back to Windows' own.
+void RefreshSide() {
+    bool back = core::g_unloading;
+    for (auto* list : {&g_sideFrames, &g_sideTrays}) {
+        for (auto& sized : *list) {
+            auto e = sized.element.get();
+            double width = back ? sized.native : g_height;
+            if (e && width > 0 && e.Width() != width) {
+                core::Guard(L"Side width", [&] { e.Width(width); });
+            }
+        }
+    }
+    if (TaskListButton_TaskbarFrameSize_Original) {
+        for (auto& sized : g_sideButtons) {
+            double size = back ? g_nativeButtonSize : SideButtonSize();
+            if (sized.element.get() && size > 0) {
+                core::Guard(L"Side button size", [&] {
+                    TaskListButton_TaskbarFrameSize_Original(sized.abi, size);
+                });
+            }
+        }
+    }
+    if (back) {
+        for (auto& weak : g_sideTrayLayouts) {
+            if (auto tray = weak.get()) {
+                core::Guard(L"Side tray layout", [&] { TrayButtonHeights(tray, true); });
+            }
+        }
+        g_sideFrames.clear();
+        g_sideTrays.clear();
+        g_sideButtons.clear();
+        g_sideTrayLayouts.clear();
+    }
 }
 
 // The omni button style and the show desktop column width compare the frame
@@ -4909,6 +5991,9 @@ void CollectTaskbarView(std::vector<SH>& list) {
     list.push_back({{LR"(private: void __cdecl winrt::Taskbar::implementation::TaskListButton::UpdateIconColumnDefinition(void))"},
                     &TaskListButton_UpdateIconColumnDefinition_Original, nullptr,
                     true});
+    list.push_back({{LR"(public: void __cdecl winrt::Taskbar::implementation::TaskListButton::TaskbarFrameSize(double))"},
+                    &TaskListButton_TaskbarFrameSize_Original,
+                    TaskListButton_TaskbarFrameSize_Hook, true});
     list.push_back({{LR"(public: void __cdecl winrt::Microsoft::Windows::Taskbar::implementation::TaskbarComponentHost::IconHeight(double))"},
                     &TaskbarComponentHost_IconHeight_Original, nullptr, true});
     list.push_back({{LR"(private: void __cdecl winrt::Microsoft::Windows::Taskbar::implementation::TaskbarComponentHost::UpdateDefaultWidth(void))"},
@@ -4953,6 +6038,19 @@ void CollectSystemTray(std::vector<SH>& list) {
     list.push_back({{LR"(public: __cdecl winrt::impl::consume_Windows_UI_Xaml_IFrameworkElementOverrides<struct winrt::Windows::UI::Xaml::IFrameworkElementOverrides>::MeasureOverride(struct winrt::Windows::Foundation::Size const &)const )"},
                     &FrameworkElementOverrides_MeasureOverride_Original,
                     FrameworkElementOverrides_MeasureOverride_Hook, true});
+    // A side taskbar's tray layout.
+    list.push_back({{LR"(private: void __cdecl winrt::SystemTray::implementation::SystemTrayFrame::UpdateLayoutState(void))"},
+                    &SystemTrayFrame_UpdateLayoutState_Original,
+                    SystemTrayFrame_UpdateLayoutState_Hook, true});
+    list.push_back({{LR"(private: static void __cdecl winrt::SystemTray::implementation::SystemTrayFrame::ConfigureWrapGridColumns(struct winrt::Windows::UI::Xaml::DependencyObject const &,unsigned int,double))"},
+                    &SystemTrayFrame_ConfigureWrapGridColumns_Original,
+                    SystemTrayFrame_ConfigureWrapGridColumns_Hook, true});
+    list.push_back({{LR"(private: static void __cdecl winrt::SystemTray::implementation::SystemTrayFrame::ApplyPositionAwareHorizontalPadding(struct winrt::Windows::UI::Xaml::Controls::ItemsControl const &,unsigned int))"},
+                    &SystemTrayFrame_ApplyPositionAwareHorizontalPadding_Original,
+                    SystemTrayFrame_ApplyPositionAwareHorizontalPadding_Hook, true});
+    list.push_back({{LR"(public: __cdecl winrt::impl::consume_WindowsUdk_UI_Shell_ITaskbarSettings5<struct winrt::WindowsUdk::UI::Shell::TaskbarSettings>::GroupingMode(void)const )"},
+                    &TaskbarSettings_GroupingMode_Original,
+                    TaskbarSettings_GroupingMode_Hook, true});
 }
 
 // After Taskbar.View.dll's symbols resolved.
@@ -5018,7 +6116,9 @@ void Apply(int height) {
         RECT rect{};
         GetWindowRect(taskbar, &rect);
         int dpi = MonitorDpi(taskbar);
-        g_height = MulDiv(rect.bottom - rect.top, 96, dpi ? dpi : 96);
+        // The thickness: a side taskbar's width.
+        int thickness = core::IsSide(taskbar) ? rect.right - rect.left : rect.bottom - rect.top;
+        g_height = MulDiv(thickness, 96, dpi ? dpi : 96);
     }
 
     g_applying = true;
@@ -5030,8 +6130,12 @@ void Apply(int height) {
     }
     g_height = height;
     Trigger(taskbar);
-    // The buttons that exist take the icon height only when told.
-    core::RunOn(taskbar, RefreshIcons);
+    // The buttons that exist take the icon height only when told; a side
+    // taskbar's sizes follow (RefreshSide).
+    core::RunOn(taskbar, [] {
+        RefreshIcons();
+        RefreshSide();
+    });
 
     // CTaskBand::_HandleSyncDisplayChange reloads the icons.
     HWND rebar = FindWindowEx(taskbar, nullptr, L"ReBarWindow32", nullptr);
@@ -6784,6 +7888,7 @@ DWORD WINAPI Worker(void* module) {
 // One per taskbar: a XAML element lives in one tree.
 struct Ui {
     HWND taskbar = nullptr;
+    bool upright = false;  // a side taskbar's (M2)
     FrameworkElement root{nullptr};
     FrameworkElement info{nullptr};  // art and title, carries the tooltip
     Controls::Border art{nullptr};
@@ -6797,9 +7902,13 @@ struct Ui {
 [[clang::no_destroy]] std::list<Ui> g_uis;
 std::vector<HWND> g_taskbars;  // applied, between Apply and Restore
 
+// Side taskbar (M2): the art over the three buttons stacked, the title only in
+// the tooltip; the buttons as wide and a little lower than in the row.
+constexpr int kSideButtonHeight = 24;
+
 // `themed`: theme brushes from the taskbar's resources; without them the
-// stock control colors stay.
-std::wstring WidgetXaml(bool themed) {
+// stock control colors stay. `upright`: a side taskbar's (M2).
+std::wstring WidgetXaml(bool themed, bool upright) {
     namespace t = theme;
     auto n = [](int v) { return std::to_wstring(v); };
     auto brush = [&](PCWSTR attribute, PCWSTR key, PCWSTR plain) {
@@ -6816,11 +7925,12 @@ std::wstring WidgetXaml(bool themed) {
         L" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\""
         // Last in the pill (after the clock): no divider or padding of its
         // own, the pill's end padding follows.
-        L" VerticalAlignment=\"Center\">"
+        + std::wstring(upright ? L" HorizontalAlignment=\"Center\">" : L" VerticalAlignment=\"Center\">") +
         L"<Border.Resources>"
         L"<Style x:Key=\"PillMediaButton\" TargetType=\"Button\">"
         L"<Setter Property=\"Width\" Value=\"" + n(t::kMediaButtonWidth) + L"\"/>"
-        L"<Setter Property=\"Height\" Value=\"" + n(t::kMediaButtonHeight) + L"\"/>"
+        L"<Setter Property=\"Height\" Value=\"" +
+        n(upright ? kSideButtonHeight : t::kMediaButtonHeight) + L"\"/>"
         L"<Setter Property=\"Padding\" Value=\"0\"/>"
         L"<Setter Property=\"FontFamily\" Value=\"" + kGlyphFont + L"\"/>"
         L"<Setter Property=\"FontSize\" Value=\"" + n(t::kMediaGlyphSize) + L"\"/>" +
@@ -6854,10 +7964,14 @@ std::wstring WidgetXaml(bool themed) {
         L"</ControlTemplate>"
         L"</Setter.Value></Setter>"
         L"</Style>"
-        L"</Border.Resources>"
-        L"<StackPanel Orientation=\"Horizontal\">"
-        L"<StackPanel x:Name=\"Info\" Orientation=\"Horizontal\" Spacing=\"8\""
-        L" Margin=\"0,0,4,0\" Background=\"Transparent\">"
+        L"</Border.Resources>" +
+        std::wstring(upright ? L"<StackPanel Orientation=\"Vertical\" HorizontalAlignment=\"Center\">"
+                             : L"<StackPanel Orientation=\"Horizontal\">") +
+        std::wstring(upright ? L"<StackPanel x:Name=\"Info\" Orientation=\"Vertical\""
+                               L" HorizontalAlignment=\"Center\" Margin=\"0,0,0,4\""
+                               L" Background=\"Transparent\">"
+                             : L"<StackPanel x:Name=\"Info\" Orientation=\"Horizontal\" Spacing=\"8\""
+                               L" Margin=\"0,0,4,0\" Background=\"Transparent\">") +
         // The art covers the placeholder note; a failed decode leaves it showing.
         L"<Grid Width=\"" + n(t::kMediaArtSize) + L"\" Height=\"" + n(t::kMediaArtSize) +
         L"\" CornerRadius=\"" + radius + L"\"" +
@@ -6872,6 +7986,7 @@ std::wstring WidgetXaml(bool themed) {
         L"<TextBlock x:Name=\"Title\" VerticalAlignment=\"Center\" FontSize=\"" +
         n(t::kMediaTitleSize) +
         L"\" TextWrapping=\"NoWrap\" TextTrimming=\"CharacterEllipsis\" MaxLines=\"1\"" +
+        std::wstring(upright ? L" Visibility=\"Collapsed\"" : L"") +
         brush(L"Foreground", L"TextFillColorPrimaryBrush", nullptr) +
         L"/>"
         L"</StackPanel>"
@@ -6886,10 +8001,10 @@ std::wstring WidgetXaml(bool themed) {
     return xaml;
 }
 
-FrameworkElement LoadWidget() {
+FrameworkElement LoadWidget(bool upright) {
     for (bool themed : {true, false}) {
         try {
-            return Markup::XamlReader::Load(winrt::hstring(WidgetXaml(themed)))
+            return Markup::XamlReader::Load(winrt::hstring(WidgetXaml(themed, upright)))
                 .as<FrameworkElement>();
         } catch (...) {
             Wh_Log(L"Media widget (%s) failed: %08X",
@@ -6900,13 +8015,15 @@ FrameworkElement LoadWidget() {
 }
 
 Ui* Build(HWND taskbar) {
-    auto root = LoadWidget();
+    bool upright = core::IsSide(taskbar);
+    auto root = LoadWidget(upright);
     if (!root) {
         return nullptr;
     }
     auto part = [&](PCWSTR name) { return root.FindName(name); };
     Ui ui;
     ui.taskbar = taskbar;
+    ui.upright = upright;
     ui.root = root;
     ui.info = part(L"Info").as<FrameworkElement>();
     ui.art = part(L"Art").as<Controls::Border>();
@@ -6954,6 +8071,13 @@ void SetArt(Ui& ui, wss::IRandomAccessStream const& stream) {
 
 void ShowOn(HWND taskbar, Snapshot const& s) {
     auto it = std::ranges::find(g_uis, taskbar, &Ui::taskbar);
+    // A taskbar that turned since its widget was made gets one of its new form.
+    if (it != g_uis.end() && it->upright != core::IsSide(taskbar)) {
+        widgets::Remove(taskbar, L"media");
+        Release(*it);
+        g_uis.erase(it);
+        it = g_uis.end();
+    }
     if (!s.visible) {
         widgets::Remove(taskbar, L"media");
         if (it != g_uis.end()) {
@@ -7004,7 +8128,6 @@ void Prune() {
     }
 }
 
-// g_taskbars has no side taskbar (Apply).
 void Show(Snapshot const& s) {
     if (g_taskbars.empty()) {
         return;
@@ -7021,8 +8144,7 @@ void Show(Snapshot const& s) {
 // ---- lifecycle --------------------------------------------------------------------
 
 void Start() {
-    // Side taskbar: with every taskbar at a side the media player doesn't start.
-    if (core::AllSide() || g_thread) {
+    if (g_thread) {
         return;
     }
     g_stop = false;
@@ -7047,10 +8169,9 @@ void Start() {
     }
 }
 
+// A side taskbar's widget is the upright one (M2, Build).
 void Apply(HWND taskbar) {
-    // Side taskbar: the media widget steps back.
-    if (!taskbar || core::IsSide(taskbar) ||
-        std::ranges::find(g_taskbars, taskbar) != g_taskbars.end()) {
+    if (!taskbar || std::ranges::find(g_taskbars, taskbar) != g_taskbars.end()) {
         return;
     }
     g_taskbars.push_back(taskbar);
@@ -8084,6 +9205,7 @@ Mark MarkOf(Account const& a, bool iconDrawn) {
 struct View {
     std::wstring id;
     std::wstring mark;  // what the mark was made from, to rebuild when it changes
+    bool upright = false;  // a side taskbar's (A 쌓기)
     Controls::StackPanel root{nullptr};
     Controls::TextBlock initial{nullptr};  // the letter; or the account's
     Controls::Image icon{nullptr};         // own icon,
@@ -8100,6 +9222,7 @@ struct View {
 // One per taskbar: a XAML element lives in one tree.
 struct Ui {
     HWND taskbar = nullptr;
+    bool upright = false;  // a side taskbar's: the accounts stacked (A 쌓기)
     Controls::Border root{nullptr};
     Controls::StackPanel panel{nullptr};
     std::vector<View> views;
@@ -8221,10 +9344,32 @@ Media::Imaging::WriteableBitmap IconBitmap(IconPixels const& icon) {
     return bitmap;
 }
 
+// Side taskbar (A 쌓기): an account stands upright, its logo over its number,
+// the bar under them this wide; the name tag stays in the tooltip.
+constexpr double kSideBarWidth = 30;
+
+// The upright block: the mark, the number and its unit, the bar, each centred.
+std::wstring UprightXaml(std::wstring const& mark, std::wstring const& radius) {
+    return L"<StackPanel xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/"
+           L"presentation\" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\""
+           L" HorizontalAlignment=\"Center\"><Grid HorizontalAlignment=\"Center\">" +
+           mark +
+           L"</Grid><TextBlock x:Name=\"Tag\" Visibility=\"Collapsed\"/><StackPanel "
+           L"Orientation=\"Horizontal\" HorizontalAlignment=\"Center\"><TextBlock "
+           L"x:Name=\"Percent\" FontWeight=\"Medium\"/><TextBlock x:Name=\"Unit\"/>"
+           L"</StackPanel><Grid x:Name=\"Bar\" HorizontalAlignment=\"Center\"><Grid.ColumnDefinitions>"
+           L"<ColumnDefinition/><ColumnDefinition/>"
+           L"</Grid.ColumnDefinitions><Border x:Name=\"Track\" Grid.ColumnSpan=\"2\" "
+           L"CornerRadius=\"" +
+           radius + L"\"/><Border x:Name=\"Fill\" CornerRadius=\"" + radius +
+           L"\"/></Grid></StackPanel>";
+}
+
 // Row: the mark and the tag at the left, the number at the right of a column
 // that holds "100 %", so only the tag's text moves the width; under it the
-// bar, split into the used and the rest.
-View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind) {
+// bar, split into the used and the rest. `upright`: a side taskbar's block.
+View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind,
+              bool upright = false) {
     std::wstring mark;
     switch (markKind) {
         case Mark::kIcon:
@@ -8263,15 +9408,22 @@ View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind
     View v;
     v.id = id;
     v.mark = markKey;
-    v.root = Markup::XamlReader::Load(xaml).as<Controls::StackPanel>();
-    // As wide as the block without a tag; the number's column is what is
-    // left of that by the logo.
-    v.root.MinWidth(theme::kUsageBlockWidth);
+    v.upright = upright;
+    v.root = Markup::XamlReader::Load(upright ? UprightXaml(mark, radius) : xaml)
+                 .as<Controls::StackPanel>();
     v.root.Spacing(theme::kUsageLineGap);
-    auto row = v.root.FindName(L"Row").as<Controls::Grid>();
-    row.Height(theme::kUsageRowHeight);
-    row.ColumnDefinitions().GetAt(1).MinWidth(theme::kUsageBlockWidth - theme::kUsageLogoSize);
-    v.bar = v.root.FindName(L"Bar").as<Controls::Grid>();
+    if (upright) {
+        v.bar = v.root.FindName(L"Bar").as<Controls::Grid>();
+        v.bar.Width(kSideBarWidth);
+    } else {
+        // As wide as the block without a tag; the number's column is what is
+        // left of that by the logo.
+        v.root.MinWidth(theme::kUsageBlockWidth);
+        auto row = v.root.FindName(L"Row").as<Controls::Grid>();
+        row.Height(theme::kUsageRowHeight);
+        row.ColumnDefinitions().GetAt(1).MinWidth(theme::kUsageBlockWidth - theme::kUsageLogoSize);
+        v.bar = v.root.FindName(L"Bar").as<Controls::Grid>();
+    }
     v.bar.Height(theme::kUsageBarHeight);
     Media::FontFamily font{theme::kUsageFont};
     if (markKind == Mark::kInitial) {
@@ -8283,6 +9435,9 @@ View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind
         box.Width(theme::kUsageLogoSize);
         box.Height(theme::kUsageLogoSize);
         box.VerticalAlignment(VerticalAlignment::Center);
+        if (upright) {
+            box.HorizontalAlignment(HorizontalAlignment::Center);
+        }
         if (markKind == Mark::kIcon) {
             v.icon = box.as<Controls::Image>();
         } else {
@@ -8348,7 +9503,7 @@ void Refresh(View& v,
         v.initial.Foreground(Media::SolidColorBrush(p.text));
     }
     v.tag.Text(label.tag);
-    v.tag.Visibility(label.tag.empty() ? Visibility::Collapsed : Visibility::Visible);
+    v.tag.Visibility(label.tag.empty() || v.upright ? Visibility::Collapsed : Visibility::Visible);
     v.tag.Foreground(Media::SolidColorBrush(p.text));
     v.percent.Text(value.Figure());
     auto figure = Media::SolidColorBrush(FigureColor(value, dark));
@@ -8360,7 +9515,7 @@ void Refresh(View& v,
     // Shares of the block, whatever its width; a used limit never shows as
     // an empty bar, at least two pixels of the narrowest block.
     if (fraction > 0) {
-        fraction = std::max(fraction, 2 / theme::kUsageBlockWidth);
+        fraction = std::max(fraction, 2 / (v.upright ? kSideBarWidth : theme::kUsageBlockWidth));
     }
     auto columns = v.bar.ColumnDefinitions();
     columns.GetAt(0).Width({fraction, GridUnitType::Star});
@@ -8409,14 +9564,23 @@ void EnsureRoot(Ui& ui) {
     if (ui.root) {
         return;
     }
+    ui.upright = core::IsSide(ui.taskbar);
     std::wstring xaml =
-        L"<Border xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/"
-        L"presentation\" VerticalAlignment=\"Center\">"
-        L"<StackPanel Orientation=\"Horizontal\"/></Border>";
+        ui.upright ? L"<Border xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/"
+                     L"presentation\" HorizontalAlignment=\"Center\">"
+                     L"<StackPanel Orientation=\"Vertical\"/></Border>"
+                   : L"<Border xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/"
+                     L"presentation\" VerticalAlignment=\"Center\">"
+                     L"<StackPanel Orientation=\"Horizontal\"/></Border>";
     auto root = Markup::XamlReader::Load(xaml).as<Controls::Border>();
-    // gapAfter counts from the meter to the next tray icon, so its panel's own margin comes off.
+    // gapAfter counts from the meter to the next tray icon, so its panel's own margin
+    // comes off; on a side taskbar the gaps are above and below.
     auto const& u = settings::g.usage;
-    root.Margin({double(u.gapBefore), 0, u.gapAfter - widgets::kHostGap, 0});
+    if (ui.upright) {
+        root.Margin({0, double(u.gapBefore), 0, u.gapAfter - widgets::kHostGap});
+    } else {
+        root.Margin({double(u.gapBefore), 0, u.gapAfter - widgets::kHostGap, 0});
+    }
     ui.panel = root.Child().as<Controls::StackPanel>();
     ui.panel.Spacing(theme::kUsageGap);
     // The tooltip's numbers are drawn again just before it can open. The list
@@ -8502,7 +9666,7 @@ void SyncViews(Ui& ui, Model const& m) {
     ui.panel.Children().Clear();
     ui.views.clear();
     for (size_t i = 0; i < m.accounts.size(); i++) {
-        ui.views.push_back(MakeView(m.accounts[i].id, keys[i], marks[i]));
+        ui.views.push_back(MakeView(m.accounts[i].id, keys[i], marks[i], ui.upright));
         ui.panel.Children().Append(ui.views.back().root);
     }
 }
@@ -8513,6 +9677,12 @@ void RenderOn(HWND taskbar) {
         return;
     }
     auto it = std::ranges::find(g_uis, taskbar, &Ui::taskbar);
+    // A taskbar that turned since its meter was made gets one of its new form.
+    if (it != g_uis.end() && it->root && it->upright != core::IsSide(taskbar)) {
+        widgets::Remove(taskbar, kWidgetName);
+        g_uis.erase(it);
+        it = g_uis.end();
+    }
     auto& ui = it != g_uis.end() ? *it : g_uis.emplace_back();
     ui.taskbar = taskbar;
     EnsureRoot(ui);
@@ -8569,8 +9739,6 @@ void OnModel(std::shared_ptr<const Model> model) {
 
 // ---- lifecycle -------------------------------------------------------------------------
 
-// Also with a vertical taskbar, which Apply skips: the meter then shows once
-// it turns horizontal.
 void Start() {
     if (!InitPaths() || !IsDirectory(g_local)) {
         Wh_Log(L"No local app data folder; usage meter stays off");
@@ -8600,9 +9768,9 @@ void Stop() {
     g_thread = g_stop = nullptr;
 }
 
+// A side taskbar's meter stands upright (A 쌓기, EnsureRoot).
 void Apply(HWND hwnd) {
-    // Side taskbar: the usage meter steps back.
-    if (core::g_unloading || !hwnd || core::IsSide(hwnd) ||
+    if (core::g_unloading || !hwnd ||
         std::ranges::find(g_taskbars, hwnd) != g_taskbars.end()) {
         return;
     }
@@ -8963,24 +10131,25 @@ void Attach(FrameworkElement const& button) {
                    stock.ActualHeight(), winrt::get_class_name(host).c_str());
 }
 
-// Width 0 takes its place away; the layout keeps setting its visibility, so
-// that one stays the layout's.
+// Width 0 takes its place away (height 0 in a side taskbar's column); the layout
+// keeps setting its visibility, so that one stays the layout's.
 void Hide(FrameworkElement const& button) {
-    if (button.Width() == 0) {
+    bool side = core::IsSide(button.XamlRoot());
+    auto length = side ? FrameworkElement::HeightProperty() : FrameworkElement::WidthProperty();
+    if ((side ? button.Height() : button.Width()) == 0) {
         return;
     }
     auto parent = core::Parent(button);
-    core::DiagLine(L"Start hidden: was %.1f wide, margin %.1f,%.1f, parent %s",
-                   button.ActualWidth(), button.Margin().Left, button.Margin().Right,
-                   parent ? winrt::get_class_name(parent).c_str() : L"-");
-    core::Set(button, FrameworkElement::WidthProperty(), winrt::box_value(0.0));
+    core::DiagLine(L"Start hidden: was %.1f wide, %.1f high, margin %.1f,%.1f, parent %s",
+                   button.ActualWidth(), button.ActualHeight(), button.Margin().Left,
+                   button.Margin().Right, parent ? winrt::get_class_name(parent).c_str() : L"-");
+    core::Set(button, length, winrt::box_value(0.0));
     core::Set(button, UIElement::OpacityProperty(), winrt::box_value(0.0));
     core::Set(button, UIElement::IsHitTestVisibleProperty(), winrt::box_value(false));
 }
 
 void OnButton(FrameworkElement const& button) {
-    // Side taskbar: the start button's hiding and Bloom flower step back.
-    if (!IsStartButton(button) || core::IsSide(button.XamlRoot())) {
+    if (!IsStartButton(button)) {
         return;
     }
     if (settings::g.start.mode == settings::StartMode::kHidden) {
@@ -8990,9 +10159,9 @@ void OnButton(FrameworkElement const& button) {
     }
 }
 
+// A side taskbar's button keeps its place in the column the same way (Hide).
 void Apply(HWND hwnd) {
-    // Side taskbar: the start button's hiding and Bloom flower step back.
-    if (core::g_unloading || !hwnd || core::IsSide(hwnd)) {
+    if (core::g_unloading || !hwnd) {
         return;
     }
     size::g_onToggleButton = OnButton;
@@ -28278,12 +29447,12 @@ int WINAPI TaskbarBackground_OnApplyTemplate_Hook(void* pThis) {
         core::Guard(L"Background template", [&] {
             // Thumbnail previews use the same control, in another window or a
             // popup; only the one in a taskbar's own tree is the bar.
-            // Side taskbar: the pill's background steps back.
+            // A side taskbar's goes once the pill holds its column (pill::SideStyled).
             auto bg = core::FromAbi(pThis);
             auto root = bg ? bg.XamlRoot() : nullptr;
             auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
             HWND taskbar = content ? core::TaskbarOf(root) : nullptr;
-            bool bar = taskbar && !core::IsSide(taskbar) &&
+            bool bar = taskbar && (!core::IsSide(taskbar) || pill::SideStyled(taskbar)) &&
                        core::FindAncestor(bg, [&](auto& p) { return p == content; });
             if (bar) {
                 pill::StyleBackground(bg);
