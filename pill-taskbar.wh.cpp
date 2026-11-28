@@ -376,8 +376,8 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     "label": "name",
     "name": {"ko": "모니터별 아일랜드 위치", "en": "Per-monitor island position"},
     "about": {
-      "ko": "아일랜드를 Ctrl을 누른 채 끌어 옮기면 그 모니터의 자리가 여기 남습니다. 0이면 왼쪽 끝, 500이면 가운데, 1000이면 오른쪽 끝입니다",
-      "en": "Ctrl+dragging the island saves its position for that monitor here. 0 is far left, 500 is center, and 1000 is far right"
+      "ko": "아일랜드를 Ctrl을 누른 채 끌어 옮기면 그 모니터의 자리가 여기 남습니다. 0이면 왼쪽 끝, 500이면 가운데, 1000이면 오른쪽 끝입니다. 세로 위치는 왼쪽·오른쪽 가장자리의 자리로, 0이면 위 끝, 1000이면 아래 끝입니다",
+      "en": "Ctrl+dragging the island saves its position for that monitor here. 0 is far left, 500 is center, and 1000 is far right. Vertical position is its place on a left or right edge: 0 is the top, 1000 the bottom"
     },
     "fields": [
       {
@@ -387,6 +387,14 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
         "min": 0,
         "max": 1000,
         "name": {"ko": "가로 위치", "en": "Horizontal position"}
+      },
+      {
+        "key": "y",
+        "type": "int",
+        "default": 500,
+        "min": 0,
+        "max": 1000,
+        "name": {"ko": "세로 위치", "en": "Vertical position"}
       }
     ]
   }
@@ -406,7 +414,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   media     F6 미디어 플레이어 (GSMTC)
 //   usage     F7 Bloom 주간 사용량
 //   prefs     애드온 데이터 폴더의 prefs.json 읽기, 통째로 쓰기, 변경 감시, 모니터 id
-//   island    F8 숨김 아일랜드 (숨은 위·아래 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
+//   island    F8 숨김 아일랜드 (숨은 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드, 네 가장자리)
 //   folders   F9 작업표시줄 폴더 (앱 묶기, 폴더 창, 폴더 안 앱의 창 묶기), F10 실행 중 폴더
 //   position  F11 작업표시줄 위·아래·왼쪽·오른쪽, 모니터마다 (Windows 자체 위치 기능, 레지스트리는 읽기만)
 //   hooks     켠 기능의 심볼만 훅으로 걸고 여러 기능이 쓰는 훅을 나눠 준다
@@ -9324,7 +9332,7 @@ bool MonitorKey(HMONITOR monitor, std::wstring& id, std::wstring& name) {
 namespace island {
 // ============================================================================
 // F8: while an auto-hidden taskbar is in, a small black island sits on its
-// edge of its monitor (top or bottom, where the taskbar is; in the middle or
+// edge of its monitor (any of the four, where the taskbar is; in the middle or
 // where it was dragged to), and the pointer entering it brings the taskbar
 // out. As the taskbar comes out the island grows into the pill's shape and
 // fades onto it; as the taskbar goes in, it shrinks back from the pill. Every
@@ -9435,24 +9443,101 @@ HINSTANCE Module() {
     return module;
 }
 
+using float2 = winrt::Windows::Foundation::Numerics::float2;
+using float3 = winrt::Windows::Foundation::Numerics::float3;
+
+// ---- edge frame -----------------------------------------------------------------
+// An island is laid out in its edge's own frame: `a` along the edge (from the
+// left end of a top or bottom edge, the top end of a left or right one) and `f`
+// away from it. One transpose (a side edge) and one flip (the bottom or right
+// edge) take that frame to the screen, so a top island's frame is the screen's.
+
+bool SideEdge(int edge) {
+    return core::IsSideEdge(edge);
+}
+
+// The bottom and the right edge count `f` back from the box's far side.
+bool FarEdge(int edge) {
+    return edge == ABE_BOTTOM || edge == ABE_RIGHT;
+}
+
+// A rectangle in the frame: [a0, a1) along, [f0, f1) away from the edge.
+struct Span {
+    float a0, a1, f0, f1;
+};
+
+// The frame of `box` (the monitor, an island's place, a fillet's square) on
+// `edge`: a span counted from the box's start along the edge and from its side
+// at the edge, on the screen (or in whatever pixels `box` is in).
+D2D1_RECT_F Out(int edge, D2D1_RECT_F const& box, Span const& s) {
+    switch (edge) {
+        case ABE_BOTTOM:
+            return {box.left + s.a0, box.bottom - s.f1, box.left + s.a1, box.bottom - s.f0};
+        case ABE_LEFT:
+            return {box.left + s.f0, box.top + s.a0, box.left + s.f1, box.top + s.a1};
+        case ABE_RIGHT:
+            return {box.right - s.f1, box.top + s.a0, box.right - s.f0, box.top + s.a1};
+        default:
+            return {box.left + s.a0, box.top + s.f0, box.left + s.a1, box.top + s.f1};
+    }
+}
+
+D2D1_RECT_F Box(RECT const& r) {
+    return {(float)r.left, (float)r.top, (float)r.right, (float)r.bottom};
+}
+
+// Whole pixels in, whole pixels out.
+RECT OutRect(int edge, RECT const& box, int a0, int a1, int f0, int f1) {
+    D2D1_RECT_F r = Out(edge, Box(box), {(float)a0, (float)a1, (float)f0, (float)f1});
+    return {(LONG)r.left, (LONG)r.top, (LONG)r.right, (LONG)r.bottom};
+}
+
+// A box's extent along the edge and away from it.
+float Along(int edge, D2D1_RECT_F const& r) {
+    return SideEdge(edge) ? r.bottom - r.top : r.right - r.left;
+}
+float Across(int edge, D2D1_RECT_F const& r) {
+    return SideEdge(edge) ? r.right - r.left : r.bottom - r.top;
+}
+int Along(int edge, RECT const& r) {
+    return SideEdge(edge) ? r.bottom - r.top : r.right - r.left;
+}
+int Across(int edge, RECT const& r) {
+    return SideEdge(edge) ? r.right - r.left : r.bottom - r.top;
+}
+// Where along the edge a box starts and a point is, on the screen.
+int AlongStart(int edge, RECT const& r) {
+    return SideEdge(edge) ? r.top : r.left;
+}
+int AlongOf(int edge, POINT pt) {
+    return SideEdge(edge) ? pt.y : pt.x;
+}
+
+// A box of `along` by `across` in the frame, as the screen has it.
+float2 ScreenSize(int edge, float along, float across) {
+    return SideEdge(edge) ? float2{across, along} : float2{along, across};
+}
+
 // ---- shape ----------------------------------------------------------------------
-// In window pixels, with y counted from the screen edge (a bottom island turns
-// it over). The body hangs from the edge at y = 0 and has round corners of
-// `radius` away from it; fillets of `flare` curve its sides out into the edge.
+// In the edge frame, in whole pixels: the body hangs from the edge at f = 0 and
+// has round corners of `radius` away from it; fillets of `flare` curve its ends
+// out into the edge. `width` runs along the edge, `height` away from it.
 
 struct Shape {
     float width = 0;  // fillets included
     float height = 0;
     float flare = 0;
     float radius = 0;
-    // A corner island's side at the screen's side: straight and square, with
-    // no fillet or round corner there.
+    // A corner island's end at the screen's corner: straight and square, with
+    // no fillet or round corner there (flushLeft the end at a0, flushRight the
+    // other).
     bool flushLeft = false, flushRight = false;
     bool operator==(Shape const&) const = default;
 };
 
-// The left edge at `y`. It only moves right going down, so a pixel row's
-// leftmost covered point is at the row's top.
+// The body's start along the edge at distance `y` from it. It only moves on
+// going away from the edge, so a pixel row's first covered point is at the
+// row's side nearer the edge.
 float LeftEdge(Shape const& s, float y) {
     if (y < s.flare) {
         float d = s.flare - y;
@@ -9468,34 +9553,41 @@ float LeftEdge(Shape const& s, float y) {
 }
 
 // The edge's distance of a pixel row's point nearest it: the row itself at the
-// top, the row's far side turned over at the bottom.
-float FromEdge(Shape const& s, int row, bool bottom) {
-    return (float)(bottom ? (int)s.height - 1 - row : row);
+// top or left edge, the row's far side turned over at the bottom or right. A
+// row is a pixel line along the edge (a column of pixels at a side edge),
+// counted in the shape's box on the screen.
+float FromEdge(Shape const& s, int row, int edge) {
+    return (float)(FarEdge(edge) ? (int)s.height - 1 - row : row);
 }
 
-// True if the point, relative to the shape's top left, is in a pixel the
-// shape touches.
-// The pixel row's covered span [left, right).
-std::pair<int, int> RowSpan(Shape const& s, int y, bool bottom) {
-    int in = (int)std::floor(LeftEdge(s, FromEdge(s, y, bottom)));
+// The pixel row's covered span [left, right) along the edge.
+std::pair<int, int> RowSpan(Shape const& s, int y, int edge) {
+    int in = (int)std::floor(LeftEdge(s, FromEdge(s, y, edge)));
     return {s.flushLeft ? 0 : in, (int)s.width - (s.flushRight ? 0 : in)};
 }
 
-bool InShape(Shape const& s, int x, int y, bool bottom) {
+// True if the point, relative to the shape box's top left on the screen, is in
+// a pixel the shape touches.
+bool InShape(Shape const& s, int x, int y, int edge) {
+    if (SideEdge(edge)) {
+        std::swap(x, y);
+    }
     if (y < 0 || y >= (int)s.height) {
         return false;
     }
-    auto [left, right] = RowSpan(s, y, bottom);
+    auto [left, right] = RowSpan(s, y, edge);
     return x >= left && x < right;
 }
 
 // Every pixel the shape touches: the window region (hit-testing, and DWM's
 // clip) must not cut into the antialiased edge.
-HRGN Region(Shape const& s, bool bottom) {
+HRGN Region(Shape const& s, int edge) {
+    bool side = SideEdge(edge);
     HRGN rgn = CreateRectRgn(0, 0, 0, 0);
     for (int y = 0; rgn && y < (int)s.height; y++) {
-        auto [left, right] = RowSpan(s, y, bottom);
-        if (HRGN row = CreateRectRgn(left, y, right, y + 1)) {
+        auto [left, right] = RowSpan(s, y, edge);
+        HRGN row = side ? CreateRectRgn(y, left, y + 1, right) : CreateRectRgn(left, y, right, y + 1);
+        if (row) {
             CombineRgn(rgn, rgn, row, RGN_OR);
             DeleteObject(row);
         }
@@ -9504,15 +9596,20 @@ HRGN Region(Shape const& s, bool bottom) {
 }
 
 // A fillet in its `size` square: the square less the disc around its corner
-// away from the body and from the edge. The left one meets the body at its
-// right side; a bottom one is turned over.
-com_ptr<ID2D1PathGeometry> Fillet(ID2D1Factory* factory, float size, bool right, bool bottom) {
+// away from the body and from the edge. The left one (the one before the body
+// along the edge) meets the body at its right side; the frame's flip and
+// transpose turn it for the other edges.
+com_ptr<ID2D1PathGeometry> Fillet(ID2D1Factory* factory, float size, bool right, int edge) {
     com_ptr<ID2D1PathGeometry> path;
     check_hresult(factory->CreatePathGeometry(path.put()));
     com_ptr<ID2D1GeometrySink> sink;
     check_hresult(path->Open(sink.put()));
     float f = size;
-    auto at = [&](float x, float y) { return D2D1::Point2F(x, bottom ? f - y : y); };
+    bool side = SideEdge(edge), flip = FarEdge(edge);
+    auto at = [&](float x, float y) {
+        float fy = flip ? f - y : y;
+        return side ? D2D1::Point2F(fy, x) : D2D1::Point2F(x, fy);
+    };
     D2D1_POINT_2F start = right ? at(f, 0) : at(0, 0);
     sink->BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
     if (right) {
@@ -9522,10 +9619,11 @@ com_ptr<ID2D1PathGeometry> Fillet(ID2D1Factory* factory, float size, bool right,
         sink->AddLine(at(f, 0));
         sink->AddLine(at(f, f));
     }
+    // Each of the flip and the transpose mirrors the arc's turn.
     D2D1_ARC_SEGMENT arc = D2D1::ArcSegment(
         start, D2D1::SizeF(f, f), 0,
-        right != bottom ? D2D1_SWEEP_DIRECTION_CLOCKWISE
-                        : D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+        (right != flip) != side ? D2D1_SWEEP_DIRECTION_CLOCKWISE
+                               : D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
         D2D1_ARC_SIZE_SMALL);
     sink->AddArc(&arc);
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
@@ -9567,8 +9665,14 @@ struct Content {
     std::vector<std::pair<int, int>> system;  // kind (0 memory, 1 CPU), percent
     int systemStyle = 1;
     float unit = 0;
-    float width = 0;
+    float width = 0;  // along the edge
     std::wstring key;  // all that's drawn, to skip redraws that change nothing
+    // At a side edge the items stand in a column (MeasureColumn): the clock as a
+    // line for each of its parts, the last one dimmer when there are three.
+    bool column = false;
+    std::vector<Text> clockLines;
+    std::vector<float> clockPitch;  // each line's height in the column
+    bool clockSeconds = false;      // the last line is the seconds, smaller and dimmer
 };
 
 enum class Phase {
@@ -9627,8 +9731,11 @@ struct Island {
     bool liftedTaskbar = false;  // made topmost to come out over a fullscreen window
     bool cameOut = false;        // StartExpand brought it out; cleared as it goes in or the island hides
     bool unreachable = false;  // logged that the taskbar can't be asked yet
-    bool bottom = false;       // at the bottom edge, under a bottom taskbar
+    int edge = ABE_TOP;        // the screen edge it hangs from, its taskbar's (ABE_*)
     bool sharedEdge = false;   // another monitor is past the island's edge
+    // At a side edge, what the island found of its taskbar is logged once each:
+    // its first layout, and the pill it first saw out.
+    bool sideLaidOutLogged = false, sidePillLogged = false;
     // Moved along the edge with Ctrl held: `ctrl` as the last pointer move
     // had it, and while dragging where on the island the pointer holds it.
     bool ctrl = false;
@@ -9740,26 +9847,27 @@ bool MonitorRect(Island const& g, RECT& out) {
     return true;
 }
 
-// Hidden or not, a top taskbar's window sits in the upper half, a bottom one's
-// in the lower.
-bool AtBottom(HWND taskbar, RECT const& monitor) {
-    RECT rc;
-    return GetWindowRect(taskbar, &rc) &&
-           rc.top + rc.bottom >= monitor.top + monitor.bottom;
-}
-
 // ---- place along the edge ----------------------------------------------------------
-// Where along its edge each monitor's island sits, from 0 (the left end) through
-// 500 (the middle) to 1000 (the right end), kept in prefs.json as "islandPositions":
-// {"<monitor>": {"name": ..., "x": ...}}, where Bloom shows and changes it. Read on
-// the taskbar thread; the file is watched for changes made elsewhere.
+// Where along its edge each monitor's island sits, from 0 (the left or top end)
+// through 500 (the middle) to 1000 (the right or bottom end), kept in prefs.json as
+// "islandPositions": {"<monitor>": {"name": ..., "x": ..., "y": ...}}, where Bloom
+// shows and changes it: "x" for a top or bottom edge, "y" for a left or right one.
+// Read on the taskbar thread; the file is watched for changes made elsewhere.
 
 constexpr int kPlaceMiddle = 500;
 constexpr int kPlaceEnd = 1000;
 constexpr PCWSTR kPlacesField = L"islandPositions";
 
-// Monitor id → place, in thousandths; a place being dragged keeps its fraction.
-[[clang::no_destroy]] std::unordered_map<std::wstring, double> g_places;
+// A monitor's places in thousandths, along a top or bottom edge (x) and a side
+// one (y); a place being dragged keeps its fraction.
+struct Spot {
+    double x = kPlaceMiddle, y = kPlaceMiddle;
+    double& On(int edge) { return SideEdge(edge) ? y : x; }
+    double At(int edge) const { return SideEdge(edge) ? y : x; }
+};
+
+// Monitor id → its places.
+[[clang::no_destroy]] std::unordered_map<std::wstring, Spot> g_places;
 bool g_placesRead = false;  // looked for the file since the islands started
 
 namespace wdj = winrt::Windows::Data::Json;
@@ -9770,25 +9878,31 @@ void ReadPlaces() {
     if (!places) {
         return;
     }
+    auto read = [](wdj::JsonObject const& record, PCWSTR key) {
+        double v = usage::Number(record, key, kPlaceMiddle);
+        return std::clamp(std::round(v), 0.0, (double)kPlaceEnd);
+    };
     for (auto const& entry : places.GetObject()) {
         if (entry.Value().ValueType() != wdj::JsonValueType::Object) {
             continue;
         }
-        double x = usage::Number(entry.Value().GetObject(), L"x", kPlaceMiddle);
-        g_places[std::wstring(entry.Key())] = std::clamp(std::round(x), 0.0, (double)kPlaceEnd);
+        auto record = entry.Value().GetObject();
+        g_places[std::wstring(entry.Key())] = {read(record, L"x"), read(record, L"y")};
     }
 }
 
-// The island's place as it is now, in the file with its monitor's name; the
-// rest of the file as it was.
+// The island's places as they are now, in the file with its monitor's name; the
+// record's other fields and the rest of the file as they were.
 void SavePlace(Island const& g) {
     auto it = g_places.find(g.placeId);
-    double x = it != g_places.end() ? it->second : kPlaceMiddle;
+    Spot place = it != g_places.end() ? it->second : Spot{};
     prefs::Update([&](wdj::JsonObject& root) {
         wdj::JsonObject places = prefs::Records(root, kPlacesField);
-        wdj::JsonObject record;
+        auto old = usage::Field(places, g.placeId.c_str(), wdj::JsonValueType::Object);
+        wdj::JsonObject record = old ? old.GetObject() : wdj::JsonObject();
         record.Insert(L"name", wdj::JsonValue::CreateStringValue(g.placeName));
-        record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(x)));
+        record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(place.x)));
+        record.Insert(L"y", wdj::JsonValue::CreateNumberValue(std::round(place.y)));
         places.Insert(g.placeId, record);
         root.Insert(kPlacesField, places);
         return true;
@@ -9798,15 +9912,15 @@ void SavePlace(Island const& g) {
 // Taskbar thread: the file changed elsewhere. A drag under way keeps its island
 // where the pointer has it.
 void OnPrefsChanged() {
-    std::unordered_map<std::wstring, double> dragged;
+    std::vector<std::tuple<std::wstring, int, double>> dragged;
     for (auto& g : g_islands) {
         if (g.dragging && g_places.contains(g.placeId)) {
-            dragged[g.placeId] = g_places[g.placeId];
+            dragged.emplace_back(g.placeId, g.edge, g_places[g.placeId].At(g.edge));
         }
     }
     ReadPlaces();
-    for (auto& [id, x] : dragged) {
-        g_places[id] = x;
+    for (auto& [id, edge, v] : dragged) {
+        g_places[id].On(edge) = v;
     }
     SyncAll();
 }
@@ -9851,26 +9965,27 @@ void NotePlaceMonitor(Island& g, HMONITOR monitor) {
     // A monitor Bloom doesn't list yet is listed, in the middle, so its place
     // can be set there before it's ever dragged.
     if (prefs::Watching() && !g_places.contains(id)) {
-        g_places[id] = kPlaceMiddle;
+        g_places[id] = Spot{};
         SavePlace(g);
     }
 }
 
-// The island's left on the monitor, for its width.
+// The island's start along the edge on the monitor (its left, or its top at a
+// side edge), for its length `width`, counted from the monitor's start.
 int PlacedLeft(Island const& g, RECT const& monitor, int width) {
     auto it = g_places.find(g.placeId);
-    double x = it != g_places.end() ? it->second : kPlaceMiddle;
-    int room = std::max(0, (int)(monitor.right - monitor.left) - width);
-    return monitor.left + (int)std::lround(room * x / kPlaceEnd);
+    double x = it != g_places.end() ? it->second.At(g.edge) : kPlaceMiddle;
+    int room = std::max(0, Along(g.edge, monitor) - width);
+    return (int)std::lround(room * x / kPlaceEnd);
 }
 
-// The place for an island whose left is at `left`.
+// The place for an island whose start along the edge is at `left` on the screen.
 void SetPlace(Island const& g, RECT const& monitor, int left) {
-    int width = g.islandRect.right - g.islandRect.left;
-    int room = (int)(monitor.right - monitor.left) - width;
-    g_places[g.placeId] =
-        room > 0 ? std::clamp((double)(left - monitor.left) * kPlaceEnd / room, 0.0,
-                              (double)kPlaceEnd)
+    int width = Along(g.edge, g.islandRect);
+    int room = Along(g.edge, monitor) - width;
+    g_places[g.placeId].On(g.edge) =
+        room > 0 ? std::clamp((double)(left - AlongStart(g.edge, monitor)) * kPlaceEnd / room,
+                              0.0, (double)kPlaceEnd)
                  : kPlaceMiddle;
 }
 
@@ -10075,7 +10190,7 @@ com_ptr<ID2D1SolidColorBrush> Brush(ID2D1DeviceContext* dc,
 
 void DrawFillets(Island& g) {
     for (int i = 0; i < 2; i++) {
-        auto fillet = Fillet(g.d2d.get(), g.filletSize, i == 1, g.bottom);
+        auto fillet = Fillet(g.d2d.get(), g.filletSize, i == 1, g.edge);
         Paint(g.filletSurfaces[i], [&](ID2D1DeviceContext* dc) {
             dc->FillGeometry(fillet.get(), Brush(dc, IslandFill()).get(), nullptr);
         });
@@ -10165,12 +10280,147 @@ void DrawSystem(Island& g, ID2D1DeviceContext* dc, int kind, int percent, int st
                        D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
+// ---- the column at a side edge ---------------------------------------------------
+// A side island is as thick as a top one is high (island.height) and stands its
+// items upright, one under another: the clock's hour, minute and seconds as
+// lines, the album art, each usage account's logo over its number, the memory
+// and CPU icons. Sizes are fractions of the thickness, as the row's are of the
+// height (the design's 35-pixel island: lines of 15 on 17, seconds 12 on 15,
+// logo 14 over a number of 12 on 14, art 24); gaps are pixels at 100 %.
+
+constexpr double kColumnLinePitch = 17.0 / 15;   // a clock line, times its text
+constexpr double kColumnSecondsSize = 12.0 / 35;  // times the thickness
+constexpr double kColumnSecondsPitch = 15.0 / 12;
+constexpr double kColumnArtSize = 24.0 / 35;
+constexpr double kColumnLogoSize = 14.0 / 35;
+constexpr double kColumnNumberSize = 12.0 / 35;
+constexpr double kColumnNumberPitch = 14.0 / 12;
+constexpr double kColumnGap = 9;      // between items
+constexpr double kColumnLogoGap = 2;  // a logo to its number
+constexpr double kColumnSystemInset = 2;  // the memory and CPU icons off each long side
+
+// The clock text's parts, one line each: split at its colons, line breaks and
+// spaces (a 12-hour clock's "PM" stands on a line of its own). `seconds` is set
+// when they read as hours, minutes and seconds.
+std::vector<std::wstring> ClockParts(std::wstring const& clock, bool& seconds) {
+    std::vector<std::wstring> parts;
+    std::wstring part;
+    int colons = 0;
+    for (wchar_t ch : clock + L' ') {
+        bool cut = ch == L':' || ch == L'\n' || ch == L'\r' || iswspace(ch) ||
+                   ch == L'\u00A0' || ch == L'\u202F';
+        colons += ch == L':';
+        if (ch == 0x200E || ch == 0x200F) {
+            continue;  // direction marks some locales put in the time
+        }
+        if (!cut) {
+            part += ch;
+        } else if (!part.empty()) {
+            parts.push_back(std::exchange(part, {}));
+        }
+    }
+    seconds = colons == 2 && parts.size() == 3 &&
+              std::ranges::all_of(parts.back(), [](wchar_t ch) { return iswdigit(ch) != 0; });
+    return parts;
+}
+
+// The usage account's logo in its `size` square at (x, top), as the row draws it.
+void DrawLogo(ID2D1DeviceContext* dc, Meter const& m, float x, float top, float opacity,
+              Color textColor, ID2D1Brush* ink) {
+    if (m.icon) {
+        UINT px = m.icon->size;
+        com_ptr<ID2D1Bitmap1> bitmap;
+        auto props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (SUCCEEDED(dc->CreateBitmap({px, px}, m.icon->bgra.data(), px * 4, &props,
+                                       bitmap.put()))) {
+            float left = std::round(x + (m.logoSize - px) / 2);
+            float y = std::round(top + (m.logoSize - px) / 2);
+            D2D1_RECT_F dest{left, y, left + px, y + px};
+            dc->DrawBitmap(bitmap.get(), &dest, opacity, D2D1_INTERPOLATION_MODE_LINEAR, nullptr,
+                           nullptr);
+        }
+        return;
+    }
+    if (m.tile) {
+        float r = m.logoSize * (float)theme::kUsageTileRadius;
+        D2D1_ROUNDED_RECT tile{{x, top, x + m.logoSize, top + m.logoSize}, r, r};
+        Color fill = textColor;
+        fill.A = theme::kUsageTileAlpha;
+        dc->FillRoundedRectangle(&tile, Brush(dc, fill, opacity).get());
+    }
+    if (m.initial.layout) {
+        dc->DrawTextLayout({x + (m.logoSize - m.initial.width) / 2,
+                            top + (m.logoSize - m.initial.height) / 2},
+                           m.initial.layout.get(), ink, D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+}
+
+// The column in the body of `shape` (its length down the surface, its thickness
+// across), centred both ways.
+void DrawColumn(Island& g,
+                Content const& c,
+                wuc::CompositionDrawingSurface const& surface,
+                Shape const& shape) {
+    Paint(surface, [&](ID2D1DeviceContext* dc) {
+        float s = g.dpi / 96.0f;
+        float across = shape.height;
+        float gap = std::round((float)kColumnGap * s);
+        float logoGap = std::round((float)kColumnLogoGap * s);
+        Color textColor = IslandText(false);
+        Color dimColor = IslandText(true);
+        auto text = Brush(dc, textColor);
+        auto dim = Brush(dc, dimColor);
+        auto middle = [&](float w) { return std::round((across - w) / 2); };
+        D2D1_RECT_F bodyRect{0, shape.flushLeft ? 0 : shape.flare, across,
+                             shape.width - (shape.flushRight ? 0 : shape.flare)};
+        dc->PushAxisAlignedClip(&bodyRect, D2D1_ANTIALIAS_MODE_ALIASED);
+        float y = std::round(bodyRect.top + (bodyRect.bottom - bodyRect.top - c.width) / 2);
+        for (size_t i = 0; i < c.clockLines.size(); i++) {
+            Text const& t = c.clockLines[i];
+            bool seconds = c.clockSeconds && i + 1 == c.clockLines.size();
+            ID2D1Brush* brush = seconds ? dim.get() : text.get();
+            dc->DrawTextLayout({middle(t.width), y + (c.clockPitch[i] - t.height) / 2},
+                               t.layout.get(), brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            y += c.clockPitch[i];
+        }
+        if (!c.clockLines.empty()) {
+            y += gap;
+        }
+        if (c.media) {
+            DrawArt(g, dc, middle(c.art), y, c.art, dimColor);
+            y += c.art + gap;
+        }
+        for (auto const& m : c.meters) {
+            float opacity = m.dim ? (float)theme::kUsageDimOpacity : 1.0f;
+            auto ink = Brush(dc, textColor, opacity);
+            auto figure = Brush(dc, m.color, opacity);
+            DrawLogo(dc, m, middle(m.logoSize), y, opacity, textColor, ink.get());
+            float numberTop = y + m.logoSize + logoGap;
+            float pitch = m.width - m.logoSize - logoGap;
+            dc->DrawTextLayout({middle(m.percent.width), numberTop + (pitch - m.percent.height) / 2},
+                               m.percent.layout.get(), figure.get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            y += m.width + gap;
+        }
+        for (auto [kind, percent] : c.system) {
+            DrawSystem(g, dc, kind, percent, c.systemStyle, middle(kMeterW * c.unit), y, c.unit);
+            y += std::round(kMeterH * c.unit) + gap;
+        }
+        dc->PopAxisAlignedClip();
+    });
+}
+
 // What `c` holds, in the body of `shape` on `surface`: the middle island's or a
 // corner one's.
 void DrawContent(Island& g,
                  Content const& c,
                  wuc::CompositionDrawingSurface const& surface,
                  Shape const& shape) {
+    if (c.column) {
+        DrawColumn(g, c, surface, shape);
+        return;
+    }
     Paint(surface, [&](ID2D1DeviceContext* dc) {
         float s = g.dpi / 96.0f;
         float h = shape.height;
@@ -10300,9 +10550,123 @@ Text MakeText(Island& g,
     return t;
 }
 
+// The items set to a side island at `slot`, as a column `thickness` across;
+// `width` is the column's length. The media title isn't shown there: the column
+// has no room for a line of text.
+Content MeasureColumn(Island& g, float thickness, settings::Slot slot) {
+    auto const& set = settings::g.island;
+    auto here = [&](bool show, settings::Slot at) { return show && at == slot; };
+    float s = g.dpi / 96.0f;
+    float gap = std::round((float)kColumnGap * s);
+    float logoGap = std::round((float)kColumnLogoGap * s);
+    constexpr WCHAR kSeparator = L'\x1F';
+    Content c;
+    c.column = true;
+    c.key = L"column";
+    c.key += kSeparator;
+    auto add = [&](float length) { c.width += (c.width > 0 ? gap : 0) + length; };
+
+    if (here(set.showClock, set.clockAt) && !g_clock.empty()) {
+        float size = std::round(thickness * (float)theme::kIslandTextSize);
+        float small = std::round(thickness * (float)kColumnSecondsSize);
+        auto parts = ClockParts(g_clock, c.clockSeconds);
+        float length = 0;
+        for (size_t i = 0; i < parts.size(); i++) {
+            bool seconds = c.clockSeconds && i + 1 == parts.size();
+            float textSize = seconds ? small : size;
+            c.clockLines.push_back(
+                MakeText(g, parts[i], textSize, DWRITE_FONT_WEIGHT_NORMAL, 0, true));
+            c.clockPitch.push_back(std::round(
+                textSize * (float)(seconds ? kColumnSecondsPitch : kColumnLinePitch)));
+            length += c.clockPitch.back();
+        }
+        if (length > 0) {
+            add(length);
+        }
+        c.key += g_clock;
+    }
+    c.key += kSeparator;
+    if (here(set.showMedia, set.mediaAt) && g.mediaVisible) {
+        c.media = true;
+        c.art = std::round(thickness * (float)kColumnArtSize);
+        add(c.art);
+        c.key += std::to_wstring(g.artId);
+    }
+    c.key += kSeparator;
+    auto model = usage::g_model;
+    if (here(set.showUsage, set.usageAt) && model) {
+        auto labels = usage::Labels(*model);
+        int64_t now = usage::Now();
+        float logo = std::round(thickness * (float)kColumnLogoSize);
+        float number = std::round(thickness * (float)kColumnNumberSize);
+        float pitch = std::round(number * (float)kColumnNumberPitch);
+        for (size_t i = 0; i < model->accounts.size(); i++) {
+            auto const& a = model->accounts[i];
+            auto value = usage::Evaluate(*model, a, usage::BarLimit(a), now);
+            Meter m;
+            auto icon = a.hasIcon ? usage::IconAt(a.icon, (UINT)logo) : nullptr;
+            auto mark = usage::MarkOf(a, icon != nullptr);
+            m.logoSize = logo;
+            if (mark == usage::Mark::kIcon) {
+                bool mono = settings::g.usage.logoColor != settings::LogoColor::kBrand;
+                m.icon = usage::Colored(icon, mono, usage::IconTint(mono, DarkIsland()));
+            } else if (mark == usage::Mark::kTile) {
+                m.tile = true;
+                m.initial = MakeText(g, labels[i].letter,
+                                     std::round(logo * (float)theme::kUsageTileLetter),
+                                     DWRITE_FONT_WEIGHT_SEMI_BOLD, 0, false, &g.usageFont);
+            } else {
+                m.initial = MakeText(g, labels[i].initial, std::round(logo * 0.85f),
+                                     DWRITE_FONT_WEIGHT_SEMI_BOLD, 0, true);
+            }
+            m.percent = MakeText(g, value.Figure(), number, DWRITE_FONT_WEIGHT_MEDIUM, 0, true,
+                                 &g.usageFont);
+            m.color = usage::FigureColor(value, DarkIsland());
+            m.dim = usage::Dim(*model, a, now);
+            m.width = logo + logoGap + pitch;
+            add(m.width);
+            c.key += labels[i].initial + std::to_wstring((int)mark) + a.icon + kSeparator +
+                     value.Text() +
+                     std::to_wstring(m.color.R << 16 | m.color.G << 8 | m.color.B) +
+                     (m.dim ? L"d" : L"") + kSeparator;
+            c.meters.push_back(std::move(m));
+        }
+        c.key += std::to_wstring((int)settings::g.usage.logoColor) + kSeparator +
+                 std::to_wstring(usage::g_iconsRead);
+    }
+    c.key += kSeparator;
+    if (here(set.showMemory, set.memoryAt) || here(set.showCpu, set.cpuAt)) {
+        Figures f = ReadFigures();
+        if (f.known) {
+            if (here(set.showMemory, set.memoryAt)) {
+                c.system.push_back({kMemory, f.memory});
+            }
+            if (here(set.showCpu, set.cpuAt)) {
+                c.system.push_back({kCpu, f.cpu});
+            }
+            c.systemStyle = f.style;
+            // As in the row, unless that would run past the column's sides.
+            float inset = std::round((float)kColumnSystemInset * s);
+            c.unit = std::min(std::round(thickness * (float)theme::kIslandSystemSize) / kMeterH,
+                              std::max(0.0f, thickness - 2 * inset) / kMeterW);
+            for (auto [kind, percent] : c.system) {
+                add(std::round(kMeterH * c.unit));
+                c.key += std::to_wstring(kind) + L":" + std::to_wstring(percent) + L",";
+            }
+            c.key += std::to_wstring(f.style) + std::to_wstring((int)DarkIsland());
+        }
+    }
+    c.key += std::to_wstring(g.dpi) + kSeparator + std::to_wstring((int)thickness);
+    return c;
+}
+
 // The items set to the island at `slot`. `room`, if set, is the width the
 // content must fit: the title gives way first, down to an ellipsis, then goes.
+// A side island's are a column (MeasureColumn), which `room` doesn't trim.
 Content Measure(Island& g, float height, float room, settings::Slot slot) {
+    if (SideEdge(g.edge)) {
+        return MeasureColumn(g, height, slot);
+    }
     auto const& set = settings::g.island;
     auto here = [&](bool show, settings::Slot at) { return show && at == slot; };
     float s = g.dpi / 96.0f;
@@ -10431,19 +10795,16 @@ Content Measure(Island& g, float height, float room, settings::Slot slot) {
 
 // ---- window ---------------------------------------------------------------------
 
-using float2 = winrt::Windows::Foundation::Numerics::float2;
-using float3 = winrt::Windows::Foundation::Numerics::float3;
-
-// The island the point is on: 0 the middle one, 1 the left corner's, 2 the right
-// corner's, -1 none.
+// The island the point is on: 0 the middle one, 1 the left (or top) corner's,
+// 2 the right (or bottom) corner's, -1 none.
 int BodyAt(Island const& g, POINT pt) {
     if (g.centerOn &&
-        InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top, g.bottom)) {
+        InShape(g.shape, pt.x - g.islandRect.left, pt.y - g.islandRect.top, g.edge)) {
         return 0;
     }
     for (int i = 0; i < 2; i++) {
         Side const& d = g.sides[i];
-        if (d.on && InShape(d.shape, pt.x - d.rect.left, pt.y - d.rect.top, g.bottom)) {
+        if (d.on && InShape(d.shape, pt.x - d.rect.left, pt.y - d.rect.top, g.edge)) {
             return i + 1;
         }
     }
@@ -10454,48 +10815,89 @@ bool OnIsland(Island const& g, POINT pt) {
     return BodyAt(g, pt) >= 0;
 }
 
+// The side pill before one is seen: as thick as the taskbar less its margins
+// off both long sides, standing off the edge by one, its pill.cornerRadius, and
+// aligned by pill.align (left the top, right the bottom).
+constexpr double kSidePillInset = 2;
+
+RECT PillRect(Island const& g);
+
 // Keeps the taskbar's region box (the pill pieces with their margins) while
 // the taskbar is out; until one is seen, a stand-in where the pill is aligned.
 void NotePill(Island& g, RECT const& monitor) {
     RECT window, box;
+    bool side = SideEdge(g.edge);
     bool hasWindow = GetWindowRect(g.taskbar, &window);
     if (hasWindow && !autohide::Collapsed(g.taskbar) &&
         GetWindowRgnBox(g.taskbar, &box) > NULLREGION &&
         // Not the strip explorer leaves while the taskbar slides.
-        box.bottom - box.top >= (window.bottom - window.top) / 2) {
+        Across(g.edge, box) >= Across(g.edge, window) / 2) {
         UINT dpi = GetDpiForWindow(g.taskbar);
         // The window is at the edge once it's out.
-        LONG top = g.bottom ? monitor.bottom - (window.bottom - window.top) : monitor.top;
-        g.pillBox = {window.left + box.left, top + box.top, window.left + box.right,
-                     top + box.bottom};
+        int start = AlongStart(g.edge, window) - AlongStart(g.edge, monitor);
+        RECT out = OutRect(g.edge, monitor, start, start + Along(g.edge, window), 0,
+                           Across(g.edge, window));
+        g.pillBox = {out.left + box.left, out.top + box.top, out.left + box.right,
+                     out.top + box.bottom};
         g.pillRadius = (float)settings::g.pill.cornerRadius * (dpi ? dpi : 96) / 96.0f;
         g.pillSeen = true;
+        if (side && !std::exchange(g.sidePillLogged, true)) {
+            RECT pill = PillRect(g);
+            Wh_Log(L"Island %d at side edge %d: taskbar window %d,%d..%d,%d, region box "
+                   L"%d,%d..%d,%d, pill taken as %d,%d..%d,%d, radius %.1f, dpi %u",
+                   g.id, g.edge, window.left, window.top, window.right, window.bottom, box.left,
+                   box.top, box.right, box.bottom, pill.left, pill.top, pill.right, pill.bottom,
+                   g.pillRadius, dpi);
+        }
         return;
     }
     if (g.pillSeen) {
         return;
     }
+    if (side) {
+        double s = g.dpi / 96.0;
+        int inset = (int)std::lround(kSidePillInset * s);
+        int thick = hasWindow ? Across(g.edge, window) : (int)(g.shape.height * 2);
+        int across = std::max(1, thick - 2 * inset);
+        int length = Along(g.edge, monitor) * 3 / 5;
+        int start = (Along(g.edge, monitor) - length) / 2;
+        if (auto align = settings::PillAlign(); align != settings::Align::kCenter) {
+            start = align == settings::Align::kLeft ? 0 : Along(g.edge, monitor) - length;
+        }
+        g.pillBox = OutRect(g.edge, monitor, start, start + length, inset, inset + across);
+        g.pillRadius = (float)(settings::g.pill.cornerRadius * s);
+        return;
+    }
     int height = hasWindow ? window.bottom - window.top : (int)(g.shape.height * 2);
     int width = (monitor.right - monitor.left) * 3 / 5;
-    int left = monitor.left + (monitor.right - monitor.left - width) / 2;
+    int left = (monitor.right - monitor.left - width) / 2;
     if (auto align = settings::PillAlign(); align != settings::Align::kCenter) {
-        left = align == settings::Align::kLeft ? monitor.left : monitor.right - width;
+        left = align == settings::Align::kLeft ? 0 : monitor.right - monitor.left - width;
     }
-    int top = g.bottom ? monitor.bottom - height : monitor.top;
-    g.pillBox = {left, top, left + width, top + height};
+    g.pillBox = OutRect(g.edge, monitor, left, left + width, 0, height);
     g.pillRadius = height / 2.0f;
 }
 
-// The drawn pill: the region box less its pieces' outer margins.
+// The drawn pill: the region box less its pieces' outer margins. At a side edge
+// the margins turn with the pill: the apps piece's top and bottom ones off its
+// long sides, its left one at the top, the tray's right one at the bottom.
 RECT PillRect(Island const& g) {
     RECT r = g.pillBox;
     if (g.pillSeen) {
         UINT dpi = GetDpiForWindow(g.taskbar);
         double s = (dpi ? dpi : 96) / 96.0;
-        r.left += (LONG)std::lround(theme::kAppsMargin.Left * s);
-        r.top += (LONG)std::lround(theme::kAppsMargin.Top * s);
-        r.right -= (LONG)std::lround(settings::TrayMargin().Right * s);
-        r.bottom -= (LONG)std::lround(theme::kAppsMargin.Bottom * s);
+        auto px = [&](double v) { return (LONG)std::lround(v * s); };
+        if (SideEdge(g.edge)) {
+            r.left += px(theme::kAppsMargin.Top);
+            r.top += px(theme::kAppsMargin.Left);
+            r.right -= px(theme::kAppsMargin.Bottom);
+            r.bottom -= px(settings::TrayMargin().Right);
+        } else {
+            r.left += px(theme::kAppsMargin.Left);
+            r.top += px(theme::kAppsMargin.Top);
+            r.right -= px(settings::TrayMargin().Right);
+            r.bottom -= px(theme::kAppsMargin.Bottom);
+        }
     }
     return r;
 }
@@ -10506,38 +10908,50 @@ struct Pose {
     float3 fillets[2];  // offsets
 };
 
+// A rectangle in `box`'s frame as a pose's offset and size.
+void PutSpan(Island const& g, D2D1_RECT_F const& box, Span const& span, float2& offset,
+             float2& size) {
+    D2D1_RECT_F r = Out(g.edge, box, span);
+    offset = {r.left, r.top};
+    size = {r.right - r.left, r.bottom - r.top};
+}
+
+// A fillet's square at `a` along the edge and `f` off it, in `box`'s frame.
+float3 FilletAt(Island const& g, D2D1_RECT_F const& box, float a, float f) {
+    D2D1_RECT_F r = Out(g.edge, box, {a, a + g.filletSize, f, f + g.filletSize});
+    return {r.left, r.top, 0};
+}
+
+// The window's pixels of a screen rectangle.
+D2D1_RECT_F InWindow(Island const& g, RECT const& r) {
+    return {(float)(r.left - g.window.left), (float)(r.top - g.window.top),
+            (float)(r.right - g.window.left), (float)(r.bottom - g.window.top)};
+}
+
 Pose IslandPose(Island const& g) {
     Shape const& s = g.shape;
-    float left = (float)(g.islandRect.left - g.window.left);
-    float top = (float)(g.islandRect.top - g.window.top);
+    D2D1_RECT_F box = InWindow(g, g.islandRect);
     float body = s.width - 2 * s.flare;
     Pose p;
     // The corners at the edge round past the window, so the body meets the
     // edge square.
-    p.offset = {left + s.flare, g.bottom ? top : top - s.radius};
-    p.size = {body, s.height + s.radius};
+    PutSpan(g, box, {s.flare, s.flare + body, -s.radius, s.height}, p.offset, p.size);
     p.radius = {s.radius, s.radius};
-    float fillet = g.bottom ? top + s.height - g.filletSize : top;
-    p.fillets[0] = {left, fillet, 0};
-    p.fillets[1] = {left + s.flare + body, fillet, 0};
+    p.fillets[0] = FilletAt(g, box, 0, 0);
+    p.fillets[1] = FilletAt(g, box, s.flare + body, 0);
     return p;
 }
 
 // The fillets shrink into the pill's corners at the edge.
 Pose PillPose(Island const& g) {
-    RECT r = PillRect(g);
-    float left = (float)(r.left - g.window.left);
-    float top = (float)(r.top - g.window.top);
-    float width = (float)(r.right - r.left);
-    float height = (float)(r.bottom - r.top);
-    float radius = std::max(0.0f, std::min({g.pillRadius, width / 2, height / 2}));
+    D2D1_RECT_F box = InWindow(g, PillRect(g));
+    float along = Along(g.edge, box);
     Pose p;
-    p.offset = {left, top};
-    p.size = {width, height};
+    PutSpan(g, box, {0, along, 0, Across(g.edge, box)}, p.offset, p.size);
+    float radius = std::max(0.0f, std::min({g.pillRadius, p.size.x / 2, p.size.y / 2}));
     p.radius = {radius, radius};
-    float fillet = g.bottom ? top + height - g.filletSize : top;
-    p.fillets[0] = {left - g.filletSize, fillet, 0};
-    p.fillets[1] = {left + width, fillet, 0};
+    p.fillets[0] = FilletAt(g, box, -g.filletSize, 0);
+    p.fillets[1] = FilletAt(g, box, along, 0);
     return p;
 }
 
@@ -10705,7 +11119,7 @@ void SetRegion(Island& g) {
         rgn = CreateRectRgn(0, 0, width, height);
     } else if ((rgn = CreateRectRgn(0, 0, 0, 0))) {
         auto add = [&](Shape const& shape, RECT const& at) {
-            if (HRGN part = Region(shape, g.bottom)) {
+            if (HRGN part = Region(shape, g.edge)) {
                 OffsetRgn(part, at.left - g.window.left, at.top - g.window.top);
                 CombineRgn(rgn, rgn, part, RGN_OR);
                 DeleteObject(part);
@@ -10738,11 +11152,19 @@ void SetRegion(Island& g) {
     }
 }
 
+// A point at `a` along the edge and `f` off it in a fillet's square.
+float3 InSquare(int edge, float size, float a, float f) {
+    D2D1_RECT_F r = Out(edge, {0, 0, size, size}, {a, a, f, f});
+    return {r.left, r.top, 0};
+}
+
 void Resize(Island& g, Shape const& shape) {
     g.drawn.clear();
-    SIZE size{(LONG)shape.width, (LONG)shape.height};
+    // The surface as the screen has it: a side island's is as tall as it is long.
+    float2 box = ScreenSize(g.edge, shape.width, shape.height);
+    SIZE size{(LONG)box.x, (LONG)box.y};
     check_hresult(g.surface.as<ICompositionDrawingSurfaceInterop>()->Resize(size));
-    g.content.Size({shape.width, shape.height});
+    g.content.Size(box);
     float f = std::max(1.0f, shape.flare);
     if (f != g.filletSize) {
         SIZE square{(LONG)f, (LONG)f};
@@ -10755,37 +11177,43 @@ void Resize(Island& g, Shape const& shape) {
             fillet.Size({f, f});
         }
         // Each shrinks toward the corner it shares with the body at the edge.
-        float edge = g.bottom ? f : 0;
-        g.fillets[0].CenterPoint({f, edge, 0});
-        g.fillets[1].CenterPoint({0, edge, 0});
+        g.fillets[0].CenterPoint(InSquare(g.edge, f, f, 0));
+        g.fillets[1].CenterPoint(InSquare(g.edge, f, 0, 0));
     }
     g.shape = shape;
 }
 
-// A corner island (`left` or right) to `shape`; its one fillet is on its inner
-// side, the body runs past the screen's side and edge so those corners are square.
+// A corner island (`left`: the one at the start along the edge, the left or top
+// corner) to `shape`; its one fillet is on its inner end, the body runs past the
+// screen's corner and edge so those corners are square.
 void ResizeSide(Island& g, Side& d, Shape const& shape, bool left) {
     d.drawn.clear();
-    SIZE size{(LONG)shape.width, (LONG)shape.height};
+    float2 extent = ScreenSize(g.edge, shape.width, shape.height);
+    SIZE size{(LONG)extent.x, (LONG)extent.y};
     check_hresult(d.surface.as<ICompositionDrawingSurfaceInterop>()->Resize(size));
-    d.content.Size({shape.width, shape.height});
+    d.content.Size(extent);
     float f = std::max(1.0f, shape.flare);
     if (f != d.filletSize) {
         SIZE square{(LONG)f, (LONG)f};
         check_hresult(d.filletSurface.as<ICompositionDrawingSurfaceInterop>()->Resize(square));
         d.filletSize = f;
-        auto fillet = Fillet(g.d2d.get(), f, left, g.bottom);
+        auto fillet = Fillet(g.d2d.get(), f, left, g.edge);
         Paint(d.filletSurface, [&](ID2D1DeviceContext* dc) {
             dc->FillGeometry(fillet.get(), Brush(dc, IslandFill()).get(), nullptr);
         });
         d.fillet.Size({f, f});
     }
     float r = shape.radius, body = shape.width - shape.flare;
-    d.body.Offset({left ? -r : shape.flare, g.bottom ? 0 : -r});
-    d.body.Size({body + r, shape.height + r});
+    D2D1_RECT_F box{0, 0, extent.x, extent.y};
+    float start = left ? -r : shape.flare;
+    D2D1_RECT_F b = Out(g.edge, box, {start, start + body + r, -r, shape.height});
+    d.body.Offset({b.left, b.top});
+    d.body.Size({b.right - b.left, b.bottom - b.top});
     d.body.CornerRadius({r, r});
-    d.bodyVisual.Size({shape.width, shape.height});
-    d.fillet.Offset({left ? body : 0, g.bottom ? shape.height - f : 0, 0});
+    d.bodyVisual.Size(extent);
+    float a = left ? body : 0;
+    D2D1_RECT_F q = Out(g.edge, box, {a, a + f, 0, f});
+    d.fillet.Offset({q.left, q.top, 0});
     d.shape = shape;
 }
 
@@ -10828,8 +11256,8 @@ bool Layout(Island& g) {
     float body = fixed > 0 ? std::max(fixed, height)
                            : std::max({c.width + 2 * pad, height,
                                        std::round((float)theme::kIslandMinWidth * s)});
-    shape.width = std::min(std::ceil(body) + 2 * shape.flare,
-                           (float)(monitor.right - monitor.left));
+    int length = Along(g.edge, monitor);  // the edge's, along it
+    shape.width = std::min(std::ceil(body) + 2 * shape.flare, (float)length);
     if (g.phase == Phase::kExpanding || g.phase == Phase::kCollapsing) {
         if (centerOn && g.centerOn && shape == g.shape && c.key != g.drawn) {
             DrawContent(g, c, g.surface, g.shape);
@@ -10847,7 +11275,8 @@ bool Layout(Island& g) {
     g.fillets[1].IsVisible(centerOn);
     g.content.IsVisible(centerOn);
 
-    int top = g.bottom ? monitor.bottom - (int)shape.height : monitor.top;
+    // Placed in the edge's frame on the monitor, along it from its start.
+    int start = AlongStart(g.edge, monitor);
     for (int i = 0; i < 2; i++) {
         Side& d = g.sides[i];
         bool on = corner[i].width > 0;
@@ -10859,13 +11288,13 @@ bool Layout(Island& g) {
             ss.flushLeft = i == 0;
             ss.flushRight = i == 1;
             ss.width = std::min(std::ceil(std::max(corner[i].width + 2 * pad, height)) + ss.flare,
-                                (float)(monitor.right - monitor.left) / 3);
+                                (float)length / 3);
             if (!(ss == d.shape)) {
                 ResizeSide(g, d, ss, i == 0);
             }
             int w = (int)ss.width;
-            int x = i == 0 ? monitor.left : monitor.right - w;
-            d.rect = {x, top, x + w, top + (int)height};
+            int a = i == 0 ? 0 : length - w;
+            d.rect = OutRect(g.edge, monitor, a, a + w, 0, (int)height);
         } else if (d.on || d.shape.width > 0) {
             EmptySide(d);
         }
@@ -10877,18 +11306,23 @@ bool Layout(Island& g) {
     int width = (int)shape.width;
     int x = PlacedLeft(g, monitor, width);
     int apart = (int)std::lround(theme::kIslandApart * s);
-    int lo = g.sides[0].on ? g.sides[0].rect.right + apart : (int)monitor.left;
-    int hi = g.sides[1].on ? g.sides[1].rect.left - apart : (int)monitor.right;
+    int lo = g.sides[0].on ? AlongStart(g.edge, g.sides[0].rect) - start +
+                                 Along(g.edge, g.sides[0].rect) + apart
+                           : 0;
+    int hi = g.sides[1].on ? AlongStart(g.edge, g.sides[1].rect) - start - apart : length;
     if (hi - lo >= width) {
         x = std::clamp(x, lo, hi - width);
     }
-    g.islandRect = {x, top, x + width, top + (int)shape.height};
-    // Past the edge: the row above the top one, the row below the bottom one.
-    int beyond = g.bottom ? monitor.bottom : monitor.top - 1;
+    g.islandRect = OutRect(g.edge, monitor, x, x + width, 0, (int)shape.height);
+    // Past the edge: the pixel line just off the monitor (above a top edge, below
+    // a bottom one, beside a side one).
+    RECT past = OutRect(g.edge, monitor, 0, 1, -1, 0);
     g.sharedEdge = false;
     auto across = [&](RECT const& r) {
-        for (int px : {r.left, (r.left + r.right) / 2, r.right - 1}) {
-            g.sharedEdge |= MonitorFromPoint({px, beyond}, MONITOR_DEFAULTTONULL) != nullptr;
+        int from = AlongStart(g.edge, r), to = from + Along(g.edge, r);
+        for (int p : {from, (from + to) / 2, to - 1}) {
+            POINT pt = SideEdge(g.edge) ? POINT{past.left, p} : POINT{p, past.top};
+            g.sharedEdge |= MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) != nullptr;
         }
     };
     if (centerOn) {
@@ -10936,6 +11370,24 @@ bool Layout(Island& g) {
             DrawContent(g, corner[i], d.surface, d.shape);
             d.drawn = corner[i].key;
         }
+    }
+    // What a side island stands on, once: the test of the native vertical taskbar
+    // reads it from the mod's log.
+    if (SideEdge(g.edge) && !std::exchange(g.sideLaidOutLogged, true)) {
+        auto root = core::TaskbarRoot(g.taskbar);
+        bool content = root && root.Content();
+        RECT bar{};
+        GetWindowRect(g.taskbar, &bar);
+        Wh_Log(L"Island %d at side edge %d: monitor %d,%d..%d,%d, taskbar window %d,%d..%d,%d, "
+               L"XAML content %d, island %d,%d..%d,%d (%g long, %g thick), clock \"%s\" in %d "
+               L"lines, %d meters, %d system, media %d, corners %d %d, pill box "
+               L"%d,%d..%d,%d seen %d",
+               g.id, g.edge, monitor.left, monitor.top, monitor.right, monitor.bottom, bar.left,
+               bar.top, bar.right, bar.bottom, content, g.islandRect.left, g.islandRect.top,
+               g.islandRect.right, g.islandRect.bottom, shape.width, shape.height, g_clock.c_str(),
+               (int)c.clockLines.size(), (int)c.meters.size(), (int)c.system.size(), c.media,
+               g.sides[0].on, g.sides[1].on, g.pillBox.left, g.pillBox.top, g.pillBox.right,
+               g.pillBox.bottom, g.pillSeen);
     }
     return true;
 }
@@ -11480,7 +11932,11 @@ bool CtrlDown() {
 // The point is in the island's half at the screen edge: a pointer coming onto
 // it from the monitor past that edge shows up there first.
 bool EdgeHalf(Island const& g, POINT pt) {
-    int fromEdge = g.bottom ? g.islandRect.bottom - 1 - pt.y : pt.y - g.islandRect.top;
+    RECT const& r = g.islandRect;
+    int fromEdge = g.edge == ABE_BOTTOM ? r.bottom - 1 - pt.y
+                   : g.edge == ABE_LEFT ? pt.x - r.left
+                   : g.edge == ABE_RIGHT ? r.right - 1 - pt.x
+                                         : pt.y - r.top;
     return fromEdge < (int)g.shape.height / 2;
 }
 
@@ -11488,6 +11944,8 @@ bool EdgeHalf(Island const& g, POINT pt) {
 // taskbar out. Past the edge another monitor is a way through, so a pointer
 // crossing it brings nothing; only touching the island does. In click mode,
 // and while Ctrl is held or the island is dragged, the pointer brings nothing.
+// `x` is where along a top or bottom edge; along a side one the place is the
+// message's point's y, the point auto-hide took `x` from.
 bool RevealsAt(HWND hwnd, int x, bool& reveals) {
     Island* p = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!p || !p->shown) {
@@ -11498,7 +11956,15 @@ bool RevealsAt(HWND hwnd, int x, bool& reveals) {
     if (g.sharedEdge || settings::g.island.clickToReveal || g.dragging || CtrlDown()) {
         return true;
     }
-    auto over = [&](RECT const& r) { return x >= r.left && x < r.right; };
+    int at = x;
+    if (SideEdge(g.edge)) {
+        DWORD pos = GetMessagePos();
+        at = (short)HIWORD(pos);
+    }
+    auto over = [&](RECT const& r) {
+        int from = AlongStart(g.edge, r);
+        return at >= from && at < from + Along(g.edge, r);
+    };
     reveals = (g.centerOn && over(g.islandRect)) ||
               (g.sides[0].on && over(g.sides[0].rect)) || (g.sides[1].on && over(g.sides[1].rect));
     return true;
@@ -11638,13 +12104,13 @@ void RecheckFullscreen(Island& g) {
 }
 
 // ---- moving along the edge -----------------------------------------------------
-// Ctrl and the left button on the idle island drag it along its edge; the
-// place is saved as it's let go. Ctrl and a right click put it back in the
-// middle.
+// Ctrl and the left button on the idle island drag it along its edge (across
+// a top or bottom one, up and down a side one); the place is saved as it's let
+// go. Ctrl and a right click put it back in the middle.
 
 void StartDrag(Island& g, POINT pt) {
     g.dragging = true;
-    g.grab = pt.x - g.islandRect.left;
+    g.grab = AlongOf(g.edge, pt) - AlongStart(g.edge, g.islandRect);
     SetCapture(g.hwnd);
     SetHover(g);
 }
@@ -11652,7 +12118,7 @@ void StartDrag(Island& g, POINT pt) {
 void Drag(Island& g, POINT pt) {
     RECT monitor;
     if (MonitorRect(g, monitor)) {
-        SetPlace(g, monitor, pt.x - g.grab);
+        SetPlace(g, monitor, AlongOf(g.edge, pt) - g.grab);
         core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
     }
 }
@@ -11674,27 +12140,27 @@ void ToMiddle(Island& g) {
     if (g.placeId.empty()) {
         return;
     }
-    g_places[g.placeId] = kPlaceMiddle;
+    g_places[g.placeId].On(g.edge) = kPlaceMiddle;
     core::Guard(L"Island place", [&] { SavePlace(g); });
     core::Guard(L"Island layout", [&] { LayoutRecovering(g); });
 }
 
-// Shown at its monitor's top or bottom taskbar while there is something to
-// show; invisible while the taskbar is out.
+// Shown at its monitor's edge where the taskbar is (any of the four) while there
+// is something to show; invisible while the taskbar is out.
 void Sync(Island& g) {
     if (!g.ready) {
         return;
     }
     RECT monitor;
-    // Side taskbar: the island steps back (it is drawn for a top or bottom edge).
-    bool side = core::IsSide(g.taskbar);
-    bool want = !side && !g.fullscreen && MonitorRect(g, monitor);
-    if (want && AtBottom(g.taskbar, monitor) != g.bottom) {
-        // The taskbar went to the other edge: the island starts there afresh.
+    bool want = !g.fullscreen && MonitorRect(g, monitor);
+    int edge = want ? core::EdgeOf(g.taskbar) : g.edge;
+    if (want && edge != g.edge) {
+        // The taskbar went to another edge: the island starts there afresh.
         if (g.shown) {
             Hide(g, L"edge change");
         }
-        g.bottom = !g.bottom;
+        g.edge = edge;
+        g.sideLaidOutLogged = g.sidePillLogged = false;
         g.shape = {};
         g.filletSize = 0;
         g.window = {};
@@ -11715,10 +12181,9 @@ void Sync(Island& g) {
     if (want && !g.shown) {
         Show(g);
     } else if (!want && g.shown) {
-        Hide(g, side             ? L"side"
-                : g.fullscreen   ? L"fullscreen"
-                : laidOutTried   ? L"layout failed"
-                                 : L"no monitor");
+        Hide(g, g.fullscreen   ? L"fullscreen"
+                : laidOutTried ? L"layout failed"
+                               : L"no monitor");
     } else if (want && g.phase == Phase::kIdle && !settings::g.island.clickToReveal) {
         // In click mode it went over the taskbar as it showed and stays
         // there (OnTaskbarRestacked); raising it on every change of what it
@@ -12181,8 +12646,7 @@ int g_buildTries = kBuildTries;
 ULONGLONG g_buildFailed;  // tick of the last failure
 
 void Apply(HWND taskbar) {
-    // Side taskbar: the island steps back.
-    if (core::g_unloading || !taskbar || core::IsSide(taskbar) || Of(taskbar)) {
+    if (core::g_unloading || !taskbar || Of(taskbar)) {
         return;
     }
     Prune();
