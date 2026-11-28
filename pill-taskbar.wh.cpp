@@ -5093,11 +5093,11 @@ bool Active() {
     return !core::g_unloading;
 }
 
-// Side taskbar: auto-hide's own work (reveal zone, delays, the island's and
-// Bloom's holds, the notification center hold) steps back on a side taskbar,
-// which auto-hides as Windows has it.
+// Auto-hide's own work (reveal zone, delays, the island's and Bloom's holds, the
+// notification center hold) on a taskbar. Every edge takes it: the zone runs along
+// the edge, x on a top or bottom taskbar and y on a side one.
 bool On(HWND taskbar) {
-    return Active() && !core::IsSide(taskbar);
+    return Active() && taskbar;
 }
 
 // ---- taskbar.dll ------------------------------------------------------------------
@@ -5138,9 +5138,12 @@ std::unordered_map<HWND, bool> g_collapsed;
 [[clang::no_destroy]] std::vector<HWND> g_outAtApply;
 // For the island (F8), set between its Apply and Restore: told when a
 // taskbar's collapsed state changed, and, while it shows, asked whether the
-// pointer at the edge at screen x may bring the taskbar out (over an island).
+// pointer at the edge may bring the taskbar out (over an island). `along` is the
+// pointer's screen position along the edge: x on a top or bottom taskbar, y on a
+// side one. g_revealsAtPoint, when set, is asked first, with the whole point.
 void (*g_onCollapsedChanged)(HWND) = nullptr;
-bool (*g_revealsAt)(HWND, int x, bool& reveals) = nullptr;
+bool (*g_revealsAt)(HWND, int along, bool& reveals) = nullptr;
+bool (*g_revealsAtPoint)(HWND, POINT pt, bool& reveals) = nullptr;
 // Also the island's: told as the taskbar starts to show itself expanded or
 // collapsed, before it draws that, and asked whether it stands in for the
 // taskbar's slide.
@@ -5156,7 +5159,7 @@ bool g_expandUnderIsland;
 bool Customized() {
     auto& s = settings::g.autohide;
     return s.revealZone < 100 || s.showDelay >= 0 || s.hideDelay >= 0 ||
-           g_revealsAt;
+           g_revealsAt || g_revealsAtPoint;
 }
 
 bool Ready(HWND hwnd) {
@@ -5194,7 +5197,8 @@ bool HeldByWindow(void* coordinator, HWND hwnd, int reason) {
 
 // True if the pointer asking to show the taskbar is beside the reveal zone:
 // the island while it shows, else the set part of the edge, around the middle
-// or from the side the pill is set against.
+// or from the end the pill is set against (pill.align left and right read as
+// top and bottom on a side taskbar).
 bool OutsideZone(HWND hwnd, int reason) {
     int zone = settings::g.autohide.revealZone;
     RECT rc;
@@ -5207,22 +5211,29 @@ bool OutsideZone(HWND hwnd, int reason) {
     if (reason == kReasonPointerOver && !PtInRect(&rc, pt)) {
         return false;
     }
+    bool side = core::IsSide(hwnd);
     bool reveals;
-    if (g_revealsAt && g_revealsAt(hwnd, pt.x, reveals)) {
+    if (g_revealsAtPoint && g_revealsAtPoint(hwnd, pt, reveals)) {
+        return !reveals;
+    }
+    if (g_revealsAt && g_revealsAt(hwnd, side ? pt.y : pt.x, reveals)) {
         return !reveals;
     }
     if (zone >= 100) {
         return false;
     }
-    int width = rc.right - rc.left;
+    // Along the edge, from its start (the left end, or the top on a side taskbar).
+    int along = side ? pt.y : pt.x;
+    int start = side ? rc.top : rc.left, end = side ? rc.bottom : rc.right;
+    int length = end - start;
     switch (settings::PillAlign()) {
         case settings::Align::kLeft:
-            return pt.x >= rc.right - MulDiv(width, 100 - zone, 100);
+            return along >= end - MulDiv(length, 100 - zone, 100);
         case settings::Align::kRight:
-            return pt.x < rc.left + MulDiv(width, 100 - zone, 100);
+            return along < start + MulDiv(length, 100 - zone, 100);
         default: {
-            int margin = MulDiv(width, 100 - zone, 200);
-            return pt.x < rc.left + margin || pt.x >= rc.right - margin;
+            int margin = MulDiv(length, 100 - zone, 200);
+            return along < start + margin || along >= end - margin;
         }
     }
 }
@@ -5236,10 +5247,6 @@ void Cancel(HWND hwnd) {
 // The region code clips only a shown taskbar: a hidden one keeps just a strip
 // on the screen, which must stay for the pointer.
 bool Collapsed(HWND hwnd) {
-    // Side taskbar: its collapsed state isn't kept (NoteWindowPos).
-    if (core::IsSide(hwnd)) {
-        return false;
-    }
     auto it = g_collapsed.find(hwnd);
     return it != g_collapsed.end() && it->second;
 }
@@ -5272,10 +5279,9 @@ void SetCollapsed(HWND hwnd, bool collapsed) {
 
 // The state isn't taken from the view coordinator: on this build it says the
 // taskbar is expanded all along. The window's move tells.
-// A hidden top taskbar's window sits above the monitor.
+// A hidden top taskbar's window sits above the monitor, a side one's beside it.
 void NoteWindowPos(HWND hwnd) {
-    // Side taskbar: auto-hide's collapsed state steps back (nothing reads it there).
-    if (!core::g_unloading && !core::IsSide(hwnd)) {
+    if (!core::g_unloading) {
         SetCollapsed(hwnd, LooksHidden(hwnd));
     }
 }
@@ -5651,11 +5657,6 @@ void EvaluateForeground() {
     }
     HWND front = GetForegroundWindow();
     HWND taskbar = TaskbarFor(front);
-    // Side taskbar: Bloom's launcher hold steps back.
-    if (taskbar && core::IsSide(taskbar)) {
-        ReleaseHeld();
-        return;
-    }
     if (taskbar != g_heldOut || front != g_launcher) {
         ReleaseHeld();
     }
@@ -5803,10 +5804,6 @@ void EvaluateCenter() {
         panel = box;
     }
     HWND taskbar = TaskbarOnMonitor(MonitorFromRect(&panel, MONITOR_DEFAULTTOPRIMARY));
-    // Side taskbar: the notification center hold steps back.
-    if (taskbar && core::IsSide(taskbar)) {
-        return;
-    }
     g_center = front;
     g_centerTaskbar = taskbar;
     g_centerTimer = g_centerTaskbar ? SetTimer(nullptr, 0, kCenterLookMs, CenterTick) : 0;
@@ -5870,9 +5867,8 @@ void EndFrontLook() {
 bool MoveFocusFromTaskbar() {
     HWND front = g_front;
     APPBARDATA data{.cbSize = sizeof(data)};
-    // Side taskbar: handing the focus on steps back.
     if (!Active() || !front || !core::IsTaskbarWindow(front) || !g_frontBefore ||
-        !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) || core::IsSide(front)) {
+        !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE)) {
         return true;
     }
     // A later event replaces g_front; until then, a lagging foreground or a window
@@ -6158,31 +6154,11 @@ void LogUnhide(int tray, void* pThis, int flags, int request, void* caller) {
     }
 }
 
-// The window of a tray call's taskbar (1 the primary's TrayUI, 2 a
-// CSecondaryTray), kept state or not; null if none is found.
-HWND TrayWindow(int tray, void* pThis) {
-    if (tray == 1) {
-        HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
-        return primary && core::IsTaskbarWindow(primary) ? primary : nullptr;
-    }
-    for (HWND h = nullptr;
-         (h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr));) {
-        if (core::IsTaskbarWindow(h) && GetWindowLongPtrW(h, 0) == (LONG_PTR)pThis) {
-            return h;
-        }
-    }
-    return nullptr;
-}
-
 // True if the call is dropped. The island's own requests call the originals
 // and don't come through here.
 bool OnUnhide(int tray, void* pThis, int flags, int request, void* caller) {
     // g_collapsed is the taskbar thread's.
     if (!Active() || GetCurrentThreadId() != g_trayThread) {
-        return false;
-    }
-    // Side taskbar: the holds of its tray (flashing buttons, the island) step back.
-    if (HWND hwnd = TrayWindow(tray, pThis); hwnd && core::IsSide(hwnd)) {
         return false;
     }
     core::Guard(L"Unhide diag", [&] { LogUnhide(tray, pThis, flags, request, caller); });
@@ -6221,9 +6197,7 @@ PermitAutoHide_t CTaskBtnGroup_IsFlashing_Original;
 
 int WINAPI CTaskListWnd_PermitAutoHide_Hook(void* pThis) {
     InFlight counted;
-    // Side taskbar: the task list doesn't tell its taskbar, so keeping hidden on a
-    // flash steps back only while every taskbar is at a side.
-    if (!Active() || !settings::g.autohide.keepHiddenOnFlash || core::AllSide()) {
+    if (!Active() || !settings::g.autohide.keepHiddenOnFlash) {
         return CTaskListWnd_PermitAutoHide_Original(pThis);
     }
     g_inPermitAutoHide++;
@@ -6284,9 +6258,7 @@ void NoteAnimation(Animation& a, void** result) {
     a.original = animation.Duration();
     core::DiagLine(L"Animation %s new %p", &a == &g_expand ? L"expand" : L"collapse",
                    winrt::get_abi(animation));
-    // Side taskbar: the slides are shared by every taskbar; their length steps
-    // back only while every taskbar is at a side.
-    SetDuration(a, !Active() || core::AllSide());
+    SetDuration(a, !Active());
 }
 
 using SharedAnimation_t = void**(WINAPI*)(void* pThis, void* result);
@@ -6373,11 +6345,30 @@ bool LooksHidden(HWND taskbar) {
                                   : rc.top < m.top || rc.bottom > m.bottom);
 }
 
-void Apply(HWND taskbar) {
-    // Side taskbar: auto-hide's own work steps back (On).
-    if (core::IsSide(taskbar)) {
+// Once per side taskbar, for the mod log: what the reveal zone and the hidden
+// check go by there.
+void LogSide(HWND taskbar) {
+    static std::vector<HWND> logged;  // taskbar thread
+    if (!core::IsSide(taskbar) || std::ranges::find(logged, taskbar) != logged.end()) {
         return;
     }
+    logged.push_back(taskbar);
+    RECT rc{};
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    GetWindowRect(taskbar, &rc);
+    GetMonitorInfo(core::MonitorOf(taskbar), &mi);
+    APPBARDATA data{.cbSize = sizeof(data)};
+    Wh_Log(L"Auto-hide side %p: edge %d, window %ld,%ld-%ld,%ld, monitor %ld,%ld-%ld,%ld, "
+           L"work %ld,%ld-%ld,%ld, auto-hide %d, hidden %d, secondary tray %d",
+           taskbar, core::EdgeOf(taskbar), rc.left, rc.top, rc.right, rc.bottom,
+           mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom,
+           mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom,
+           (SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) != 0, LooksHidden(taskbar),
+           core::IsSecondary(taskbar) ? SecondaryTrayOf(taskbar) != nullptr : -1);
+}
+
+void Apply(HWND taskbar) {
+    core::Guard(L"Auto-hide side log", [&] { LogSide(taskbar); });
     static bool logged;
     if (!logged) {
         logged = true;
@@ -14763,6 +14754,8 @@ bool JustClosed(const std::wstring& folder) {
 
 void RunFolderMenuIn(HWND owner, const std::wstring& folder, POINT pt);
 bool TaskbarOnTop(POINT pt);
+int TaskbarEdgeAt(POINT pt);
+HWND TaskbarAt(POINT pt);
 
 void RunFolderMenu(const std::wstring& folder, POINT pt) {
     if (IsLoose(folder)) return;  // no files to list
@@ -14774,16 +14767,28 @@ void RunFolderMenuIn(HWND owner, const std::wstring& folder, POINT pt) {
     int iconSize = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForWindow(owner));
 
     // Open away from the taskbar, from the work area's edge when the taskbar keeps one. The
-    // side comes from the monitor, not the work area: an auto-hiding taskbar keeps none, and
-    // the menu then opens at the pointer.
+    // side comes from the taskbar, not the work area: an auto-hiding taskbar keeps none, and
+    // the menu then opens at the pointer. Beside a side taskbar it is centred on the
+    // pointer's height, kept inside the work area.
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &monitor);
     UINT flags = TPM_RETURNCMD | TPM_CENTERALIGN;
-    if (TaskbarOnTop(pt)) {
-        pt.y = std::max(pt.y, monitor.rcWork.top);
-    } else {
-        pt.y = std::min(pt.y, monitor.rcWork.bottom);
-        flags |= TPM_BOTTOMALIGN;
+    int edge = TaskbarEdgeAt(pt);
+    switch (edge) {
+        case ABE_TOP:
+            pt.y = std::max(pt.y, monitor.rcWork.top);
+            break;
+        case ABE_LEFT:
+        case ABE_RIGHT: {
+            bool left = edge == ABE_LEFT;
+            pt.x = left ? std::max(pt.x, monitor.rcWork.left) : std::min(pt.x, monitor.rcWork.right);
+            pt.y = std::clamp(pt.y, monitor.rcWork.top, std::max(monitor.rcWork.top, monitor.rcWork.bottom - 1));
+            flags = TPM_RETURNCMD | TPM_VCENTERALIGN | (left ? TPM_LEFTALIGN : TPM_RIGHTALIGN);
+            break;
+        }
+        default:
+            pt.y = std::min(pt.y, monitor.rcWork.bottom);
+            flags |= TPM_BOTTOMALIGN;
     }
 
     for (bool reopen = true; reopen && !g_unloading;) {
@@ -15125,7 +15130,10 @@ struct Hover {
 Hover HoverAt(const wux::FrameworkElement& dragged, wf::Point point) {
     auto repeater = wux::Media::VisualTreeHelper::GetParent(dragged);
     int count = repeater ? wux::Media::VisualTreeHelper::GetChildrenCount(repeater) : 0;
-    float slot = dragged.ActualOffset().x;  // the drop placeholder's place
+    // A side taskbar's buttons run down its column: the shares go along y there.
+    bool side = core::IsSide(dragged.XamlRoot());
+    auto along = [side](wf::Point p) { return side ? p.Y : p.X; };
+    float slot = along({dragged.ActualOffset().x, dragged.ActualOffset().y});  // the drop placeholder's place
     for (int i = 0; i < count; i++) {
         auto child = wux::Media::VisualTreeHelper::GetChild(repeater, i)
                          .try_as<wux::FrameworkElement>();
@@ -15133,11 +15141,12 @@ Hover HoverAt(const wux::FrameworkElement& dragged, wf::Point point) {
             continue;
         auto offset = child.ActualOffset();  // layout slot, unaffected by our scale
         float width = child.ActualWidth(), height = child.ActualHeight();
-        if (width <= 0 || point.X < offset.x || point.X > offset.x + width ||
+        if (width <= 0 || height <= 0 || point.X < offset.x || point.X > offset.x + width ||
             point.Y < offset.y || point.Y > offset.y + height)
             continue;
-        float share = (point.X - offset.x) / width;
-        return {child, ZoneAt(offset.x < slot ? 1 - share : share)};
+        float start = along({offset.x, offset.y}), length = side ? height : width;
+        float share = (along(point) - start) / length;
+        return {child, ZoneAt(start < slot ? 1 - share : share)};
     }
     return {};
 }
@@ -15924,9 +15933,68 @@ void CutOverTaskbar(Popup& p) {
     }
 }
 
+// The edge (ABE_*) a popup opens away from: its taskbar's when that is at a side, else
+// that of the side taskbar whose tree the anchor is in, else the top or the bottom as
+// the caller tells. Taskbar thread.
+int PopupEdge(HWND taskbar, const wux::FrameworkElement& anchor, bool taskbarOnTop) {
+    int edge = taskbarOnTop ? ABE_TOP : ABE_BOTTOM;
+    if (taskbar) {
+        int own = core::EdgeOf(taskbar);
+        return core::IsSideEdge(own) ? own : edge;
+    }
+    try {
+        HWND tree = anchor ? core::TaskbarOf(anchor.XamlRoot()) : nullptr;
+        if (tree && core::IsSide(tree)) return core::EdgeOf(tree);
+    } catch (...) {
+    }
+    return edge;
+}
+
+// Present beside a side taskbar: right of a left one, left of a right one, its middle at
+// the anchor's along the edge. XAML keeps it on the monitor, which beside a side taskbar
+// spans the work area's height. `gap` is from the pill's far side, which keeps the
+// tray's inset (kTrayMargin) off the taskbar's inner edge as off the top of a bottom one.
+void PresentBeside(Popup& p, const wux::FrameworkElement& anchor, bool left) {
+    double toEdge = 0, rootWidth = 0;
+    wf::Rect box{};
+    try {
+        if (auto root = anchor.XamlRoot()) {
+            box = anchor.TransformToVisual(nullptr).TransformBounds(
+                {0, 0, float(anchor.ActualWidth()), float(anchor.ActualHeight())});
+            rootWidth = root.Size().Width;
+            double inset = settings::theme::kTrayMargin.Top;
+            toEdge = std::max(0.0, left ? rootWidth - inset - (box.X + box.Width) : box.X - inset);
+        }
+    } catch (...) {
+    }
+    static std::vector<HWND> logged;  // once per side taskbar, for the mod log
+    if (p.taskbar && std::ranges::find(logged, p.taskbar) == logged.end()) {
+        logged.push_back(p.taskbar);
+        Wh_Log(L"Folders side %p (%s): root width %.0f, anchor %.0f,%.0f %.0fx%.0f, to edge %.0f",
+               p.taskbar, left ? L"left" : L"right", rootWidth, box.X, box.Y, box.Width, box.Height,
+               toEdge);
+    }
+    double scale = UiScale(p.look);
+    double room = std::min(kShadowRoom, p.look.gap / scale);
+    if (p.room) {
+        wux::Thickness padding = p.room.Padding();
+        (left ? padding.Left : padding.Right) = room;
+        p.room.Padding(padding);
+    }
+    float offset = float(toEdge + p.look.gap - room * scale);
+    wux::Controls::Primitives::FlyoutShowOptions options;
+    options.Placement(left ? wux::Controls::Primitives::FlyoutPlacementMode::Right
+                           : wux::Controls::Primitives::FlyoutPlacementMode::Left);
+    options.Position(wf::IReference<wf::Point>(wf::Point{
+        left ? float(anchor.ActualWidth()) + offset : -offset, float(anchor.ActualHeight() / 2)}));
+    p.flyout.ShowAt(anchor, options);
+    Wh_Log(L"popup shows beside, open: %d", p.flyout.IsOpen());
+}
+
 // Shows the popup's flyout over the taskbar, in its own window: the taskbar's XAML root
 // is only as tall as the taskbar. It opens on the chosen side, `gap` from the button.
-// `shiftX` moves it off the anchor's middle (its window holds more on one side).
+// `shiftX` moves it off the anchor's middle (its window holds more on one side); beside a
+// side taskbar (PresentBeside) the window's extra room is across the edge, and it is unused.
 void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop, double shiftX) {
     p.anchor = winrt::make_weak(anchor);
     p.taskbarOnTop = taskbarOnTop;
@@ -15966,6 +16034,8 @@ void Present(Popup& p, const wux::FrameworkElement& anchor, bool taskbarOnTop, d
     }));
     // Always away from the taskbar's edge: toward it the popup is off its monitor, and XAML
     // pushes it back over the taskbar, where CutOverTaskbar leaves only its rim.
+    int edge = PopupEdge(p.taskbar, anchor, taskbarOnTop);
+    if (core::IsSideEdge(edge)) return PresentBeside(p, anchor, edge == ABE_LEFT);
     bool below = taskbarOnTop;
     // `gap` is from the pill's edge, not the button's: a button may stop short of it (the
     // usage meter does). The pill is the taskbar's XAML root less its pieces' margin (the
@@ -16282,12 +16352,23 @@ std::wstring FolderFromAppId(const std::wstring& appId) {
     return {};
 }
 
-// A click on a top taskbar is in the upper half of its monitor. Not the work area: with
-// the mod's edge Windows keeps room at its own edge, and an auto-hiding taskbar keeps none.
-bool TaskbarOnTop(POINT pt) {
+// The edge (ABE_*) of the taskbar a click at `pt` was on: the taskbar under it, else
+// the one on its monitor, as core::EdgeOf tells from the window against its monitor.
+// With neither, a click in the upper half of its monitor counts as a top taskbar's. Not
+// the work area: with the mod's edge Windows keeps room at its own edge, and an
+// auto-hiding taskbar keeps none.
+int TaskbarEdgeAt(POINT pt) {
+    HMONITOR on = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarAt(pt);
+    if (!taskbar) taskbar = core::TaskbarOn(on);
+    if (taskbar) return core::EdgeOf(taskbar);
     MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &monitor);
-    return pt.y < (monitor.rcMonitor.top + monitor.rcMonitor.bottom) / 2;
+    GetMonitorInfoW(on, &monitor);
+    return pt.y < (monitor.rcMonitor.top + monitor.rcMonitor.bottom) / 2 ? ABE_TOP : ABE_BOTTOM;
+}
+
+bool TaskbarOnTop(POINT pt) {
+    return TaskbarEdgeAt(pt) == ABE_TOP;
 }
 
 // Found by symbol only, never hooked.
@@ -17058,26 +17139,43 @@ struct BarHit {
     wux::FrameworkElement button{nullptr};
     std::wstring id;      // the button's app ID
     bool middle = false;  // in its middle half, away from the gaps
+    bool side = false;    // a side taskbar's: the buttons run down its column
 };
+
+// A point or a slot along the row and across it: x and y on a top or bottom taskbar,
+// y and x on a side one.
+float Along(bool side, wf::Point p) { return side ? p.Y : p.X; }
+float Across(bool side, wf::Point p) { return side ? p.X : p.Y; }
+float AlongStart(bool side, wf::Rect r) { return side ? r.Y : r.X; }
+float AlongLength(bool side, wf::Rect r) { return side ? r.Height : r.Width; }
+wf::Point AtAlong(bool side, float along, float across) {
+    return side ? wf::Point{across, along} : wf::Point{along, across};
+}
 
 BarHit HitRow(HWND taskbar, const wux::FrameworkElement& row, POINT pt) {
     BarHit hit{taskbar};
     auto space = row ? SpaceOf(taskbar, row) : std::nullopt;
     if (!space) return hit;
-    float height = float(row.ActualHeight());
-    POINT top = ToScreen(*space, {0, 0}), bottom = ToScreen(*space, {0, height});
+    bool side = core::IsSide(taskbar);
+    // Across the row: its height on a top or bottom taskbar, its width on a side one. The
+    // row counts only while it is all on its monitor that way.
+    float thick = float(side ? row.ActualWidth() : row.ActualHeight());
+    POINT first = ToScreen(*space, {0, 0}), last = ToScreen(*space, AtAlong(side, 0, thick));
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(core::MonitorOf(taskbar), &monitor);
     wf::Point at = ToLocal(*space, pt);
-    if (top.y < monitor.rcMonitor.top - 1 || bottom.y > monitor.rcMonitor.bottom + 1 || at.Y < 0 ||
-        at.Y > height)
-        return hit;
+    bool off = side ? first.x < monitor.rcMonitor.left - 1 || last.x > monitor.rcMonitor.right + 1
+                    : first.y < monitor.rcMonitor.top - 1 || last.y > monitor.rcMonitor.bottom + 1;
+    if (off || Across(side, at) < 0 || Across(side, at) > thick) return hit;
     hit.row = row;
     hit.space = *space;
     hit.at = at;
+    hit.side = side;
+    float to = Along(side, at);
     ForEachButton(row, [&](const wux::FrameworkElement& button, wf::Rect slot) {
-        if (hit.button || at.X < slot.X || at.X > slot.X + slot.Width) return;
-        float share = (at.X - slot.X) / slot.Width;
+        float start = AlongStart(side, slot), length = AlongLength(side, slot);
+        if (hit.button || length <= 0 || to < start || to > start + length) return;
+        float share = (to - start) / length;
         hit.button = button;
         hit.id = ButtonAppId(button, false);
         hit.middle = share >= kMergeEdge && share <= 1 - kMergeEdge;
@@ -17090,32 +17188,35 @@ bool IsFolderTarget(const BarHit& hit) {
     return hit.middle && hit.id.starts_with(kAppIdPrefix) && !IsLooseId(hit.id);
 }
 
-// The gap between buttons nearest a hit: the app IDs left of it in taskbar order, and its
-// middle on screen.
+// The gap between buttons nearest a hit: the app IDs before it in taskbar order (left of
+// it, or above it on a side taskbar), and its middle on screen.
 struct PinGap {
     std::vector<std::wstring> leftIds;
     POINT at{};
 };
 
 PinGap GapAt(const BarHit& hit) {
+    bool side = hit.side;
     std::vector<std::pair<float, std::wstring>> left;
     float gap = -1, next = std::numeric_limits<float>::infinity();
-    float middle = float(hit.row.ActualHeight() / 2);
+    float middle = float((side ? hit.row.ActualWidth() : hit.row.ActualHeight()) / 2);
+    float to = Along(side, hit.at);
     ForEachButton(hit.row, [&](const wux::FrameworkElement& button, wf::Rect slot) {
-        middle = slot.Y + slot.Height / 2;
-        if (slot.X + slot.Width / 2 < hit.at.X) {
-            left.emplace_back(slot.X, ButtonAppId(button, false));
-            gap = std::max(gap, slot.X + slot.Width);
+        float start = AlongStart(side, slot), length = AlongLength(side, slot);
+        middle = side ? slot.X + slot.Width / 2 : slot.Y + slot.Height / 2;
+        if (start + length / 2 < to) {
+            left.emplace_back(start, ButtonAppId(button, false));
+            gap = std::max(gap, start + length);
         } else {
-            next = std::min(next, slot.X);
+            next = std::min(next, start);
         }
     });
     std::sort(left.begin(), left.end());
     PinGap result;
     for (auto& [x, id] : left)
         if (!id.empty()) result.leftIds.push_back(std::move(id));
-    float x = gap >= 0 ? gap : std::isfinite(next) ? next : hit.at.X;
-    result.at = ToScreen(hit.space, {x, middle});
+    float along = gap >= 0 ? gap : std::isfinite(next) ? next : to;
+    result.at = ToScreen(hit.space, AtAlong(side, along, middle));
     return result;
 }
 
@@ -17564,7 +17665,9 @@ bool StartCarry(Popup& p, const wux::Controls::Grid& cell) {
         if (space) {
             float w = float(anchor.ActualWidth()), h = float(anchor.ActualHeight());
             c.home = ToScreen(*space, {w / 2, h / 2});
-            c.beside = ToScreen(*space, {w, h / 2});
+            // Next to it in taskbar order: right of it, or under it on a side taskbar.
+            bool side = core::IsSide(p.taskbar);
+            c.beside = ToScreen(*space, side ? wf::Point{w / 2, h} : wf::Point{w, h / 2});
         }
         c.taskbars = core::Taskbars();
         if (item.iconSize > 0 && item.icon.size() == size_t(item.iconSize) * item.iconSize) {
@@ -21944,6 +22047,9 @@ struct Open {
     int widening = 0;
     uint32_t widenRun = 0;
     double widenTo = 0, slide = 0, spareLeft = 0, spareRight = 0;
+    // The meter's taskbar edge (ABE_*): beside a side taskbar the wide bubble grows away
+    // from it, and the room on its side stays as folders::Present left it.
+    int edge = ABE_BOTTOM;
     int placeLogs = 0;
     // A session's chat asked for from outside (OpenChatFor), by its row's key, opened
     // once its row comes, until the tick count given.
@@ -25613,22 +25719,33 @@ double MiddleShift(FrameworkElement const& anchor) {
 // opens: a window moved under a bubble drawn to stay put shows it in the wrong place for
 // a frame. `slide` is how far the wide bubble starts left of the narrow one; the room
 // pads the bubble by what the other one needs beside it.
+// Beside a side taskbar the wide bubble keeps the narrow one's side toward the taskbar and
+// grows away from it: to the right of a left taskbar (no slide), to the left of a right
+// one (the full slide).
 void Span(FrameworkElement const& anchor) {
     auto& o = *g_open;
     double full = kChatGap + kChatWidth;
-    o.slide = std::round(full / 2 - MiddleShift(anchor));  // whole pixels: text drawn where it rests
+    if (o.edge == ABE_LEFT || o.edge == ABE_RIGHT) {
+        o.slide = o.edge == ABE_LEFT ? 0 : full;
+    } else {
+        o.slide = std::round(full / 2 - MiddleShift(anchor));  // whole pixels: text drawn where it rests
+    }
     o.spareLeft = std::max(0.0, o.slide);
     o.spareRight = std::max(0.0, full - o.slide);
 }
 
 // Only its sides: its top and bottom stay as folders::Present left them, shorter toward
-// the taskbar.
+// the taskbar. Beside a side taskbar the side toward it stays so too (its spare is 0).
 Thickness RoomPadding(bool wide) {
     auto const& o = *g_open;
     double room = folders::kShadowRoom, full = kChatGap + kChatWidth;
     Thickness now = o.room.Padding();
-    if (!wide) return {room + o.spareLeft, now.Top, room + o.spareRight, now.Bottom};
-    return {room + o.spareLeft - o.slide, now.Top, room + o.spareRight - full + o.slide, now.Bottom};
+    Thickness to = !wide ? Thickness{room + o.spareLeft, now.Top, room + o.spareRight, now.Bottom}
+                         : Thickness{room + o.spareLeft - o.slide, now.Top,
+                                     room + o.spareRight - full + o.slide, now.Bottom};
+    if (o.edge == ABE_LEFT) to.Left = now.Left;
+    if (o.edge == ABE_RIGHT) to.Right = now.Right;
+    return to;
 }
 
 // The widening `run` has ended: the bubble is laid out as it is drawn now.
@@ -26303,6 +26420,8 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> on
     open.colors = MakeColors(open.dark);
     auto root = anchor.XamlRoot();
     open.rasterization = root ? root.RasterizationScale() : 1.0;
+    bool top = onTop ? *onTop : TaskbarAtTop(taskbar);
+    open.edge = folders::PopupEdge(taskbar, anchor, top);
     Controls::StackPanel body;
     body.Width(kWidth);
     open.body = body;
@@ -26340,9 +26459,10 @@ void Toggle(HWND taskbar, FrameworkElement const& anchor, std::optional<bool> on
             // The narrow bubble over the meter, in a window that holds the wide one too.
             Span(anchor);
             open.room.Padding(RoomPadding(false));
-            shift = (open.spareRight - open.spareLeft) / 2;
+            // Along a top or bottom taskbar only: beside a side one the spare is across it.
+            if (!core::IsSideEdge(open.edge)) shift = (open.spareRight - open.spareLeft) / 2;
         }
-        folders::Present(p, anchor, onTop ? *onTop : TaskbarAtTop(taskbar), shift);
+        folders::Present(p, anchor, top, shift);
         folders::Keep(p, flyout.Opened(winrt::auto_revoke, [](auto&&, auto&&) {
             core::Guard(L"Usage details opened", [] {
                 if (Ours() && !std::exchange(g_open->shownOnce, true) && folders::g_popup->content &&
@@ -26510,8 +26630,10 @@ namespace panels {
 // (SetWindowRgn).
 
 // Screen x of the tray's left and right edges, packed into a window property (left
-// in the low half). ShellHost reads it too.
+// in the low half). ShellHost reads it too. A side taskbar keeps the tray's top and
+// bottom screen y instead, in kTrayYProp packed the same way (top in the low half).
 constexpr WCHAR kTrayProp[] = L"PillTaskbar.TraySpan";
+constexpr WCHAR kTrayYProp[] = L"PillTaskbar.TraySpanY";
 
 ULONG_PTR Pack(LONG left, LONG right) {
     return (ULONG_PTR)(UINT32)left | ((ULONG_PTR)(UINT32)right << 32);
@@ -26533,7 +26655,7 @@ HWND TaskbarOn(HMONITOR monitor) {
 
 // Where a panel of this size goes on the monitor it opens on: x for its right edge
 // at the tray's, kept inside the work area. x itself where no tray span is kept
-// (the feature is off in explorer, or the taskbar is vertical).
+// (the feature is off in explorer, or the taskbar is at a side: PlaceSide).
 int PlaceX(int x, int y, int width, int height) {
     RECT rc{x, y, x + width, y + height};
     HMONITOR monitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
@@ -26549,6 +26671,47 @@ int PlaceX(int x, int y, int width, int height) {
     return hi < lo ? x : std::clamp<LONG>(right - width, lo, hi);
 }
 
+// The gap Windows leaves between a panel and a bottom taskbar, at 100%.
+constexpr int kPanelGap = 12;
+
+// Where a panel of this size goes on its monitor when that monitor's taskbar is at a
+// side: across, the gap beside the taskbar (a hidden one's width counted as for a top
+// one); along, its bottom at the tray's (nearTray, where the tray's span is kept), else
+// where it was; inside the work area. False, leaving x and y, for a taskbar that is not
+// at a side or is not found. Works from any process.
+bool PlaceSide(int& x, int& y, int width, int height, bool nearTray) {
+    RECT rc{x, y, x + width, y + height};
+    HMONITOR monitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarOn(monitor);
+    int edge = taskbar ? core::EdgeOf(taskbar) : ABE_BOTTOM;
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    RECT bar;
+    if (!core::IsSideEdge(edge) || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi)) {
+        return false;
+    }
+    UINT dpi = GetDpiForWindow(taskbar);
+    LONG gap = MulDiv(kPanelGap, dpi ? dpi : 96, 96), thick = bar.right - bar.left;
+    const RECT& work = mi.rcWork;
+    LONG toX = edge == ABE_LEFT
+                   ? std::max<LONG>(work.left, mi.rcMonitor.left + thick) + gap
+                   : std::min<LONG>(work.right, mi.rcMonitor.right - thick) - gap - width;
+    LONG toY = y;
+    auto span = nearTray ? (ULONG_PTR)GetProp(taskbar, kTrayYProp) : 0;
+    LONG top = (LONG)(UINT32)span, bottom = (LONG)(UINT32)(span >> 32);
+    if (bottom > top && top >= mi.rcMonitor.top && bottom <= mi.rcMonitor.bottom) {
+        toY = bottom - height;
+    }
+    if (work.right - width >= work.left) {
+        toX = std::clamp<LONG>(toX, work.left, work.right - width);
+    }
+    if (work.bottom - height >= work.top) {
+        toY = std::clamp<LONG>(toY, work.top, work.bottom - height);
+    }
+    x = toX;
+    y = toY;
+    return true;
+}
+
 // ---- explorer: the tray span (taskbar thread) ------------------------------------
 
 struct Bar {
@@ -26556,6 +26719,7 @@ struct Bar {
     winrt::weak_ref<FrameworkElement> frame;
     FrameworkElement::LayoutUpdated_revoker layoutUpdated;
     ULONG_PTR span = 0;  // set on the window, 0 if none
+    bool side = false;   // a side taskbar's: the span is along y, in kTrayYProp
 };
 
 std::list<Bar> g_bars;  // taskbar thread only
@@ -26576,7 +26740,7 @@ void Publish(Bar& bar) {
     if (!piece || piece.Visibility() != Visibility::Visible || piece.ActualWidth() <= 0) {
         piece = frame;
     }
-    if (piece.ActualWidth() <= 0) {
+    if (piece.ActualWidth() <= 0 || piece.ActualHeight() <= 0) {
         return;  // not laid out yet
     }
     // DIPs to window pixels by the window DPI, as region::Update.
@@ -26584,31 +26748,61 @@ void Publish(Bar& bar) {
     double scale = dpi ? dpi / 96.0 : root.RasterizationScale();
     auto r = piece.TransformToVisual(content).TransformBounds(
         {0, 0, (float)piece.ActualWidth(), (float)piece.ActualHeight()});
-    LONG left = window.left + (LONG)std::lround(r.X * scale);
-    LONG right = window.left + (LONG)std::lround((r.X + r.Width) * scale);
-    ULONG_PTR span = right > left ? Pack(left, right) : 0;
-    if (span && span != bar.span && SetProp(bar.hwnd, kTrayProp, (HANDLE)span)) {
+    // Along the taskbar: x on a top or bottom one, y down a side one.
+    LONG origin = bar.side ? window.top : window.left;
+    double from = bar.side ? r.Y : r.X, length = bar.side ? r.Height : r.Width;
+    LONG start = origin + (LONG)std::lround(from * scale);
+    LONG end = origin + (LONG)std::lround((from + length) * scale);
+    ULONG_PTR span = end > start ? Pack(start, end) : 0;
+    if (span && span != bar.span && SetProp(bar.hwnd, bar.side ? kTrayYProp : kTrayProp, (HANDLE)span)) {
         bar.span = span;
     }
 }
 
-void Apply(HWND hwnd) {
-    // Side taskbar: the panels near the tray step back (no tray span is kept).
-    if (core::IsSide(hwnd)) {
+// Once per side taskbar, for the mod log: the elements the tray span goes by there.
+void LogSide(HWND hwnd, FrameworkElement const& frame) {
+    static std::vector<HWND> logged;  // taskbar thread
+    if (std::ranges::find(logged, hwnd) != logged.end()) {
         return;
     }
+    logged.push_back(hwnd);
+    auto parent = core::Parent(frame);
+    FrameworkElement tray = core::ChildOfClass(parent, L"SystemTray.SystemTrayFrame");
+    auto root = frame.XamlRoot();
+    auto size = root ? root.Size() : wf::Size{};
+    Wh_Log(L"Panels side %p: root %.0fx%.0f, frame %.0fx%.0f, parent %s, tray %s %.0fx%.0f",
+           hwnd, size.Width, size.Height, frame.ActualWidth(), frame.ActualHeight(),
+           parent ? winrt::get_class_name(parent).c_str() : L"none",
+           tray ? L"found" : L"missing (the whole pill counts)", tray ? tray.ActualWidth() : 0.0,
+           tray ? tray.ActualHeight() : 0.0);
+}
+
+void Apply(HWND hwnd) {
     auto root = core::TaskbarRoot(hwnd);
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
     auto frame = content ? core::FindDescendant(
                                content,
                                [](auto& e) { return core::IsClass(e, L"Taskbar.TaskbarFrame"); }, 8)
                          : nullptr;
+    bool side = core::IsSide(hwnd);
     if (!frame) {
+        static bool logged;
+        if (side && !std::exchange(logged, true)) {
+            Wh_Log(L"Panels side %p: no Taskbar.TaskbarFrame, no tray span there", hwnd);
+        }
         return;
     }
+    if (side) {
+        LogSide(hwnd, frame);
+    }
+    // A bar kept for the other orientation (the taskbar turned) goes with its span.
     std::erase_if(g_bars, [&](Bar& b) {
         auto f = b.frame.get();
-        return !f || (b.hwnd == hwnd && f != frame);
+        bool gone = !f || (b.hwnd == hwnd && (f != frame || b.side != side));
+        if (gone && b.hwnd == hwnd && b.span && IsWindow(hwnd)) {
+            RemoveProp(hwnd, b.side ? kTrayYProp : kTrayProp);
+        }
+        return gone;
     });
     for (auto& bar : g_bars) {
         if (bar.hwnd == hwnd) {
@@ -26619,6 +26813,7 @@ void Apply(HWND hwnd) {
     auto& bar = g_bars.emplace_back();
     bar.hwnd = hwnd;
     bar.frame = frame;
+    bar.side = side;
     Bar* p = &bar;  // std::list keeps it in place
     bar.layoutUpdated = frame.LayoutUpdated(
         winrt::auto_revoke,
@@ -26642,9 +26837,6 @@ std::mutex g_centerLock;
 HWND g_center;
 POINT g_centerDefault, g_centerAt;
 
-// The gap Windows leaves between a panel and a bottom taskbar, at 100%.
-constexpr int kPanelGap = 12;
-
 // Screen y for the top of a panel's shown part (on screen) under a top taskbar: the
 // gap below the taskbar, a hidden one's height counted as Quick Settings counts it,
 // kept inside the work area. Its own top where the monitor's taskbar is not at the
@@ -26654,7 +26846,7 @@ LONG PlaceTop(const RECT& shown) {
     HWND taskbar = TaskbarOn(monitor);
     MONITORINFO mi{.cbSize = sizeof(mi)};
     RECT bar;
-    // Side taskbar: the notification center's top placement steps back.
+    // A side taskbar's panels are placed by PlaceSide.
     if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
         core::IsSide(taskbar) || bar.top + bar.bottom >= mi.rcMonitor.top + mi.rcMonitor.bottom) {
         return shown.top;
@@ -26669,14 +26861,13 @@ LONG PlaceTop(const RECT& shown) {
 // explorer sets the edges per monitor (F11), a monitor's taskbar can be at the
 // other one: y for a panel of this size at that taskbar's side, with the gap
 // Windows leaves, as PlaceTop does. y itself where the panel is at its taskbar's
-// side already, or the taskbar is vertical or not found.
+// side already, or the taskbar is at a side (PlaceSide) or not found.
 int PlaceY(int x, int y, int width, int height) {
     RECT rc{x, y, x + width, y + height};
     HMONITOR monitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
     HWND taskbar = TaskbarOn(monitor);
     MONITORINFO mi{.cbSize = sizeof(mi)};
     RECT bar;
-    // Side taskbar: Quick Settings' move to its taskbar's side steps back.
     if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
         core::IsSide(taskbar)) {
         return y;
@@ -26844,9 +27035,16 @@ bool CenterTarget(HWND hwnd, HRGN region, const RECT& rc, POINT& at) {
         // reach mostly into the monitor above.
         RECT shown = panel;
         OffsetRect(&shown, g_centerDefault.x, g_centerDefault.y);
-        x = PlaceX(shown.left, shown.top, shown.right - shown.left, shown.bottom - shown.top) -
-            panel.left;
-        y = cut ? PlaceTop(shown) - panel.top : rc.top;
+        int sideX = shown.left, sideY = shown.top;
+        if (PlaceSide(sideX, sideY, shown.right - shown.left, shown.bottom - shown.top, true)) {
+            // Beside a side taskbar, its bottom at the tray's.
+            x = sideX - panel.left;
+            y = cut ? sideY - panel.top : rc.top;
+        } else {
+            x = PlaceX(shown.left, shown.top, shown.right - shown.left, shown.bottom - shown.top) -
+                panel.left;
+            y = cut ? PlaceTop(shown) - panel.top : rc.top;
+        }
         g_centerAt = {x, y};
     }
     at = {x, y};
@@ -26854,6 +27052,19 @@ bool CenterTarget(HWND hwnd, HRGN region, const RECT& rc, POINT& at) {
 }
 
 thread_local bool g_placing;  // the mod's own move, which the SetWindowPos hook lets by
+// Explorer's SetWindowPos hook serves the notification center (HookExplorer) and the jump
+// lists (HookJumpLists); each part looks only while its own install went through.
+std::atomic<bool> g_centerMoves, g_jumpLists;
+
+// The one SetWindowPos hook in this process, set once for whichever part asks first.
+bool HookSetWindowPos() {
+    static bool hooked;
+    if (!hooked) {
+        hooked = WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
+                                                &SetWindowPos_Original);
+    }
+    return hooked;
+}
 
 void PlaceNotificationCenter(HWND hwnd, HRGN region) {
     RECT rc;
@@ -26873,7 +27084,8 @@ void PlaceNotificationCenter(HWND hwnd, HRGN region) {
 // placing the window from where this call asks.
 bool PlaceCenterMove(HWND hwnd, int& x, int& y, int cx, int cy, UINT flags) {
     RECT now;
-    if (g_placing || core::g_unloading || (flags & SWP_NOMOVE) || !IsNotificationCenter(hwnd) ||
+    if (!g_centerMoves || g_placing || core::g_unloading || (flags & SWP_NOMOVE) ||
+        !IsNotificationCenter(hwnd) ||
         !GetWindowRect(hwnd, &now)) {
         return false;
     }
@@ -26927,9 +27139,10 @@ bool HookExplorer() {
     } else if (!WindhawkUtils::SetFunctionHook(SetWindowRgn, SetWindowRgn_Hook,
                                                &SetWindowRgn_Original)) {
         Wh_Log(L"No SetWindowRgn hook: under a top taskbar the panel keeps its first top");
-    } else if (!WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
-                                               &SetWindowPos_Original)) {
+    } else if (!HookSetWindowPos()) {
         Wh_Log(L"No SetWindowPos hook: explorer's own moves of the notification center show");
+    } else {
+        g_centerMoves = true;
     }
     return ok;
 }
@@ -26939,7 +27152,7 @@ bool HookExplorer() {
 void Restore() {
     for (auto& bar : g_bars) {
         if (bar.span && IsWindow(bar.hwnd)) {
-            RemoveProp(bar.hwnd, kTrayProp);
+            RemoveProp(bar.hwnd, bar.side ? kTrayYProp : kTrayProp);
         }
     }
     g_bars.clear();
@@ -26975,10 +27188,47 @@ using GetShowPosition_t = void*(WINAPI*)(void* point, int location, double margi
                                           void* grid, double width, double height);
 GetShowPosition_t GetShowPosition_Original;
 
+// A side taskbar's menus (TaskbarLocation 0 left, 2 right) open beside it, and the
+// root's height is taken as where the stock tray ends, as its width is along a top or
+// bottom taskbar: the icon's own bottom takes the height's place, so the menu comes
+// level with the icon rather than at the foot of the screen. Logged once per root for
+// the mod log, with what Windows answered.
+void SideMenuHeight(void* grid, int location, double margin, double width, double& height,
+                    bool& log) {
+    auto icon = core::FromAbi(*(void**)grid);
+    if (!icon || icon.ActualHeight() <= 0) {
+        return;
+    }
+    auto r = icon.TransformToVisual(nullptr).TransformBounds(
+        {0, 0, (float)icon.ActualWidth(), (float)icon.ActualHeight()});
+    double bottom = r.Y + r.Height;
+    static std::vector<void*> logged;  // taskbar thread
+    void* key = icon.XamlRoot() ? winrt::get_abi(icon.XamlRoot().as<wf::IUnknown>()) : nullptr;
+    if (key && std::ranges::find(logged, key) == logged.end()) {
+        logged.push_back(key);
+        log = true;
+        Wh_Log(L"Tray menu side: location %d, margin %.0f, root %.0fx%.0f, icon %.0f,%.0f %.0fx%.0f",
+               location, margin, width, height, r.X, r.Y, r.Width, r.Height);
+    }
+    if (bottom > 0 && bottom < height) {
+        height = bottom;
+    }
+}
+
 void* WINAPI GetShowPosition_Hook(void* point, int location, double margin, void* grid,
                                   double width, double height) {
-    // WindowsUdk TaskbarLocation: 1 top, 3 bottom. Side taskbar: a side one's
-    // menus (0 left, 2 right) keep Windows' place.
+    if ((location == 0 || location == 2) && grid && !core::g_unloading) {
+        bool log = false;
+        core::Guard(L"Tray menu side", [&] { SideMenuHeight(grid, location, margin, width, height, log); });
+        void* ret = GetShowPosition_Original(point, location, margin, grid, width, height);
+        // `point` is the returned Point's slot.
+        if (log && autohide::Readable(point, sizeof(wf::Point))) {
+            auto at = (const wf::Point*)point;
+            Wh_Log(L"Tray menu side: shown at %.0f,%.0f with height %.0f", at->X, at->Y, height);
+        }
+        return ret;
+    }
+    // WindowsUdk TaskbarLocation: 1 top, 3 bottom.
     if ((location == 1 || location == 3) && grid && !core::g_unloading) {
         core::Guard(L"Tray menu", [&] {
             auto icon = core::FromAbi(*(void**)grid);
@@ -27002,6 +27252,113 @@ void CollectSystemTray(std::vector<WindhawkUtils::SYMBOL_HOOK>& list) {
     list.push_back(
         {{LR"(struct winrt::Windows::Foundation::Point __cdecl ContextMenuPositionHelper::GetShowPosition(enum winrt::WindowsUdk::UI::Shell::TaskbarLocation,double,struct winrt::Windows::UI::Xaml::Controls::Grid const &,double,double))"},
          &GetShowPosition_Original, GetShowPosition_Hook, true});
+}
+
+// ---- explorer: jump lists beside a side taskbar (Taskbar.dll) -------------------------
+// Beside a side taskbar Windows opens a button's jump list level with the button's top.
+// Here its middle goes to the button's middle along the edge, as the folder popup opens,
+// inside the work area. The button is the rectangle _ComputeJumpViewPosition turns into
+// desktop pixels (ToRawPixelsInDesktopCoordinates, on the taskbar thread); the jump
+// list's window (a CoreWindow on a "JumpViewUI" thread) is moved as explorer places it.
+// After taskbar-vertical 1.5.1's native path (m417z, GPL-3.0), with its center alignment.
+
+std::atomic<LONG> g_jumpTop, g_jumpBottom;  // the last jump list's button, screen y
+thread_local bool g_inJumpView;
+
+using ToRawPixelsInDesktopCoordinates_t = RECT(WINAPI*)(const wf::Rect& rect, UINT dpi, HWND hwnd);
+ToRawPixelsInDesktopCoordinates_t ToRawPixelsInDesktopCoordinates_Original;
+RECT WINAPI ToRawPixelsInDesktopCoordinates_Hook(const wf::Rect& rect, UINT dpi, HWND hwnd) {
+    RECT result = ToRawPixelsInDesktopCoordinates_Original(rect, dpi, hwnd);
+    if (g_inJumpView) {
+        g_jumpTop = result.top;
+        g_jumpBottom = result.bottom;
+    }
+    return result;
+}
+
+// The alignments are enums of XAML's; only passed on.
+using ComputeJumpViewPosition_t = HRESULT(WINAPI*)(void* pThis, void* group, int param,
+                                                   wf::Point* point, void* horizontal,
+                                                   void* vertical);
+ComputeJumpViewPosition_t CTaskListWnd__ComputeJumpViewPosition_Original;
+HRESULT WINAPI CTaskListWnd__ComputeJumpViewPosition_Hook(void* pThis, void* group, int param,
+                                                          wf::Point* point, void* horizontal,
+                                                          void* vertical) {
+    g_jumpTop = 0;
+    g_jumpBottom = 0;
+    g_inJumpView = true;
+    HRESULT ret = CTaskListWnd__ComputeJumpViewPosition_Original(pThis, group, param, point,
+                                                                 horizontal, vertical);
+    g_inJumpView = false;
+    return ret;
+}
+
+void CollectJumpLists(std::vector<WindhawkUtils::SYMBOL_HOOK>& list) {
+    list.push_back(
+        {{LR"(protected: long __cdecl CTaskListWnd::_ComputeJumpViewPosition(struct ITaskBtnGroup *,int,struct Windows::Foundation::Point &,enum Windows::UI::Xaml::HorizontalAlignment &,enum Windows::UI::Xaml::VerticalAlignment &)const )"},
+         &CTaskListWnd__ComputeJumpViewPosition_Original, CTaskListWnd__ComputeJumpViewPosition_Hook,
+         true});
+    list.push_back(
+        {{LR"(struct tagRECT __cdecl ToRawPixelsInDesktopCoordinates(struct winrt::Windows::Foundation::Rect const &,unsigned int,struct HWND__ *))"},
+         &ToRawPixelsInDesktopCoordinates_Original, ToRawPixelsInDesktopCoordinates_Hook, true});
+}
+
+bool ThreadNamed(DWORD tid, PCWSTR name) {
+    bool named = false;
+    if (HANDLE thread = tid ? OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid) : nullptr) {
+        PWSTR description = nullptr;
+        if (SUCCEEDED(GetThreadDescription(thread, &description)) && description) {
+            named = wcscmp(description, name) == 0;
+            LocalFree(description);
+        }
+        CloseHandle(thread);
+    }
+    return named;
+}
+
+// Explorer's move of a jump list's window: y for its middle at its button's beside a side
+// taskbar. False to leave the move as it is.
+bool PlaceJumpList(HWND hwnd, int x, int& y, int cy, UINT flags) {
+    LONG top = g_jumpTop, bottom = g_jumpBottom;
+    WCHAR cls[32];
+    if (!g_jumpLists || core::g_unloading || (flags & SWP_NOMOVE) || top >= bottom ||
+        !GetClassName(hwnd, cls, ARRAYSIZE(cls)) || wcscmp(cls, L"Windows.UI.Core.CoreWindow") != 0 ||
+        !ThreadNamed(GetWindowThreadProcessId(hwnd, nullptr), L"JumpViewUI")) {
+        return false;
+    }
+    RECT now;
+    int height = cy;
+    if ((flags & SWP_NOSIZE) || height <= 0) {
+        height = GetWindowRect(hwnd, &now) ? now.bottom - now.top : 0;
+    }
+    HMONITOR monitor = MonitorFromPoint({x, (top + bottom) / 2}, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarOn(monitor);
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    if (height <= 0 || !taskbar || !core::IsSide(taskbar) || !GetMonitorInfo(monitor, &mi)) {
+        return false;
+    }
+    LONG to = (top + bottom - height) / 2;
+    if (mi.rcWork.bottom - height >= mi.rcWork.top) {
+        to = std::clamp<LONG>(to, mi.rcWork.top, mi.rcWork.bottom - height);
+    }
+    static bool logged;
+    if (!std::exchange(logged, true)) {
+        Wh_Log(L"Jump list beside a side taskbar %p: button %ld..%ld, height %d, y %d -> %ld",
+               taskbar, top, bottom, height, y, to);
+    }
+    y = to;
+    return true;
+}
+
+// Wh_ModInit in explorer, after Taskbar.dll's hooks: the jump lists are placed only with
+// both of its symbols and the SetWindowPos hook.
+void HookJumpLists() {
+    bool symbols = CTaskListWnd__ComputeJumpViewPosition_Original &&
+                   ToRawPixelsInDesktopCoordinates_Original;
+    g_jumpLists = symbols && HookSetWindowPos();
+    if (!g_jumpLists) {
+        Wh_Log(L"Jump lists keep Windows' place beside a side taskbar (symbols %d)", symbols);
+    }
 }
 
 // ---- ShellHost: Quick Settings -------------------------------------------------------
@@ -27036,6 +27393,9 @@ BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int c
         TellBloom();
     }
     bool edges;  // explorer sets the taskbars' edges
+    if (PlaceJumpList(hwnd, x, y, cy, flags)) {
+        return SetWindowPos_Original(hwnd, after, x, y, cx, cy, flags);
+    }
     if (!PlaceCenterMove(hwnd, x, y, cx, cy, flags) && (flags & kStill) != kStill &&
         IsQuickSettings(hwnd) && ((edges = PublishedEdge() != kNoEdge) || g_on) &&
         GetWindowRect(hwnd, &rc)) {
@@ -27044,8 +27404,13 @@ BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int c
         // A resize alone would keep the left edge; the right one stays at the tray.
         bool still = flags & SWP_NOMOVE;
         int fromX = still ? rc.left : x, fromY = still ? rc.top : y;
-        int toX = g_on ? PlaceX(fromX, fromY, width, height) : fromX;
-        int toY = edges ? PlaceY(toX, fromY, width, height) : fromY;
+        // Beside a side taskbar, at its tray with the setting on; else at the tray along a
+        // top or bottom one, at its taskbar's side where the edges are set per monitor.
+        int toX = fromX, toY = fromY;
+        if (!PlaceSide(toX, toY, width, height, g_on)) {
+            toX = g_on ? PlaceX(fromX, fromY, width, height) : fromX;
+            toY = edges ? PlaceY(toX, fromY, width, height) : fromY;
+        }
         if (!still || toX != fromX || toY != fromY) {
             flags &= ~SWP_NOMOVE;
             x = toX;
@@ -27121,8 +27486,8 @@ bool InstallShellHost() {
                                                         &RegGetValueW_Original)) {
         Wh_Log(L"No RegGetValueW hook: Quick Settings keeps Windows' edge");
     }
-    return WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook,
-                                          &SetWindowPos_Original);
+    g_centerMoves = HookSetWindowPos();
+    return g_centerMoves;
 }
 
 }  // namespace panels
@@ -28396,6 +28761,9 @@ bool HookTaskbarDll() {
     if (g_features.position) {
         position::CollectTaskbarDll(hooks);
     }
+    if (g_features.pill) {
+        panels::CollectJumpLists(hooks);  // beside a side taskbar
+    }
     bool ok = WindhawkUtils::HookSymbols(module, hooks.data(), hooks.size());
     if (ok && g_features.folders) {
         folders::TaskbarDllHooked();
@@ -28518,6 +28886,9 @@ bool Install() {
     }
     if (g_features.panels) {
         panels::HookExplorer();
+    }
+    if (g_features.pill) {
+        panels::HookJumpLists();
     }
     // Without its launch hook a folder's pin would open the folder in File Explorer.
     if (g_features.folders && !folders::Install()) {
