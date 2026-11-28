@@ -106,7 +106,7 @@ usage.chat	Session chat panel (Experimental)
 usage.chat#about	Clicking a session in the detail window expands a chat panel on the right with recent messages and an input box (right-click for session info). Reply or steer active turns, switch model, effort, Ultracode, or permissions, and start new sessions. Sending and switching use UI Automation to drive the Claude desktop app and Codex app windows without touching tokens or credentials. Note: This is a gray area under terms of service. Anthropic's Consumer Terms prohibit accessing services via automated or non-human means (bots, scripts, etc.) without an API key or explicit permission, and it is unclear whether relaying user-typed text into the app window qualifies. Use at your own risk. Requires "Show sessions in detail window" to be enabled
 group:island	Hidden Island
 island.enabled	Hidden Island
-island.enabled#about	Places a small black island at the screen edge (top or bottom) while the taskbar is auto-hidden. Clicking or hovering over the island (depending on the setting below) expands it into the taskbar. Hold Ctrl and drag to move it along the edge, or Ctrl+right-click to reset to center. Requires Auto-hide helper to be enabled
+island.enabled#about	Places a small black island at the screen edge (top, bottom, left or right) while the taskbar is auto-hidden. Clicking or hovering over the island (depending on the setting below) expands it into the taskbar. Hold Ctrl and drag to move it along the edge, or Ctrl+right-click to reset to center. Requires Auto-hide helper to be enabled
 island.color	Island color
 island.color=black	Black
 island.color=white	White

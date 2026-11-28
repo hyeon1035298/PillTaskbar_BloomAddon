@@ -41,7 +41,7 @@
 - **미디어**: 재생 중인 곡의 앨범 아트, 제목, 이전/재생/다음 단추를 트레이 앞에 보여 줍니다.
 - **사용량**: Bloom이 내보낸 AI 사용량을 트레이 앞에 작은 막대로 보여 줍니다. Bloom 파일이 없으면
   아무것도 보이지 않습니다.
-- **숨김 아일랜드**: 작업표시줄이 자동 숨김으로 숨어 있는 동안 모니터마다 그 가장자리(위 또는 아래) 가운데에 작은 검은 아일랜드를 둡니다.
+- **숨김 아일랜드**: 작업표시줄이 자동 숨김으로 숨어 있는 동안 모니터마다 그 가장자리(위, 아래, 왼쪽 또는 오른쪽) 가운데에 작은 검은 아일랜드를 둡니다.
   아일랜드를 클릭하면(설정에 따라 포인터를 대기만 해도) 아일랜드가 작업표시줄 모양으로 커지며 작업표시줄이 나오고,
   작업표시줄이 들어가면 다시 아일랜드로 줄어듭니다. 아일랜드 위에 포인터를 올리면 아일랜드가 설정한 만큼 투명해집니다.
   아일랜드에는 시계와 재생 중인 곡, AI 사용량 가운데 고른 것을 보여 줍니다. Ctrl을 누른 채 끌면 가장자리를 따라 옮겨지고
@@ -229,7 +229,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 - island:
   - enabled: true
     $name: 숨김 아일랜드
-    $description: 작업표시줄이 자동 숨김으로 숨어 있을 때 그 가장자리(위 또는 아래)에 작은 검은 아일랜드를 둡니다. 아일랜드를 클릭하거나(아래 설정) 포인터를 대면 아일랜드가 커지며 작업표시줄이 나옵니다. Ctrl을 누른 채 끌면 가장자리를 따라 옮기고, Ctrl을 누른 채 우클릭하면 가운데로 돌아갑니다. 자동 숨김 보조도 켜져 있어야 동작합니다
+    $description: 작업표시줄이 자동 숨김으로 숨어 있을 때 그 가장자리(위, 아래, 왼쪽 또는 오른쪽)에 작은 검은 아일랜드를 둡니다. 아일랜드를 클릭하거나(아래 설정) 포인터를 대면 아일랜드가 커지며 작업표시줄이 나옵니다. Ctrl을 누른 채 끌면 가장자리를 따라 옮기고, Ctrl을 누른 채 우클릭하면 가운데로 돌아갑니다. 자동 숨김 보조도 켜져 있어야 동작합니다
   - color: black
     $name: 아일랜드 색
     $options:
@@ -13104,9 +13104,8 @@ bool EdgeHalf(Island const& g, POINT pt) {
 // taskbar out. Past the edge another monitor is a way through, so a pointer
 // crossing it brings nothing; only touching the island does. In click mode,
 // and while Ctrl is held or the island is dragged, the pointer brings nothing.
-// `x` is where along a top or bottom edge; along a side one the place is the
-// message's point's y, the point auto-hide took `x` from.
-bool RevealsAt(HWND hwnd, int x, bool& reveals) {
+// `along` is where along the edge: x on a top or bottom edge, y on a side one.
+bool RevealsAt(HWND hwnd, int along, bool& reveals) {
     Island* p = OnIslandThread() ? Of(hwnd) : nullptr;
     if (!p || !p->shown) {
         return false;
@@ -13116,14 +13115,9 @@ bool RevealsAt(HWND hwnd, int x, bool& reveals) {
     if (g.sharedEdge || settings::g.island.clickToReveal || g.dragging || CtrlDown()) {
         return true;
     }
-    int at = x;
-    if (SideEdge(g.edge)) {
-        DWORD pos = GetMessagePos();
-        at = (short)HIWORD(pos);
-    }
     auto over = [&](RECT const& r) {
         int from = AlongStart(g.edge, r);
-        return at >= from && at < from + Along(g.edge, r);
+        return along >= from && along < from + Along(g.edge, r);
     };
     reveals = (g.centerOn && over(g.islandRect)) ||
               (g.sides[0].on && over(g.sides[0].rect)) || (g.sides[1].on && over(g.sides[1].rect));
@@ -31466,7 +31460,7 @@ namespace entry {
 // ============================================================================
 
 // Taskbar thread: puts every enabled feature onto the taskbars that exist. Each
-// feature steps back by itself on a side taskbar (core::IsSide).
+// feature takes a side taskbar's form by itself (core::IsSide).
 void ApplyAll() {
     core::NoteUiThread();
     for (HWND hwnd : core::Taskbars()) {
@@ -31474,7 +31468,7 @@ void ApplyAll() {
             core::NoteSide(hwnd);  // as it is now, for the next change to be told
         }
         if (core::IsSide(hwnd)) {
-            Wh_Log(L"Side taskbar %p: shape features stay off there", hwnd);
+            Wh_Log(L"Side taskbar %p at edge %d", hwnd, core::EdgeOf(hwnd));
         }
         if (hooks::g_features.pill) {
             pill::Apply(hwnd);
