@@ -4155,7 +4155,30 @@ void FixControlCenterSpacing(FrameworkElement const& panel) {
     }
 }
 
-void ControlCenterIcon(FrameworkElement const& iconView) {
+// A view whose content isn't laid out yet has no glyph to tell its kind by. The
+// control center button is collapsed while all its icons are hidden, so what
+// Explorer builds in it meanwhile (as when a taskbar turns between a row and a
+// column) is laid out only once the button shows again, after the walk that
+// showed it; such a view is looked at again after the next layout passes.
+constexpr int kControlCenterWaits = 8;
+std::list<FrameworkElement::LayoutUpdated_revoker> g_controlCenterWaits;
+
+void ControlCenterIcon(FrameworkElement const& iconView, int waits = 0);
+
+void WaitForControlCenterIcon(FrameworkElement const& iconView, int waits) {
+    auto it = g_controlCenterWaits.emplace(g_controlCenterWaits.end());
+    *it = iconView.LayoutUpdated(
+        winrt::auto_revoke, [it, waits, weak = winrt::make_weak(iconView)](auto&&, auto&&) {
+            auto view = weak.get();
+            int done = waits;
+            g_controlCenterWaits.erase(it);  // destroys this handler; locals only below
+            if (view && !core::g_unloading) {
+                core::Guard(L"Control center", [&] { ControlCenterIcon(view, done); });
+            }
+        });
+}
+
+void ControlCenterIcon(FrameworkElement const& iconView, int waits) {
     auto grid = Path(iconView, {L"ContainerGrid", L"ContentGrid"});
     bool hide = false;
     auto content = core::ChildOfClass(grid, L"SystemTray.BatteryIconContent");
@@ -4164,10 +4187,24 @@ void ControlCenterIcon(FrameworkElement const& iconView) {
     } else {
         content = core::ChildOfClass(grid, L"SystemTray.TextIconContent");
         auto glyph = GlyphOf(content);
+        if (!glyph && waits < kControlCenterWaits) {
+            WaitForControlCenterIcon(iconView, waits + 1);
+            return;
+        }
+        std::wstring text = glyph ? std::wstring(glyph.Text()) : L"";
+        Wh_Log(L"Control center icon %p: glyph %04X, %d layout passes waited",
+               winrt::get_abi(iconView), text.empty() ? 0u : (unsigned)text[0], waits);
         if (!glyph) {
             return;
         }
-        switch (Identify(glyph.Text())) {
+        // A view can be given its glyph after it's built.
+        core::Watch(glyph, Controls::TextBlock::TextProperty(),
+                    [weak = winrt::make_weak(iconView)](DependencyObject const&) {
+                        if (auto view = weak.get()) {
+                            ControlCenterIcon(view);
+                        }
+                    });
+        switch (Identify(text)) {
             case Icon::kVolume:
                 hide = S().hideVolume;
                 break;
@@ -4313,6 +4350,9 @@ std::vector<HWND> g_loggedClocks;
 // has it, kept as the side clock puts the seconds under it: the island reads
 // this in place of the two lines.
 [[clang::no_destroy]] std::wstring g_clockLine;
+// Told when a side clock's seconds were written (the island, which reads
+// g_clockLine): a change of the text's runs may not come through a watch on its text.
+void (*g_onClockLine)(Controls::TextBlock const& time) = nullptr;
 
 void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
     auto text = ClockText(false);
@@ -4352,6 +4392,87 @@ void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
         inlines.Append(rest);
     });
     g_writingClock = false;
+    if (g_onClockLine) {
+        g_onClockLine(time);
+    }
+}
+
+// Windows' "show seconds in the system tray clock". Explorer writes a side
+// taskbar's clock without them, so a side clock takes them from this setting.
+bool WindowsShowsSeconds() {
+    DWORD on = 0, size = sizeof(on);
+    RegGetValue(HKEY_CURRENT_USER,
+                L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                L"ShowSecondsInSystemClock", RRF_RT_REG_DWORD, nullptr, &on, &size);
+    return on != 0;
+}
+
+// The side clocks that show their seconds. Explorer writes a side clock only
+// each minute, so a timer on the taskbar thread writes them each second, while
+// one of them is left at a side.
+struct SecondsClock {
+    winrt::weak_ref<Controls::TextBlock> time;
+    HWND taskbar;
+};
+std::vector<SecondsClock> g_secondsClocks;
+[[clang::no_destroy]] DispatcherTimer g_secondsTimer{nullptr};
+
+void StopSeconds() {
+    if (g_secondsTimer) {
+        g_secondsTimer.Stop();
+        g_secondsTimer = nullptr;
+    }
+    g_secondsClocks.clear();
+}
+
+// Just past the next whole second, so that each tick writes a new one.
+wf::TimeSpan UntilNextSecond() {
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    return std::chrono::milliseconds(1000 - now.wMilliseconds + 20);
+}
+
+void TickSeconds() {
+    std::erase_if(g_secondsClocks, [](SecondsClock const& c) {
+        return !c.time.get() || !IsWindow(c.taskbar) || !core::IsSide(c.taskbar);
+    });
+    if (g_secondsClocks.empty()) {
+        StopSeconds();
+        return;
+    }
+    for (auto const& c : std::vector(g_secondsClocks)) {
+        if (auto time = c.time.get()) {
+            SideClock(time, c.taskbar, true);
+        }
+    }
+    if (g_secondsTimer) {
+        g_secondsTimer.Interval(UntilNextSecond());
+    }
+}
+
+// Notes whether a side clock shows its seconds, and runs the timer while one does.
+void KeepSeconds(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
+    std::erase_if(g_secondsClocks, [&](SecondsClock const& c) {
+        auto known = c.time.get();
+        return !known || known == time;
+    });
+    if (seconds && taskbar) {
+        g_secondsClocks.push_back({winrt::make_weak(time), taskbar});
+    }
+    if (g_secondsClocks.empty()) {
+        StopSeconds();
+        return;
+    }
+    if (!g_secondsTimer) {
+        g_secondsTimer = DispatcherTimer();
+        g_secondsTimer.Tick([](auto&&, auto&&) {
+            if (!core::g_unloading) {
+                core::Guard(L"Side clock seconds", TickSeconds);
+            }
+        });
+        g_secondsTimer.Interval(UntilNextSecond());
+        g_secondsTimer.Start();
+    }
 }
 
 // Explorer writes the time again each minute; it's written over in the format set.
@@ -4363,7 +4484,10 @@ void FormatClock(Controls::TextBlock const& time) {
     bool seconds = std::ranges::count(shown, L':') >= 2;
     auto root = time.XamlRoot();
     if (core::IsSide(root)) {
-        SideClock(time, core::TaskbarOf(root), seconds);
+        HWND taskbar = core::TaskbarOf(root);
+        seconds = seconds || WindowsShowsSeconds();
+        SideClock(time, taskbar, seconds);
+        KeepSeconds(time, taskbar, seconds);
         return;
     }
     auto text = ClockText(seconds);
@@ -4456,6 +4580,8 @@ void Apply(HWND hwnd) {
 void Restore() {
     g_panels.clear();
     g_bellWaits.clear();
+    g_controlCenterWaits.clear();
+    StopSeconds();
 }
 
 }  // namespace tray
@@ -13189,6 +13315,14 @@ void OnClock(winrt::hstring const& text) {
     }
 }
 
+// The primary's side clock was written with its seconds (tray::SideClock), each
+// second by the mod itself: its runs change without a write of its text.
+void OnClockLine(Controls::TextBlock const& time) {
+    if (g_clockText.get() == time) {
+        OnClock(winrt::hstring(tray::g_clockLine));
+    }
+}
+
 // Explorer writes the time into this text block; the islands copy it.
 void FindClock() {
     if (!settings::g.island.showClock || g_clockText.get()) {
@@ -14196,6 +14330,7 @@ void Apply(HWND taskbar) {
     core::g_onTaskbarDestroyed = OnTaskbarDestroyed;
     media::g_onShow = OnMedia;
     usage::g_onModel = SyncAll;
+    tray::g_onClockLine = OnClockLine;
     core::g_onFiguresChanged = OnFigures;
     core::Guard(L"Island show", [&] { Sync(*it); });
 }
@@ -14243,6 +14378,7 @@ void Restore() {
     core::g_onTaskbarDestroyed = nullptr;
     media::g_onShow = nullptr;
     usage::g_onModel = nullptr;
+    tray::g_onClockLine = nullptr;
     core::g_onFiguresChanged = nullptr;
     g_window = nullptr;
     for (auto& g : g_islands) {
