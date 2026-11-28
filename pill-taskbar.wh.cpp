@@ -4084,19 +4084,23 @@ void LanguageIcon(FrameworkElement const& iconView) {
     auto grid =
         Path(iconView, {L"ContainerGrid", L"ContentPresenter", L"ContentGrid"});
     std::optional<bool> hide;
-    core::FindChild(grid, [&](auto& child) {
-        auto cls = winrt::get_class_name(child);
-        if (cls == L"SystemTray.LanguageTextIconContent" ||
-            cls == L"SystemTray.LanguageImageIconContent") {
-            hide = S().hideLanguageBar;
-        } else if (cls == L"SystemTray.ImageIconContent") {
-            hide = S().hideLanguageExtras;
-        } else if (cls == L"SystemTray.TextIconContent") {
-            // The input mode shows as a glyph or as a plain letter (가, A).
-            hide = S().hideLanguageExtras;
-        }
-        return hide.has_value();
-    });
+    // A view left empty, or whose content isn't there yet, has no content grid;
+    // the visual tree can't count the children of nothing (E_INVALIDARG).
+    if (grid) {
+        core::FindChild(grid, [&](auto& child) {
+            auto cls = winrt::get_class_name(child);
+            if (cls == L"SystemTray.LanguageTextIconContent" ||
+                cls == L"SystemTray.LanguageImageIconContent") {
+                hide = S().hideLanguageBar;
+            } else if (cls == L"SystemTray.ImageIconContent") {
+                hide = S().hideLanguageExtras;
+            } else if (cls == L"SystemTray.TextIconContent") {
+                // The input mode shows as a glyph or as a plain letter (가, A).
+                hide = S().hideLanguageExtras;
+            }
+            return hide.has_value();
+        });
+    }
     if (hide) {
         Show(iconView, !*hide);
     } else if (!Media::VisualTreeHelper::GetChildrenCount(iconView)) {
@@ -4131,10 +4135,9 @@ void FixControlCenterSpacing(FrameworkElement const& panel) {
     core::FindChild(panel, [&](auto& container) {
         auto icon = core::ChildNamed(container, L"SystemTrayIcon")
                         .template try_as<Controls::Control>();
-        if (!icon) {
-            return false;
-        }
-        if (!icon.IsEnabled()) {
+        // A container whose view isn't built yet counts as shown: a collapsed
+        // button is never laid out, so its view would never be built.
+        if (icon && !icon.IsEnabled()) {
             hiddenRun++;
             return false;
         }
@@ -4180,7 +4183,10 @@ void WaitForControlCenterIcon(FrameworkElement const& iconView, int waits) {
 
 void ControlCenterIcon(FrameworkElement const& iconView, int waits) {
     auto grid = Path(iconView, {L"ContainerGrid", L"ContentGrid"});
-    bool hide = false;
+    auto control = iconView.try_as<Controls::Control>();
+    // Unset for a glyph that tells no kind (none yet, or one not listed): the
+    // view keeps what it was last given.
+    std::optional<bool> hide;
     auto content = core::ChildOfClass(grid, L"SystemTray.BatteryIconContent");
     if (content) {
         hide = S().hideBattery;
@@ -4192,18 +4198,15 @@ void ControlCenterIcon(FrameworkElement const& iconView, int waits) {
             return;
         }
         std::wstring text = glyph ? std::wstring(glyph.Text()) : L"";
-        Wh_Log(L"Control center icon %p: glyph %04X, %d layout passes waited",
-               winrt::get_abi(iconView), text.empty() ? 0u : (unsigned)text[0], waits);
-        if (!glyph) {
-            return;
+        if (glyph) {
+            // A view can be given its glyph after it's built.
+            core::Watch(glyph, Controls::TextBlock::TextProperty(),
+                        [weak = winrt::make_weak(iconView)](DependencyObject const&) {
+                            if (auto view = weak.get()) {
+                                ControlCenterIcon(view);
+                            }
+                        });
         }
-        // A view can be given its glyph after it's built.
-        core::Watch(glyph, Controls::TextBlock::TextProperty(),
-                    [weak = winrt::make_weak(iconView)](DependencyObject const&) {
-                        if (auto view = weak.get()) {
-                            ControlCenterIcon(view);
-                        }
-                    });
         switch (Identify(text)) {
             case Icon::kVolume:
                 hide = S().hideVolume;
@@ -4217,11 +4220,19 @@ void ControlCenterIcon(FrameworkElement const& iconView, int waits) {
             default:
                 break;
         }
+        // Once per decision: a view that had to wait, or one whose hiding changes.
+        if (waits > 0 || (hide && control && control.IsEnabled() == *hide)) {
+            Wh_Log(L"Control center icon %p: glyph %04X, %d layout passes waited, hide %d",
+                   winrt::get_abi(iconView), text.empty() ? 0u : (unsigned)text[0], waits,
+                   hide ? (int)*hide : -1);
+        }
     }
-    Show(content, !hide);
-    if (auto control = iconView.try_as<Controls::Control>()) {
-        core::Set(control, Controls::Control::IsEnabledProperty(),
-                  box_value(!hide));
+    if (hide) {
+        Show(content, !*hide);
+        if (control) {
+            core::Set(control, Controls::Control::IsEnabledProperty(),
+                      box_value(!*hide));
+        }
     }
 
     // Item container > StackPanel. A removed container changes the panel's
@@ -4425,6 +4436,24 @@ void StopSeconds() {
     g_secondsClocks.clear();
 }
 
+// The side clocks the timer writes get Windows' own short time back, as Explorer
+// writes it, in place of the lines with their seconds that would stand still
+// until Explorer's next write once the timer stops.
+void PlainSecondsClocks() {
+    wchar_t format[80], text[64];
+    if (!GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SSHORTTIME, format, 80) ||
+        !GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, 0, nullptr, format, text, 64)) {
+        return;
+    }
+    g_writingClock = true;
+    for (auto const& c : g_secondsClocks) {
+        if (auto time = c.time.get()) {
+            core::Guard(L"Side clock", [&] { time.Text(text); });
+        }
+    }
+    g_writingClock = false;
+}
+
 // Just past the next whole second, so that each tick writes a new one.
 wf::TimeSpan UntilNextSecond() {
     SYSTEMTIME now;
@@ -4440,10 +4469,16 @@ void TickSeconds() {
         StopSeconds();
         return;
     }
+    // Windows' setting turned off meanwhile: the clocks go back to the time alone.
+    bool seconds = WindowsShowsSeconds();
     for (auto const& c : std::vector(g_secondsClocks)) {
         if (auto time = c.time.get()) {
-            SideClock(time, c.taskbar, true);
+            SideClock(time, c.taskbar, seconds);
         }
+    }
+    if (!seconds) {
+        StopSeconds();
+        return;
     }
     if (g_secondsTimer) {
         g_secondsTimer.Interval(UntilNextSecond());
@@ -4550,6 +4585,7 @@ bool g_on;  // taskbar thread: Apply ran since the last Restore
 struct Return {
     winrt::weak_ref<FrameworkElement> view;
     FrameworkElement::Loaded_revoker loaded;
+    bool logged = false;  // its first return was logged
 };
 std::list<Return> g_returns;
 
@@ -4561,16 +4597,20 @@ void NoteReturn(FrameworkElement const& view) {
                     [&](auto& r) { return r.view.get() == view; })) {
         return;
     }
-    g_returns.push_back(
-        {winrt::make_weak(view),
-         view.Loaded(winrt::auto_revoke, [](auto&& sender, auto&&) {
-             auto view = sender.template try_as<FrameworkElement>();
-             if (!view || !g_on || core::g_unloading) {
-                 return;
-             }
-             Wh_Log(L"Tray icon %p back in the tree", winrt::get_abi(view));
-             core::Guard(L"Tray icon back", [&] { OnIcon(view); });
-         })});
+    auto& r = g_returns.emplace_back();
+    r.view = winrt::make_weak(view);
+    Return* p = &r;  // std::list keeps it in place; its handler goes with it
+    r.loaded = view.Loaded(winrt::auto_revoke, [p](auto&& sender, auto&&) {
+        auto view = sender.template try_as<FrameworkElement>();
+        if (!view || !g_on || core::g_unloading) {
+            return;
+        }
+        if (!p->logged) {
+            p->logged = true;
+            Wh_Log(L"Tray icon %p back in the tree", winrt::get_abi(view));
+        }
+        core::Guard(L"Tray icon back", [&] { OnIcon(view); });
+    });
 }
 
 void OnIcon(FrameworkElement const& icon) {
@@ -4621,6 +4661,7 @@ void Restore() {
     g_panels.clear();
     g_bellWaits.clear();
     g_controlCenterWaits.clear();
+    PlainSecondsClocks();
     StopSeconds();
 }
 
