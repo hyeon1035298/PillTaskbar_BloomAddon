@@ -30230,6 +30230,36 @@ int Placed(int edge, int stored) {
     return edge >= 0 ? edge : stored;
 }
 
+// The secondary windows that read an edge of the other orientation than the
+// content they were made for (which keeps its own until they are made again), each
+// with each edge once, for the log. Under g_lock.
+[[clang::no_destroy]] std::vector<std::pair<HWND, int>> g_readsAcross;
+
+void NoteReadAcross(HWND window, int edge) {
+    if (!window) {
+        return;
+    }
+    int made;
+    {
+        std::lock_guard lock(g_lock);
+        auto it = g_madeFor.find(window);
+        if (it == g_madeFor.end() || core::IsSideEdge(it->second) == core::IsSideEdge(edge)) {
+            return;
+        }
+        made = it->second;
+        std::pair<HWND, int> read{window, edge};
+        if (std::ranges::find(g_readsAcross, read) != g_readsAcross.end()) {
+            return;
+        }
+        if (g_readsAcross.size() >= 64) {
+            g_readsAcross.clear();
+        }
+        g_readsAcross.push_back(read);
+    }
+    Wh_Log(L"Secondary taskbar %p read edge %d across the content it was made for (%d)",
+           window, edge, made);
+}
+
 // The edge a monitor's taskbar is set to, Windows' own where none is (for
 // core::EdgeOf, a window whose place tells nothing yet).
 int EdgeSetFor(HMONITOR monitor) {
@@ -30279,6 +30309,7 @@ LONG WINAPI RegGetValueW_Hook(HKEY key,
         }
         edge = EdgeOn(monitor);
         std::wstring id = IdOf(monitor);
+        NoteReadAcross(WindowOfTray(reading.tray), Placed(edge, StoredEdge()));
         std::lock_guard lock(g_lock);
         g_told[id] = edge;
     } else {
@@ -30415,6 +30446,26 @@ int ContentEdge(HWND taskbar) {
     return told;
 }
 
+// The content answered the primary's edge, each with each edge once, for the log:
+// content made before the mod loaded is told apart only by its TaskbarSettings.
+// Under g_lock.
+[[clang::no_destroy]] std::vector<std::pair<void*, int>> g_primaryAnswers;
+
+void NotePrimaryAnswer(void* settings, int edge) {
+    {
+        std::lock_guard lock(g_lock);
+        std::pair<void*, int> answer{settings, edge};
+        if (std::ranges::find(g_primaryAnswers, answer) != g_primaryAnswers.end()) {
+            return;
+        }
+        if (g_primaryAnswers.size() >= 64) {
+            g_primaryAnswers.clear();
+        }
+        g_primaryAnswers.push_back(answer);
+    }
+    Wh_Log(L"Taskbar content %p not seen made: answered the primary's %d", settings, edge);
+}
+
 using TaskbarSettings_Location_t = int(WINAPI*)(void* pThis);
 TaskbarSettings_Location_t TaskbarSettings_Location_Original;
 // Also while the mod unloads: until Apply tells the taskbars Windows' edge, their
@@ -30429,7 +30480,154 @@ int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
     }
     int edge = -1;
     core::Guard(L"Taskbar location", [&] { edge = ContentEdge(taskbar); });
+    if (edge >= 0 && (!taskbar || !core::IsSecondary(taskbar))) {
+        NotePrimaryAnswer(pThis, edge);
+    }
     return edge >= 0 ? edge : TaskbarSettings_Location_Original(pThis);
+}
+
+// ---- a frame's location before its template -----------------------------------
+// TaskbarFrame::TaskbarLocation turns the frame through its GestureRecognizer
+// without checking it, and only the frame's template (OnApplyTemplate) makes that.
+// A frame told a new location before its template would end explorer: a secondary
+// made again before it templated stays subscribed to its configuration after its
+// window went, and is still told a change of the location. Such a frame's location
+// is held instead, and given to it after its template, inside the same template
+// call: the template sets the frame up for the location it had, and no layout
+// comes between. A frame with a template is told as before.
+
+using TaskbarFrame_TaskbarLocation_t = void(WINAPI*)(void* impl, int location);
+TaskbarFrame_TaskbarLocation_t TaskbarFrame_TaskbarLocation_Address;  // resolved only, hooked by hand
+TaskbarFrame_TaskbarLocation_t TaskbarFrame_TaskbarLocation_Original;
+LONG g_recognizerOffset;  // set before the hook goes in
+
+// TaskbarLocation's GestureRecognizer member, from the call it makes through it
+// unchecked (only OnApplyTemplate sets it):
+// 8A D0        mov dl,al
+// 48 8B 4F xx  mov rcx,[rdi+xx]   (or 48 8B 8F imm32)
+// E8 ...       call
+LONG FindRecognizerOffset() {
+    auto start = (const BYTE*)TaskbarFrame_TaskbarLocation_Address;
+    for (auto p = start; p && p != start + 0x300; p++) {
+        if (p[0] == 0x8A && p[1] == 0xD0 && p[2] == 0x48 && p[3] == 0x8B) {
+            if (p[4] == 0x4F && p[6] == 0xE8 && p[5] > 0 && p[5] < 0x80) {
+                return p[5];
+            }
+            if (p[4] == 0x8F && p[9] == 0xE8) {
+                LONG offset = *(LONG*)(p + 5);
+                return offset > 0 && offset <= 0xFFFF ? offset : 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// The frame, by the implementation pointer TaskbarLocation is called with, and
+// the last location it was told.
+struct HeldLocation {
+    void* impl;
+    winrt::weak_ref<FrameworkElement> frame;
+    int location;
+};
+[[clang::no_destroy]] std::vector<HeldLocation> g_heldLocations;  // taskbar thread
+
+bool HasRecognizer(void* impl) {
+    return *(void**)((BYTE*)impl + g_recognizerOffset) != nullptr;
+}
+
+// Drops the frames that went without a template.
+void DropGoneHeld() {
+    std::erase_if(g_heldLocations, [](HeldLocation const& held) {
+        if (held.frame.get()) {
+            return false;
+        }
+        Wh_Log(L"Taskbar frame %p went without a template: location %d dropped", held.impl,
+               held.location);
+        return true;
+    });
+}
+
+// Also while the mod unloads, as its remakes then still make frames.
+void WINAPI TaskbarFrame_TaskbarLocation_Hook(void* impl, int location) {
+    if (HasRecognizer(impl)) {
+        TaskbarFrame_TaskbarLocation_Original(impl, location);
+        return;
+    }
+    core::Guard(L"Frame location held", [&] {
+        DropGoneHeld();
+        auto known = std::ranges::find(g_heldLocations, impl, &HeldLocation::impl);
+        FrameworkElement frame = known != g_heldLocations.end()
+                                     ? known->frame.get()
+                                     : core::FromAbi(((IUnknown**)impl)[1]);
+        if (!frame) {
+            Wh_Log(L"Taskbar frame %p: location %d not held (no frame)", impl, location);
+            return;
+        }
+        if (known != g_heldLocations.end()) {
+            known->location = location;  // the latest wins
+        } else {
+            g_heldLocations.push_back({impl, winrt::make_weak(frame), location});
+        }
+        // None for a frame whose window went.
+        HWND taskbar = nullptr;
+        core::Guard(L"Held frame's taskbar",
+                    [&] { taskbar = core::TaskbarOf(frame.XamlRoot()); });
+        Wh_Log(L"Taskbar frame %p (taskbar %p): location %d held until its template", impl,
+               taskbar, location);
+    });
+}
+
+// After a frame's template (pThis its IFrameworkElementOverrides), also while the
+// mod unloads: the location held for it is given to it now.
+void OnFrameTemplate(void* pThis) {
+    if (g_heldLocations.empty()) {
+        return;
+    }
+    core::Guard(L"Frame location given", [&] {
+        auto frame = core::FromAbi(pThis);
+        DropGoneHeld();
+        if (!frame) {
+            return;
+        }
+        auto known = std::ranges::find_if(g_heldLocations, [&](HeldLocation const& held) {
+            return held.frame.get() == frame;
+        });
+        if (known == g_heldLocations.end()) {
+            return;
+        }
+        HeldLocation held = std::move(*known);
+        g_heldLocations.erase(known);
+        if (!HasRecognizer(held.impl)) {
+            // Its template failed before it made the recognizer.
+            Wh_Log(L"Taskbar frame %p: no recognizer after its template, location %d dropped",
+                   held.impl, held.location);
+            return;
+        }
+        Wh_Log(L"Taskbar frame %p: location %d given after its template", held.impl,
+               held.location);
+        TaskbarFrame_TaskbarLocation_Original(held.impl, held.location);
+    });
+}
+
+// After Taskbar.View.dll's symbols resolved. Without the setter's symbol or the
+// member it calls through, the frames are told their location as they were.
+void FrameLocationHooked() {
+    if (!TaskbarFrame_TaskbarLocation_Address) {
+        Wh_Log(L"Taskbar frame location not guarded (%s)", L"no symbol");
+        return;
+    }
+    g_recognizerOffset = FindRecognizerOffset();
+    if (!g_recognizerOffset) {
+        Wh_Log(L"Taskbar frame location not guarded (%s)", L"recognizer not found");
+        return;
+    }
+    if (!WindhawkUtils::SetFunctionHook(TaskbarFrame_TaskbarLocation_Address,
+                                        TaskbarFrame_TaskbarLocation_Hook,
+                                        &TaskbarFrame_TaskbarLocation_Original)) {
+        Wh_Log(L"Taskbar frame location not guarded (%s)", L"hook not set");
+        return;
+    }
+    Wh_Log(L"Taskbar frame location guarded: recognizer at +%X", g_recognizerOffset);
 }
 
 // wil's state of the native location feature, and its check.
@@ -31128,6 +31326,9 @@ void OnFrameTemplate(FrameworkElement const& frame) {
 OnApplyTemplate_t TaskbarFrame_OnApplyTemplate_Original;
 int WINAPI TaskbarFrame_OnApplyTemplate_Hook(void* pThis) {
     int ret = TaskbarFrame_OnApplyTemplate_Original(pThis);
+    if (g_features.position) {
+        position::OnFrameTemplate(pThis);
+    }
     if (!core::g_unloading) {
         core::Guard(L"TaskbarFrame template", [&] {
             core::NoteUiThread();
@@ -31315,6 +31516,13 @@ void Collect() {
     if (g_features.folders) {
         folders::CollectTaskbarView(g_taskbarViewHooks);
     }
+    if (g_features.position) {
+        // Hooked by hand once resolved: the member it calls through is read from
+        // its real address.
+        g_taskbarViewHooks.push_back(
+            {{LR"(public: void __cdecl winrt::Taskbar::implementation::TaskbarFrame::TaskbarLocation(enum winrt::WindowsUdk::UI::Shell::TaskbarLocation))"},
+             &position::TaskbarFrame_TaskbarLocation_Address, nullptr, true});
+    }
     if (g_features.pill || g_features.tray) {
         g_systemTrayHooks.push_back(
             {{LR"(public: __cdecl winrt::SystemTray::implementation::IconView::IconView(void))"},
@@ -31353,6 +31561,9 @@ void TaskbarViewHooked() {
     }
     if (g_features.folders) {
         folders::TaskbarViewHooked();
+    }
+    if (g_features.position) {
+        position::FrameLocationHooked();
     }
 }
 
