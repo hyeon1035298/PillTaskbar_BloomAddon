@@ -1444,6 +1444,9 @@ void (*g_onTaskbarRestacked)(HWND) = nullptr;
 bool (*g_keepsTaskbarTopmost)(HWND taskbar, HWND after) = nullptr;
 // A taskbar window is going, e.g. with its monitor.
 void (*g_onTaskbarDestroyed)(HWND) = nullptr;
+// The same for the taskbar edges (F11), while they wait for the secondary
+// taskbars to go as they have them made again.
+void (*g_onTaskbarGone)(HWND) = nullptr;
 // The primary taskbar turned vertical or back (F5); the shape features step
 // aside or come back.
 void (*g_onOrientationChanged)() = nullptr;
@@ -1589,6 +1592,9 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
             }
             if (g_onTaskbarDestroyed) {
                 Guard(L"Taskbar destroyed", [&] { g_onTaskbarDestroyed(hwnd); });
+            }
+            if (g_onTaskbarGone) {
+                Guard(L"Taskbar gone", [&] { g_onTaskbarGone(hwnd); });
             }
             break;
         }
@@ -8793,9 +8799,11 @@ namespace prefs {
 // prefs.json in the add-on's data folder: settings the mod keeps itself and Bloom
 // shows and changes (docs/addon-protocol.md). Each field is one feature's (the
 // islands' places, the accounts off the usage meter, the taskbar edge of each
-// monitor); a write keeps the other fields as they were. While a feature listens,
-// the folder is watched for changes made elsewhere. Watching is the taskbar
-// thread's, but for the watch's callback; reading and writing work from any thread.
+// monitor, and whether this build can set that edge); a change reads the file,
+// changes its field and writes the file at once, keeping the other fields as
+// they were. While a feature listens, the folder is watched for changes made
+// elsewhere. Reading works from any thread; changing the file, the watch (but
+// for its callback) and the listeners are the taskbar thread's.
 
 namespace wdj = winrt::Windows::Data::Json;
 
@@ -8881,7 +8889,8 @@ wdj::JsonObject Read(bool* ok = nullptr) {
     return root;
 }
 
-// Through a hidden temporary file, so Bloom never reads half of it.
+// Through a hidden temporary file, so Bloom never reads half of it. Taskbar
+// thread (Update), which keeps the one temporary name and g_written to itself.
 bool Write(wdj::JsonObject const& root) {
     std::wstring text(root.Stringify());
     int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0,
@@ -8935,6 +8944,12 @@ void Close() {
     }
 }
 
+void Notify() {
+    for (auto const& l : std::vector(g_listeners)) {
+        l.changed();
+    }
+}
+
 // Taskbar thread: the file changed, from Bloom or by hand, unless it was this
 // side's own write.
 void OnChanged() {
@@ -8943,9 +8958,37 @@ void OnChanged() {
         return;
     }
     g_written = now;
-    for (auto const& l : std::vector(g_listeners)) {
-        l.changed();
+    Notify();
+}
+
+// Taskbar thread: reads the file, has `change` change the object (false when
+// there is nothing to write) and writes it straight away, so a change made
+// elsewhere since the read is kept. Nothing is written when the file is there
+// but can't be read. A change made elsewhere since this side's last write or the
+// last change it saw would look like this write to the watch, so the listeners
+// hear of it after the write, once the call is over.
+bool Update(std::function<bool(wdj::JsonObject&)> const& change) {
+    if (!Dir()) {
+        return false;
     }
+    bool ok = false;
+    auto root = Read(&ok);
+    if (!ok) {
+        Wh_Log(L"prefs.json not read: left as it is");
+        return false;
+    }
+    if (!change(root)) {
+        return false;
+    }
+    FILETIME before = Time();
+    bool elsewhere = CompareFileTime(&before, &g_written) != 0;
+    if (!Write(root)) {
+        return false;
+    }
+    if (elsewhere && !g_listeners.empty()) {
+        core::Post(Notify);
+    }
+    return true;
 }
 
 // Taskbar thread: the watch can't go on; each listener hears it once.
@@ -8975,7 +9018,8 @@ void CALLBACK OnFolderChanged(void*, BOOLEAN) {
 }
 
 // Taskbar thread: `changed` hears of the file's changes from now on; the folder
-// is watched from the first listener on. False without the folder or a watch.
+// is watched from the first listener on. False without the folder or a watch
+// (no handle, or no wait on it), and the next call tries again.
 bool Watch(void (*changed)(), void (*lost)()) {
     if (std::ranges::none_of(g_listeners, [&](auto& l) { return l.changed == changed; })) {
         g_listeners.push_back({changed, lost});
@@ -8993,8 +9037,10 @@ bool Watch(void (*changed)(), void (*lost)()) {
     g_watchFailed = false;
     if (!RegisterWaitForSingleObject(&g_wait, g_change, OnFolderChanged, nullptr, INFINITE,
                                      WT_EXECUTEDEFAULT)) {
-        g_wait = nullptr;
         Wh_Log(L"prefs.json not watched: %u", GetLastError());
+        g_wait = nullptr;
+        FindCloseChangeNotification(std::exchange(g_change, nullptr));
+        return false;
     }
     return true;
 }
@@ -9512,19 +9558,17 @@ void ReadPlaces() {
 // The island's place as it is now, in the file with its monitor's name; the
 // rest of the file as it was.
 void SavePlace(Island const& g) {
-    if (!prefs::Dir()) {
-        return;
-    }
-    auto root = prefs::Read();
-    wdj::JsonObject places = prefs::Records(root, kPlacesField);
     auto it = g_places.find(g.placeId);
     double x = it != g_places.end() ? it->second : kPlaceMiddle;
-    wdj::JsonObject record;
-    record.Insert(L"name", wdj::JsonValue::CreateStringValue(g.placeName));
-    record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(x)));
-    places.Insert(g.placeId, record);
-    root.Insert(kPlacesField, places);
-    prefs::Write(root);
+    prefs::Update([&](wdj::JsonObject& root) {
+        wdj::JsonObject places = prefs::Records(root, kPlacesField);
+        wdj::JsonObject record;
+        record.Insert(L"name", wdj::JsonValue::CreateStringValue(g.placeName));
+        record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(x)));
+        places.Insert(g.placeId, record);
+        root.Insert(kPlacesField, places);
+        return true;
+    });
 }
 
 // Taskbar thread: the file changed elsewhere. A drag under way keeps its island
@@ -21155,9 +21199,10 @@ void SetHidden(std::wstring const& id, bool hidden) {
         for (auto const& each : sorted) {
             list.Append(wdj::JsonValue::CreateStringValue(each));
         }
-        auto root = prefs::Read();
-        root.Insert(kHiddenField, list);
-        prefs::Write(root);
+        prefs::Update([&](wdj::JsonObject& root) {
+            root.Insert(kHiddenField, list);
+            return true;
+        });
     }
     Show();
 }
@@ -27117,7 +27162,8 @@ namespace position {
 // secondary in CSecondaryTray::_LoadSettings. That tray is the one its window
 // keeps (window long 0, as autohide finds it) or the one _CreateSecondaryTray
 // made for a monitor. Each TaskbarSettings is matched to its taskbar window as
-// it is made; one made before the mod loaded answers the primary's edge.
+// it is made; one made before the mod loaded answers the primary's edge, so
+// when that is wrong for its secondary the secondaries are made again, once.
 // Without these hooks every taskbar gets the common edge.
 
 using SH = WindhawkUtils::SYMBOL_HOOK;
@@ -27126,7 +27172,12 @@ namespace wdj = winrt::Windows::Data::Json;
 constexpr WCHAR kAdvancedKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
 constexpr WCHAR kLocationValue[] = L"TaskbarLocation";
+// Whether the taskbar is shown on every display.
+constexpr WCHAR kMultiMonValue[] = L"MMTaskbarEnabled";
 constexpr PCWSTR kEdgesField = L"taskbarEdges";
+// Whether this build gives each monitor its own edge, for Bloom to show the
+// monitors' rows only then.
+constexpr PCWSTR kPerMonitorField = L"perMonitorEdges";
 
 // A monitor's choice in the file: 0 the common edge, then top, bottom, left and
 // right. Left and right are kept for later and read as the common edge until
@@ -27200,6 +27251,9 @@ struct Known {
 int g_toldPrimary = -1;
 [[clang::no_destroy]] std::unordered_map<std::wstring, int> g_told;
 bool g_listening;  // taskbar thread: hears of the file's changes
+// While set, explorer reads that the taskbar isn't on every display, and a tray
+// setting change takes the secondaries away (MakeSecondariesAgain).
+std::atomic<bool> g_hidingSecondaries;
 
 bool Active() {
     return g_native && !core::g_unloading &&
@@ -27306,6 +27360,16 @@ LONG WINAPI RegGetValueW_Hook(HKEY key,
                               LPDWORD size) {
     DWORD room = size ? *size : 0;
     LONG ret = RegGetValueW_Original(key, subKey, value, flags, type, data, size);
+    if (g_hidingSecondaries && subKey && value && data && size &&
+        (flags & RRF_RT_REG_DWORD) && room >= sizeof(DWORD) &&
+        _wcsicmp(subKey, kAdvancedKey) == 0 && _wcsicmp(value, kMultiMonValue) == 0) {
+        *(DWORD*)data = 0;
+        *size = sizeof(DWORD);
+        if (type) {
+            *type = REG_DWORD;
+        }
+        return ERROR_SUCCESS;
+    }
     Reading reading = g_reading;
     if (reading.who == Reading::kNone || key != HKEY_CURRENT_USER || !subKey || !value ||
         !data || !size || !(flags & RRF_RT_REG_DWORD) || room < sizeof(DWORD) ||
@@ -27456,12 +27520,19 @@ void CollectTaskbarDll(std::vector<SH>& list) {
                     true});
 }
 
-// Each monitor's choice from the file.
-void ReadEdges() {
+// Each monitor's choice from the file. False, with the choices as they were,
+// when the file is there but can't be read.
+bool ReadEdges() {
     std::unordered_map<std::wstring, MonitorEdge> edges;
     bool forced = false;
     if (prefs::Dir()) {
-        for (auto const& entry : prefs::Records(prefs::Read(), kEdgesField)) {
+        bool ok = false;
+        auto root = prefs::Read(&ok);
+        if (!ok) {
+            Wh_Log(L"prefs.json not read: the taskbar edges stay");
+            return false;
+        }
+        for (auto const& entry : prefs::Records(root, kEdgesField)) {
             if (entry.Value().ValueType() != wdj::JsonValueType::Object) {
                 continue;
             }
@@ -27474,6 +27545,7 @@ void ReadEdges() {
     std::lock_guard lock(g_lock);
     g_edges.swap(edges);
     g_anyForced = forced;
+    return true;
 }
 
 // After taskbar.dll is hooked, in Wh_ModInit: whether this build has the
@@ -27520,11 +27592,121 @@ void TaskbarDllHooked() {
     }
 }
 
+// ---- secondaries made again ----------------------------------------------------
+// A secondary's content made before the mod loaded has a TaskbarSettings the
+// constructor hook never saw, which answers the primary's edge (Location hook).
+// Where that isn't the secondary's own, the secondaries are made again, once
+// since the mod loaded, as Windows does when the taskbar is turned off and on
+// for the other displays: a tray setting change with MMTaskbarEnabled read as 0
+// takes them away, the next with the real value makes them anew, through the
+// hooks, and the features put themselves on them as on a monitor that came.
+//
+// The taskbar thread doesn't wait in between: it is the thread that handles the
+// messages taking the secondaries away, so waiting there could only time out.
+// Each step is posted instead; the last secondary window gone (the subclass'
+// destroy notification) or kRemakeTimeoutMs takes the next.
+
+constexpr UINT kRemakeTimeoutMs = 2000;
+std::atomic<bool> g_remade;  // asked for since the mod loaded
+UINT_PTR g_remakeTimer;      // taskbar thread
+
+// An edge as the taskbar has it, Windows' own for -1.
+int Placed(int edge, int stored) {
+    return edge >= 0 ? edge : stored;
+}
+
+// Whether the content of a secondary answers another edge than its own.
+bool ContentMisplaced() {
+    if (!g_perMonitor || !Active()) {
+        return false;
+    }
+    int stored = StoredEdge();
+    int primary = Placed(PrimaryEdge(), stored);
+    for (HWND hwnd : core::Taskbars()) {
+        if (!core::IsSecondary(hwnd)) {
+            continue;
+        }
+        bool known;
+        {
+            std::lock_guard lock(g_lock);
+            known = std::ranges::any_of(g_settingsTaskbars,
+                                        [&](auto const& each) { return each.second == hwnd; });
+        }
+        if (!known && Placed(EdgeOn(core::MonitorOf(hwnd)), stored) != primary) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Taskbar thread: the secondaries come back, gone or not.
+void EndRemake(bool timedOut) {
+    if (!g_hidingSecondaries.exchange(false)) {
+        return;
+    }
+    if (g_remakeTimer) {
+        KillTimer(nullptr, std::exchange(g_remakeTimer, 0));
+    }
+    core::g_onTaskbarGone = nullptr;
+    Wh_Log(L"Secondary taskbars %s: made again", timedOut ? L"not gone in time" : L"gone");
+    if (HWND primary = core::PrimaryTaskbar()) {
+        SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+    }
+}
+
+// Taskbar thread, posted: once no secondary is left.
+void CheckSecondariesGone() {
+    if (!g_hidingSecondaries) {
+        return;
+    }
+    for (HWND hwnd : core::Taskbars()) {
+        if (core::IsSecondary(hwnd)) {
+            return;
+        }
+    }
+    EndRemake(false);
+}
+
+// From a taskbar window's destruction: the check comes after it.
+void OnTaskbarGone(HWND) {
+    if (g_hidingSecondaries) {
+        core::Post(CheckSecondariesGone);
+    }
+}
+
+void CALLBACK OnRemakeTimeout(HWND, UINT, UINT_PTR, DWORD) {
+    core::Guard(L"Taskbar edges", [] { EndRemake(true); });
+}
+
+// Taskbar thread, posted from Apply.
+void MakeSecondariesAgain() {
+    if (core::g_unloading || g_hidingSecondaries || g_remade || !ContentMisplaced()) {
+        return;
+    }
+    HWND primary = core::PrimaryTaskbar();
+    if (!primary) {
+        return;
+    }
+    g_remade = true;
+    // Without the timeout the secondaries could stay away; then they stay as they are.
+    g_remakeTimer = SetTimer(nullptr, 0, kRemakeTimeoutMs, OnRemakeTimeout);
+    if (!g_remakeTimer) {
+        Wh_Log(L"Secondary taskbars not made again: no timer");
+        return;
+    }
+    Wh_Log(L"Secondary taskbars made again: their content was made before the mod loaded");
+    core::g_onTaskbarGone = OnTaskbarGone;
+    g_hidingSecondaries = true;
+    SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+    core::Post(CheckSecondariesGone);  // they may be gone already
+}
+
 // Moves the taskbars to their edges, or back to Windows' once unloading. The
 // primary moves with the change the Settings app sends, which has its content
 // read the location again too; the tray setting change, sent to the primary,
 // has the secondaries read theirs again. ShellHost finds the primary's edge on
-// its window.
+// its window. A secondary whose content can't follow is made again, later on
+// the taskbar thread.
 void Apply() {
     if (!g_native) {
         return;
@@ -27560,6 +27742,9 @@ void Apply() {
     } else {
         RemoveProp(primary, core::kEdgeProp);
     }
+    if (active && !g_remade && ContentMisplaced()) {
+        core::Post(MakeSecondariesAgain);
+    }
     if (!move && !reread) {
         return;
     }
@@ -27574,62 +27759,71 @@ void Apply() {
 
 // Taskbar thread: the file changed elsewhere (Bloom set a monitor's edge).
 void OnPrefsChanged() {
-    ReadEdges();
-    Apply();
+    if (ReadEdges()) {
+        Apply();
+    }
 }
 
 void OnPrefsLost() {
     g_listening = false;
 }
 
-// Taskbar thread, as taskbars come and settings change: every monitor with a
-// taskbar has its record in the file for Bloom to list (edge 0, the common one);
-// the records there and the rest of the file stay as they are. Listens for the
-// file's changes from the first call on, and again after the folder went.
+// Taskbar thread, as taskbars come and settings change: the file says whether
+// this build sets each monitor's edge, and if so every monitor with a taskbar
+// has its record there for Bloom to list (edge 0, the common one); the records
+// there and the rest of the file stay as they are. Listens for the file's
+// changes from the first call on, again after the folder went, and on the next
+// call when the watch couldn't be made.
 void NoteTaskbars() {
-    if (!g_perMonitor || core::g_unloading || !prefs::Dir()) {
+    if (core::g_unloading || !prefs::Dir()) {
         return;
     }
-    if (!g_listening) {
-        g_listening = true;
-        prefs::Watch(OnPrefsChanged, OnPrefsLost);
-        ReadEdges();
-        Apply();
+    if (g_perMonitor && !g_listening) {
+        g_listening = prefs::Watch(OnPrefsChanged, OnPrefsLost);
+        if (ReadEdges()) {
+            Apply();
+        }
     }
-    {
+    if (g_perMonitor) {
         std::lock_guard lock(g_lock);
         g_known.clear();  // monitors may have changed
     }
-    bool ok = false;
-    auto root = prefs::Read(&ok);
-    if (!ok) {
-        Wh_Log(L"prefs.json not read: no taskbar edge records added");
-        return;
-    }
-    wdj::JsonObject edges = prefs::Records(root, kEdgesField);
-    bool added = false;
-    for (HWND hwnd : core::Taskbars()) {
-        std::wstring id, name;
-        if (!prefs::MonitorKey(core::MonitorOf(hwnd), id, name) || edges.HasKey(id)) {
-            continue;
+    prefs::Update([](wdj::JsonObject& root) {
+        bool changed = false;
+        auto flag = usage::Field(root, kPerMonitorField, wdj::JsonValueType::Boolean);
+        if (!flag || flag.GetBoolean() != g_perMonitor) {
+            root.Insert(kPerMonitorField, wdj::JsonValue::CreateBooleanValue(g_perMonitor));
+            changed = true;
         }
-        wdj::JsonObject record;
-        record.Insert(L"name", wdj::JsonValue::CreateStringValue(name));
-        record.Insert(L"edge", wdj::JsonValue::CreateNumberValue(0));
-        edges.Insert(id, record);
-        added = true;
-    }
-    if (added) {
-        root.Insert(kEdgesField, edges);
-        prefs::Write(root);
-    }
+        if (!g_perMonitor) {
+            return changed;
+        }
+        wdj::JsonObject edges = prefs::Records(root, kEdgesField);
+        bool added = false;
+        for (HWND hwnd : core::Taskbars()) {
+            std::wstring id, name;
+            if (!prefs::MonitorKey(core::MonitorOf(hwnd), id, name) || edges.HasKey(id)) {
+                continue;
+            }
+            wdj::JsonObject record;
+            record.Insert(L"name", wdj::JsonValue::CreateStringValue(name));
+            record.Insert(L"edge", wdj::JsonValue::CreateNumberValue(0));
+            edges.Insert(id, record);
+            added = true;
+        }
+        if (added) {
+            root.Insert(kEdgesField, edges);
+        }
+        return changed || added;
+    });
 }
 
-// Taskbar thread, at unload.
+// Taskbar thread, at unload: secondaries taken away come back.
 void Stop() {
     if (std::exchange(g_listening, false)) {
         prefs::Unwatch(OnPrefsChanged);
     }
+    EndRemake(false);
 }
 
 }  // namespace position
@@ -27682,10 +27876,11 @@ Features Wanted() {
 
 using OnApplyTemplate_t = int(WINAPI*)(void* pThis);
 
-// The features that keep something of their own on every taskbar.
+// The features that keep something of their own on every taskbar; the taskbar
+// edges a record of its monitor, and their start when the mod came first.
 bool PerTaskbar() {
     return g_features.media || g_features.usage || g_features.island ||
-           g_features.start;
+           g_features.start || g_features.position;
 }
 
 [[clang::no_destroy]] std::list<FrameworkElement::Loaded_revoker> g_frameLoads;
@@ -28958,6 +29153,11 @@ void ApplyAll() {
 // Taskbar thread, after a taskbar's frame loaded: the taskbars that have no
 // widgets or island yet get theirs. Each Apply skips a taskbar it has.
 void ApplyNew() {
+    // The first frame of a taskbar that came after the mod loaded, too: its edge,
+    // the property ShellHost reads, the records and the watch start there.
+    if (hooks::g_features.position && !core::g_unloading) {
+        position::NoteTaskbars();
+    }
     if (core::g_vertical || core::g_unloading) {
         return;
     }
