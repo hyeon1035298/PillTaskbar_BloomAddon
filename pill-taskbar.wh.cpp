@@ -1522,6 +1522,16 @@ HWND TaskbarOn(HMONITOR monitor) {
     return nullptr;
 }
 
+// The screen edge (ABE_*) of the taskbar on a monitor: its window's when it has
+// one, else the edge set for that monitor (one still being made), else the bottom.
+int EdgeOfMonitor(HMONITOR monitor) {
+    if (HWND taskbar = TaskbarOn(monitor)) {
+        return EdgeOf(taskbar);
+    }
+    int set = g_edgeSetFor && monitor ? g_edgeSetFor(monitor) : -1;
+    return set >= 0 ? set : ABE_BOTTOM;
+}
+
 // Each taskbar window's orientation as it was last seen (attached or moved), so a
 // change of one can be told; and from those, whether every one is at a side.
 std::mutex g_sidesLock;
@@ -4674,7 +4684,7 @@ void WINAPI TrayUI_GetMinSize_Hook(void* pThis, HMONITOR monitor, SIZE* size) {
     if (g_height) {
         UINT dpiX = 0, dpiY = 0;
         GetDpiForMonitor(monitor, 0, &dpiX, &dpiY);
-        if (core::IsSide(core::TaskbarOn(monitor))) {
+        if (core::IsSideEdge(core::EdgeOfMonitor(monitor))) {
             size->cx = MulDiv(g_height, dpiX, 96);
         } else {
             size->cy = MulDiv(g_height, dpiY, 96);
