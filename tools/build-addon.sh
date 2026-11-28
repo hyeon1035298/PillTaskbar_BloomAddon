@@ -11,7 +11,7 @@
 #   symbols.txt, symbols-meta.txt (which names are required), port-sources.txt (the
 #   tools/port-sources.txt lines of ADDON_SYMBOL_MODULES), addon.json, THIRD_PARTY.md
 #   (and settings.schema.json with ADDON_SCHEMA=1,
-#   with the mod's file-kept items too with ADDON_FILE_SETTINGS=1)
+#   with the mod's file-kept items too with ADDON_FILE_SETTINGS=1, both set in the conf)
 # Usage: tools/build-addon.sh [all|runtime|mod|host|bundle]...  (default all)
 # OUT_DIR (default build/addon), MOD_SRC (default the conf's), DEBUG=1 keeps symbols in the binaries.
 set -euo pipefail

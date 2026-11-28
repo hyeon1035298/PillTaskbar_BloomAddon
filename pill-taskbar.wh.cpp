@@ -341,6 +341,30 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 /*
 [
   {
+    "group": "pill",
+    "key": "pill.monitorEdges",
+    "type": "records",
+    "default": {},
+    "file": "prefs.json",
+    "field": "taskbarEdges",
+    "label": "name",
+    "name": {"ko": "모니터별 작업표시줄 위치", "en": "Taskbar position per monitor"},
+    "about": {
+      "ko": "작업표시줄이 있는 모니터마다 한 줄씩 생깁니다. 0이면 작업표시줄 위치 설정을 따르고, 1이면 위, 2이면 아래에 둡니다",
+      "en": "Each monitor with a taskbar gets a row here. 0 follows the Taskbar position setting, 1 puts it at the top, and 2 at the bottom"
+    },
+    "fields": [
+      {
+        "key": "edge",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 2,
+        "name": {"ko": "위치", "en": "Position"}
+      }
+    ]
+  },
+  {
     "group": "island",
     "key": "island.positions",
     "type": "records",
@@ -379,14 +403,17 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   autohide  F4 위쪽 자동 숨김, 나오는 구간, 지연, 애니메이션
 //   media     F6 미디어 플레이어 (GSMTC)
 //   usage     F7 Bloom 주간 사용량
+//   prefs     애드온 데이터 폴더의 prefs.json 읽기, 통째로 쓰기, 변경 감시, 모니터 id
 //   island    F8 숨김 아일랜드 (숨은 위·아래 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
 //   folders   F9 작업표시줄 폴더 (앱 묶기, 폴더 창, 폴더 안 앱의 창 묶기), F10 실행 중 폴더
-//   position  F11 작업표시줄 위·아래 (Windows 자체 위치 기능, 레지스트리는 읽기만)
+//   position  F11 작업표시줄 위·아래, 모니터마다 (Windows 자체 위치 기능, 레지스트리는 읽기만)
 //   hooks     켠 기능의 심볼만 훅으로 걸고 여러 기능이 쓰는 훅을 나눠 준다
 //   entry     Wh_Mod* 진입점
 // 의존 방향: hooks → 기능 구역 → core, settings. 기능 구역끼리는 region만 pill이 부르고,
 // island는 autohide, media, usage의 상태를 쓰고, autohide는 island가 알려 주는 범위와
 // start의 Bloom 런처 확인(LauncherAhead)을 쓴다.
+// prefs는 core와 usage의 JSON 도우미, Bloom 폴더 이름을 쓰고, island, usage, position이
+// prefs를 쓴다(아일랜드 자리, 숨긴 계정, 모니터별 가장자리가 한 파일에 있다).
 // folders는 settings만 쓰고 작업 스레드와 작업표시줄 큐를 스스로 둔다.
 // 알약 정렬(settings::PillAlign)은 pill, island, autohide가 같이 읽는다.
 
@@ -1425,9 +1452,12 @@ void (*g_onOrientationChanged)() = nullptr;
 bool (*g_dropsTimer)(HWND, UINT_PTR id) = nullptr;
 // The same for the folders, whose popup keeps its taskbar out under it.
 bool (*g_popupDropsTimer)(HWND, UINT_PTR id) = nullptr;
-// The screen edge (ABE_*) a taskbar setting change has to move the taskbar to
-// instead of the one it names, or -1 to leave it (F11).
+// The screen edge (ABE_*) a taskbar setting change has to move the primary
+// taskbar to instead of the one it names, or -1 to leave it (F11).
 int (*g_forcedEdge)() = nullptr;
+// On the primary taskbar window while F11 sets the edges: the primary's edge
+// (ABE_*) plus 2, or 1 where it keeps Windows' own. ShellHost reads it.
+constexpr WCHAR kEdgeProp[] = L"PillTaskbar.Edge";
 // That change: a taskbar setting (wParam), the location being 6, now set to
 // lParam. The Settings app sends it after storing the location.
 constexpr UINT kSettingChangeMsg = 0x5CA;
@@ -8758,6 +8788,269 @@ void Restore() {
 }  // namespace start
 
 // ============================================================================
+namespace prefs {
+// ============================================================================
+// prefs.json in the add-on's data folder: settings the mod keeps itself and Bloom
+// shows and changes (docs/addon-protocol.md). Each field is one feature's (the
+// islands' places, the accounts off the usage meter, the taskbar edge of each
+// monitor); a write keeps the other fields as they were. While a feature listens,
+// the folder is watched for changes made elsewhere. Watching is the taskbar
+// thread's, but for the watch's callback; reading and writing work from any thread.
+
+namespace wdj = winrt::Windows::Data::Json;
+
+constexpr PCWSTR kFile = L"prefs.json";
+constexpr DWORD kMaxBytes = 256 * 1024;
+
+[[clang::no_destroy]] std::wstring g_dir;  // empty without Bloom
+FILETIME g_written{};  // the file's time after this side's last write or change seen
+HANDLE g_change = nullptr;
+HANDLE g_wait = nullptr;
+
+// A feature that reads the file: told when it changed from elsewhere, and when
+// the watch was lost (the folder went), after which it isn't told any more.
+struct Listener {
+    void (*changed)();
+    void (*lost)();
+};
+[[clang::no_destroy]] std::vector<Listener> g_listeners;
+
+// The add-on's data folder, made only while Bloom's own folder is there.
+bool Dir() {
+    if (g_dir.empty()) {
+        WCHAR base[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, ARRAYSIZE(base));
+        if (!n || n >= ARRAYSIZE(base)) {
+            return false;
+        }
+        std::wstring bloom = std::wstring(base) + L"\\" + usage::kBloomDirName;
+        if (!usage::IsDirectory(bloom)) {
+            return false;
+        }
+        CreateDirectoryW((bloom + L"\\addons").c_str(), nullptr);
+        CreateDirectoryW((bloom + L"\\addons\\pill-taskbar").c_str(), nullptr);
+        g_dir = bloom + L"\\addons\\pill-taskbar";
+    }
+    return usage::IsDirectory(g_dir);
+}
+
+std::wstring Path() {
+    return g_dir + L"\\" + kFile;
+}
+
+FILETIME Time() {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(Path().c_str(), GetFileExInfoStandard, &data)) {
+        return {};
+    }
+    return data.ftLastWriteTime;
+}
+
+// The file as an object; empty if it's missing or not JSON. `ok` says whether
+// that is the file's content (or there is no file), so a caller can leave a file
+// it couldn't read alone instead of writing over it.
+wdj::JsonObject Read(bool* ok = nullptr) {
+    wdj::JsonObject root;
+    bool read = false;
+    winrt::file_handle file{CreateFileW(Path().c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    LARGE_INTEGER size{};
+    if (!file) {
+        read = GetLastError() == ERROR_FILE_NOT_FOUND;
+    } else if (GetFileSizeEx(file.get(), &size) && size.QuadPart == 0) {
+        read = true;
+    } else if (size.QuadPart > 0 && size.QuadPart <= kMaxBytes) {
+        std::string bytes((size_t)size.QuadPart, '\0');
+        DWORD got = 0;
+        if (ReadFile(file.get(), bytes.data(), (DWORD)bytes.size(), &got, nullptr)) {
+            bytes.resize(got);
+            if (bytes.starts_with("\xEF\xBB\xBF")) {
+                bytes.erase(0, 3);
+            }
+            wdj::JsonObject parsed{nullptr};
+            if (wdj::JsonObject::TryParse(usage::Widen(bytes), parsed)) {
+                root = parsed;
+                read = true;
+            }
+        }
+    }
+    if (ok) {
+        *ok = read;
+    }
+    return root;
+}
+
+// Through a hidden temporary file, so Bloom never reads half of it.
+bool Write(wdj::JsonObject const& root) {
+    std::wstring text(root.Stringify());
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0,
+                                nullptr, nullptr);
+    std::string bytes(n > 0 ? n : 0, '\0');
+    if (n > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), bytes.data(), n,
+                            nullptr, nullptr);
+    }
+    std::wstring path = Path(), temp = g_dir + L"\\." + kFile + L".tmp";
+    bool written = false;
+    {
+        winrt::file_handle file{CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr,
+                                            CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr)};
+        DWORD put = 0;
+        written = file && WriteFile(file.get(), bytes.data(), (DWORD)bytes.size(), &put,
+                                    nullptr) &&
+                  put == bytes.size();
+    }
+    if (written && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        g_written = Time();
+        return true;
+    }
+    DeleteFileW(temp.c_str());
+    Wh_Log(L"prefs.json not saved: %u", GetLastError());
+    return false;
+}
+
+// A field of records ({"<id>": {...}}) as an object to read or change; a new
+// one if the file has none.
+wdj::JsonObject Records(wdj::JsonObject const& root, PCWSTR field) {
+    auto value = usage::Field(root, field, wdj::JsonValueType::Object);
+    return value ? value.GetObject() : wdj::JsonObject();
+}
+
+double Number(wdj::JsonObject const& record, PCWSTR key, double fallback) {
+    return usage::Number(record, key, fallback);
+}
+
+bool Watching() {
+    return g_change != nullptr;
+}
+
+// Waits out a callback under way.
+void Close() {
+    if (HANDLE wait = std::exchange(g_wait, nullptr)) {
+        UnregisterWaitEx(wait, INVALID_HANDLE_VALUE);
+    }
+    if (HANDLE change = std::exchange(g_change, nullptr)) {
+        FindCloseChangeNotification(change);
+    }
+}
+
+// Taskbar thread: the file changed, from Bloom or by hand, unless it was this
+// side's own write.
+void OnChanged() {
+    FILETIME now = Time();
+    if (CompareFileTime(&now, &g_written) == 0) {
+        return;
+    }
+    g_written = now;
+    for (auto const& l : std::vector(g_listeners)) {
+        l.changed();
+    }
+}
+
+// Taskbar thread: the watch can't go on; each listener hears it once.
+void OnLost() {
+    Close();
+    for (auto const& l : std::exchange(g_listeners, {})) {
+        l.lost();
+    }
+}
+
+// Set when the watch can't be re-armed, until a new one is set up.
+std::atomic<bool> g_watchFailed;
+
+// Thread pool. When the folder goes away the handle can't be re-armed and stays
+// signaled, so this would run without end; the watch is dropped on the taskbar
+// thread instead (unregistering it here would wait on this very callback), and a
+// listener that needs the file again watches it again.
+void CALLBACK OnFolderChanged(void*, BOOLEAN) {
+    if (g_watchFailed) {
+        return;
+    }
+    if (!FindNextChangeNotification(g_change)) {
+        g_watchFailed = true;
+        core::Post(OnLost);
+    }
+    core::Post(OnChanged);
+}
+
+// Taskbar thread: `changed` hears of the file's changes from now on; the folder
+// is watched from the first listener on. False without the folder or a watch.
+bool Watch(void (*changed)(), void (*lost)()) {
+    if (std::ranges::none_of(g_listeners, [&](auto& l) { return l.changed == changed; })) {
+        g_listeners.push_back({changed, lost});
+    }
+    if (g_change || !Dir()) {
+        return g_change != nullptr;
+    }
+    g_written = Time();
+    g_change = FindFirstChangeNotificationW(
+        g_dir.c_str(), FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME);
+    if (g_change == INVALID_HANDLE_VALUE) {
+        g_change = nullptr;
+        return false;
+    }
+    g_watchFailed = false;
+    if (!RegisterWaitForSingleObject(&g_wait, g_change, OnFolderChanged, nullptr, INFINITE,
+                                     WT_EXECUTEDEFAULT)) {
+        g_wait = nullptr;
+        Wh_Log(L"prefs.json not watched: %u", GetLastError());
+    }
+    return true;
+}
+
+// Taskbar thread: the watch stops with the last listener.
+void Unwatch(void (*changed)()) {
+    std::erase_if(g_listeners, [&](auto& l) { return l.changed == changed; });
+    if (g_listeners.empty()) {
+        Close();
+    }
+}
+
+// A monitor's id in the file, the same across restarts: its display's hardware
+// and instance from the device path ("DEL41D9_5_1a2b3c_0_UID4352"), else its
+// display name; alphanumerics and '-' kept, anything else '_'. And a name as
+// Bloom shows it: the model and the size ("DEL41D9 2560×1440").
+bool MonitorKey(HMONITOR monitor, std::wstring& id, std::wstring& name) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+        return false;
+    }
+    std::wstring device = info.szDevice;
+    id = device.starts_with(L"\\\\.\\") ? device.substr(4) : device;
+    std::wstring model = id;
+    DISPLAY_DEVICEW dd{.cb = sizeof(dd)};
+    if (EnumDisplayDevicesW(info.szDevice, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)) {
+        // \\?\DISPLAY#<hardware>#<instance>#{class}
+        std::wstring path = dd.DeviceID;
+        std::vector<std::wstring> parts;
+        for (size_t start = 0, end; start <= path.size(); start = end + 1) {
+            end = path.find(L'#', start);
+            if (end == std::wstring::npos) {
+                end = path.size();
+            }
+            parts.push_back(path.substr(start, end - start));
+        }
+        if (parts.size() >= 3 && !parts[1].empty()) {
+            model = parts[1];
+            id = parts[1] + L"_" + parts[2];
+        }
+    }
+    for (wchar_t& c : id) {
+        if (!iswalnum(c) && c != L'-') {
+            c = L'_';
+        }
+    }
+    RECT const& r = info.rcMonitor;
+    name = model + L" " + std::to_wstring(r.right - r.left) + L"\u00D7" +
+           std::to_wstring(r.bottom - r.top);
+    return true;
+}
+
+}  // namespace prefs
+
+// ============================================================================
 namespace island {
 // ============================================================================
 // F8: while an auto-hidden taskbar is in, a small black island sits on its
@@ -9187,119 +9480,23 @@ bool AtBottom(HWND taskbar, RECT const& monitor) {
 
 // ---- place along the edge ----------------------------------------------------------
 // Where along its edge each monitor's island sits, from 0 (the left end) through
-// 500 (the middle) to 1000 (the right end), kept in prefs.json in the add-on's
-// data folder as "islandPositions": {"<monitor>": {"name": ..., "x": ...}}, where
-// Bloom shows and changes it. Other fields of the file stay as they are. Read on
+// 500 (the middle) to 1000 (the right end), kept in prefs.json as "islandPositions":
+// {"<monitor>": {"name": ..., "x": ...}}, where Bloom shows and changes it. Read on
 // the taskbar thread; the file is watched for changes made elsewhere.
 
 constexpr int kPlaceMiddle = 500;
 constexpr int kPlaceEnd = 1000;
-constexpr PCWSTR kPrefsFile = L"prefs.json";
 constexpr PCWSTR kPlacesField = L"islandPositions";
-constexpr DWORD kMaxPrefsBytes = 256 * 1024;
 
 // Monitor id → place, in thousandths; a place being dragged keeps its fraction.
 [[clang::no_destroy]] std::unordered_map<std::wstring, double> g_places;
-[[clang::no_destroy]] std::wstring g_prefsDir;  // empty without Bloom
-FILETIME g_prefsWritten{};  // the file's time after this side's last read or write
-HANDLE g_prefsChange = nullptr;
-HANDLE g_prefsWait = nullptr;
 bool g_placesRead = false;  // looked for the file since the islands started
 
 namespace wdj = winrt::Windows::Data::Json;
 
-// The add-on's data folder, made only while Bloom's own folder is there.
-bool PrefsDir() {
-    if (g_prefsDir.empty()) {
-        WCHAR base[MAX_PATH];
-        DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, ARRAYSIZE(base));
-        if (!n || n >= ARRAYSIZE(base)) {
-            return false;
-        }
-        std::wstring bloom = std::wstring(base) + L"\\" + usage::kBloomDirName;
-        if (!usage::IsDirectory(bloom)) {
-            return false;
-        }
-        CreateDirectoryW((bloom + L"\\addons").c_str(), nullptr);
-        CreateDirectoryW((bloom + L"\\addons\\pill-taskbar").c_str(), nullptr);
-        g_prefsDir = bloom + L"\\addons\\pill-taskbar";
-    }
-    return usage::IsDirectory(g_prefsDir);
-}
-
-std::wstring PrefsPath() {
-    return g_prefsDir + L"\\" + kPrefsFile;
-}
-
-FILETIME PrefsTime() {
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(PrefsPath().c_str(), GetFileExInfoStandard, &data)) {
-        return {};
-    }
-    return data.ftLastWriteTime;
-}
-
-// The file as an object; empty if it's missing or not JSON.
-wdj::JsonObject ReadPrefs() {
-    wdj::JsonObject root;
-    winrt::file_handle file{CreateFileW(PrefsPath().c_str(), GENERIC_READ,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    LARGE_INTEGER size{};
-    if (!file || !GetFileSizeEx(file.get(), &size) || size.QuadPart <= 0 ||
-        size.QuadPart > kMaxPrefsBytes) {
-        return root;
-    }
-    std::string bytes((size_t)size.QuadPart, '\0');
-    DWORD got = 0;
-    if (!ReadFile(file.get(), bytes.data(), (DWORD)bytes.size(), &got, nullptr)) {
-        return root;
-    }
-    bytes.resize(got);
-    if (bytes.starts_with("\xEF\xBB\xBF")) {
-        bytes.erase(0, 3);
-    }
-    wdj::JsonObject parsed{nullptr};
-    if (wdj::JsonObject::TryParse(usage::Widen(bytes), parsed)) {
-        root = parsed;
-    }
-    return root;
-}
-
-// Through a hidden temporary file, so Bloom never reads half of it.
-bool WritePrefs(wdj::JsonObject const& root) {
-    std::wstring text(root.Stringify());
-    int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0,
-                                nullptr, nullptr);
-    std::string bytes(n > 0 ? n : 0, '\0');
-    if (n > 0) {
-        WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), bytes.data(), n,
-                            nullptr, nullptr);
-    }
-    std::wstring path = PrefsPath(), temp = g_prefsDir + L"\\." + kPrefsFile + L".tmp";
-    bool written = false;
-    {
-        winrt::file_handle file{CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr,
-                                            CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr)};
-        DWORD put = 0;
-        written = file && WriteFile(file.get(), bytes.data(), (DWORD)bytes.size(), &put,
-                                    nullptr) &&
-                  put == bytes.size();
-    }
-    if (written && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        g_prefsWritten = PrefsTime();
-        return true;
-    }
-    DeleteFileW(temp.c_str());
-    Wh_Log(L"prefs.json not saved: %u", GetLastError());
-    return false;
-}
-
 void ReadPlaces() {
-    g_prefsWritten = PrefsTime();
     g_places.clear();
-    auto root = ReadPrefs();
-    auto places = usage::Field(root, kPlacesField, wdj::JsonValueType::Object);
+    auto places = usage::Field(prefs::Read(), kPlacesField, wdj::JsonValueType::Object);
     if (!places) {
         return;
     }
@@ -9315,12 +9512,11 @@ void ReadPlaces() {
 // The island's place as it is now, in the file with its monitor's name; the
 // rest of the file as it was.
 void SavePlace(Island const& g) {
-    if (!PrefsDir()) {
+    if (!prefs::Dir()) {
         return;
     }
-    auto root = ReadPrefs();
-    auto old = usage::Field(root, kPlacesField, wdj::JsonValueType::Object);
-    wdj::JsonObject places = old ? old.GetObject() : wdj::JsonObject();
+    auto root = prefs::Read();
+    wdj::JsonObject places = prefs::Records(root, kPlacesField);
     auto it = g_places.find(g.placeId);
     double x = it != g_places.end() ? it->second : kPlaceMiddle;
     wdj::JsonObject record;
@@ -9328,16 +9524,12 @@ void SavePlace(Island const& g) {
     record.Insert(L"x", wdj::JsonValue::CreateNumberValue(std::round(x)));
     places.Insert(g.placeId, record);
     root.Insert(kPlacesField, places);
-    WritePrefs(root);
+    prefs::Write(root);
 }
 
-// Taskbar thread: the file changed, from Bloom or by hand, unless it was this
-// side's own write. A drag under way keeps its island where the pointer has it.
+// Taskbar thread: the file changed elsewhere. A drag under way keeps its island
+// where the pointer has it.
 void OnPrefsChanged() {
-    FILETIME now = PrefsTime();
-    if (CompareFileTime(&now, &g_prefsWritten) == 0) {
-        return;
-    }
     std::unordered_map<std::wstring, double> dragged;
     for (auto& g : g_islands) {
         if (g.dragging && g_places.contains(g.placeId)) {
@@ -9351,105 +9543,46 @@ void OnPrefsChanged() {
     SyncAll();
 }
 
-void UnwatchPlaces();
-
-// Set when the watch can't be re-armed, until a new one is set up.
-std::atomic<bool> g_prefsWatchFailed;
-
-// Thread pool. When the folder goes away the handle can't be re-armed and stays
-// signaled, so this would run without end; the watch is dropped on the taskbar
-// thread instead (unregistering it here would wait on this very callback), and
-// the islands' next layout looks for the folder once more.
-void CALLBACK OnPrefsFolderChanged(void*, BOOLEAN) {
-    if (g_prefsWatchFailed) {
-        return;
-    }
-    if (!FindNextChangeNotification(g_prefsChange)) {
-        g_prefsWatchFailed = true;
-        core::Post(UnwatchPlaces);
-    }
-    core::Post(OnPrefsChanged);
+// The folder went: the islands go to the middle, and their next layout looks
+// for the folder once more.
+void OnPrefsLost() {
+    g_places.clear();
+    g_placesRead = false;
+    SyncAll();
 }
 
-// Once, as the first island needs a place: reads the file and starts watching
-// its folder.
+// Once, as the first island needs a place: reads the file and listens for its
+// changes.
 void WatchPlaces() {
-    if (std::exchange(g_placesRead, true) || !PrefsDir()) {
+    if (std::exchange(g_placesRead, true) || !prefs::Dir()) {
         return;
     }
+    prefs::Watch(OnPrefsChanged, OnPrefsLost);
     ReadPlaces();
-    g_prefsChange = FindFirstChangeNotificationW(g_prefsDir.c_str(), FALSE,
-                                                 FILE_NOTIFY_CHANGE_LAST_WRITE |
-                                                     FILE_NOTIFY_CHANGE_FILE_NAME);
-    if (g_prefsChange == INVALID_HANDLE_VALUE) {
-        g_prefsChange = nullptr;
-        return;
-    }
-    g_prefsWatchFailed = false;
-    if (!RegisterWaitForSingleObject(&g_prefsWait, g_prefsChange, OnPrefsFolderChanged,
-                                     nullptr, INFINITE, WT_EXECUTEDEFAULT)) {
-        g_prefsWait = nullptr;
-        Wh_Log(L"Island places not watched: %u", GetLastError());
-    }
 }
 
-// At restore: waits out a callback under way.
+// At restore.
 void UnwatchPlaces() {
-    if (HANDLE wait = std::exchange(g_prefsWait, nullptr)) {
-        UnregisterWaitEx(wait, INVALID_HANDLE_VALUE);
-    }
-    if (HANDLE change = std::exchange(g_prefsChange, nullptr)) {
-        FindCloseChangeNotification(change);
-    }
+    prefs::Unwatch(OnPrefsChanged);
     g_places.clear();
     g_placesRead = false;
 }
 
-// A name for the monitor that stays the same across restarts: its display's
-// hardware and instance from the device path ("DEL41D9_5_1a2b3c_0_UID4352"),
-// else its display name. A label as Bloom shows it: the model and the size.
+// The monitor's id and name in the file (prefs::MonitorKey).
 void NotePlaceMonitor(Island& g, HMONITOR monitor) {
     if (monitor == g.placeMonitor && !g.placeId.empty()) {
         return;
     }
-    MONITORINFOEXW info{};
-    info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(monitor, &info)) {
+    std::wstring id, name;
+    if (!prefs::MonitorKey(monitor, id, name)) {
         return;
     }
-    std::wstring device = info.szDevice;
-    std::wstring id = device.starts_with(L"\\\\.\\") ? device.substr(4) : device;
-    std::wstring model = id;
-    DISPLAY_DEVICEW dd{.cb = sizeof(dd)};
-    if (EnumDisplayDevicesW(info.szDevice, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)) {
-        // \\?\DISPLAY#<hardware>#<instance>#{class}
-        std::wstring path = dd.DeviceID;
-        std::vector<std::wstring> parts;
-        for (size_t start = 0, end; start <= path.size(); start = end + 1) {
-            end = path.find(L'#', start);
-            if (end == std::wstring::npos) {
-                end = path.size();
-            }
-            parts.push_back(path.substr(start, end - start));
-        }
-        if (parts.size() >= 3 && !parts[1].empty()) {
-            model = parts[1];
-            id = parts[1] + L"_" + parts[2];
-        }
-    }
-    for (wchar_t& c : id) {
-        if (!iswalnum(c) && c != L'-') {
-            c = L'_';
-        }
-    }
-    RECT const& r = info.rcMonitor;
     g.placeMonitor = monitor;
     g.placeId = id;
-    g.placeName = model + L" " + std::to_wstring(r.right - r.left) + L"\u00D7" +
-                  std::to_wstring(r.bottom - r.top);
+    g.placeName = name;
     // A monitor Bloom doesn't list yet is listed, in the middle, so its place
     // can be set there before it's ever dragged.
-    if (g_prefsChange && !g_places.contains(id)) {
+    if (prefs::Watching() && !g_places.contains(id)) {
         g_places[id] = kPlaceMiddle;
         SavePlace(g);
     }
@@ -20983,18 +21116,18 @@ std::wstring StartCodex(NewSession const& s, std::function<void(std::wstring)> c
 }  // namespace app_drive
 
 namespace usage {
-// The accounts taken off the meter, as "usageHidden": [<account id>, ...] in the
-// prefs.json the island keeps its places in. An id whose account is gone from
+// The accounts taken off the meter, as "usageHidden": [<account id>, ...] in
+// prefs.json. An id whose account is gone from
 // Bloom's file stays, should the account come back.
 
 constexpr PCWSTR kHiddenField = L"usageHidden";
 
 void ReadHidden() {
     g_hidden.clear();
-    if (!island::PrefsDir()) {
+    if (!prefs::Dir()) {
         return;
     }
-    auto ids = Field(island::ReadPrefs(), kHiddenField, wdj::JsonValueType::Array);
+    auto ids = Field(prefs::Read(), kHiddenField, wdj::JsonValueType::Array);
     for (auto const& id : ids ? ids.GetArray() : wdj::JsonArray()) {
         if (id.ValueType() == wdj::JsonValueType::String && !id.GetString().empty()) {
             g_hidden.insert(std::wstring(id.GetString()));
@@ -21015,16 +21148,16 @@ void SetHidden(std::wstring const& id, bool hidden) {
     } else {
         g_hidden.erase(id);
     }
-    if (island::PrefsDir()) {
+    if (prefs::Dir()) {
         std::vector<std::wstring> sorted(g_hidden.begin(), g_hidden.end());
         std::ranges::sort(sorted);
         wdj::JsonArray list;
         for (auto const& each : sorted) {
             list.Append(wdj::JsonValue::CreateStringValue(each));
         }
-        auto root = island::ReadPrefs();
+        auto root = prefs::Read();
         root.Insert(kHiddenField, list);
-        island::WritePrefs(root);
+        prefs::Write(root);
     }
     Show();
 }
@@ -26259,6 +26392,36 @@ LONG PlaceTop(const RECT& shown) {
     return std::min<LONG>(top, mi.rcWork.bottom - (shown.bottom - shown.top));
 }
 
+// Quick Settings opens at the edge ShellHost reads, the primary taskbar's. Where
+// explorer sets the edges per monitor (F11), a monitor's taskbar can be at the
+// other one: y for a panel of this size at that taskbar's side, with the gap
+// Windows leaves, as PlaceTop does. y itself where the panel is at its taskbar's
+// side already, or the taskbar is vertical or not found.
+int PlaceY(int x, int y, int width, int height) {
+    RECT rc{x, y, x + width, y + height};
+    HMONITOR monitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+    HWND taskbar = TaskbarOn(monitor);
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    RECT bar;
+    if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
+        bar.right - bar.left <= bar.bottom - bar.top) {
+        return y;
+    }
+    LONG middle = mi.rcMonitor.top + mi.rcMonitor.bottom;
+    bool barTop = bar.top + bar.bottom < middle;
+    if (barTop == (rc.top + rc.bottom < middle)) {
+        return y;
+    }
+    if (barTop) {
+        return PlaceTop(rc);
+    }
+    UINT dpi = GetDpiForWindow(taskbar);
+    LONG bottom =
+        std::min<LONG>(mi.rcWork.bottom, mi.rcMonitor.bottom - (bar.bottom - bar.top)) -
+        MulDiv(kPanelGap, dpi ? dpi : 96, 96);
+    return std::max<LONG>(bottom - height, mi.rcWork.top);
+}
+
 bool HasName(PCWSTR path, PCWSTR name) {
     PCWSTR slash = wcsrchr(path, L'\\');
     return _wcsicmp(slash ? slash + 1 : path, name) == 0;
@@ -26570,6 +26733,16 @@ void CollectSystemTray(std::vector<WindhawkUtils::SYMBOL_HOOK>& list) {
 
 std::atomic<bool> g_on;  // the setting, in ShellHost
 
+// The primary taskbar's edge (ABE_*, -1 for Windows' own) as explorer puts it on
+// the window while it sets the edges (F11); kNoEdge while it doesn't.
+constexpr int kNoEdge = -2;
+
+int PublishedEdge() {
+    HWND tray = FindWindow(L"Shell_TrayWnd", nullptr);
+    auto told = tray ? (INT_PTR)GetProp(tray, core::kEdgeProp) : 0;
+    return told > 0 ? (int)told - 2 : kNoEdge;
+}
+
 bool IsQuickSettings(HWND hwnd) {
     WCHAR cls[32];
     DWORD pid = 0;
@@ -26587,21 +26760,21 @@ BOOL WINAPI SetWindowPos_Hook(HWND hwnd, HWND after, int x, int y, int cx, int c
         GetWindowRect(hwnd, &rc) && cy > rc.bottom - rc.top) {
         TellBloom();
     }
-    if (!PlaceCenterMove(hwnd, x, y, cx, cy, flags) && g_on && (flags & kStill) != kStill &&
-        IsQuickSettings(hwnd) &&
+    bool edges;  // explorer sets the taskbars' edges
+    if (!PlaceCenterMove(hwnd, x, y, cx, cy, flags) && (flags & kStill) != kStill &&
+        IsQuickSettings(hwnd) && ((edges = PublishedEdge() != kNoEdge) || g_on) &&
         GetWindowRect(hwnd, &rc)) {
         int width = flags & SWP_NOSIZE ? rc.right - rc.left : cx;
         int height = flags & SWP_NOSIZE ? rc.bottom - rc.top : cy;
-        if (flags & SWP_NOMOVE) {
-            // A resize alone would keep the left edge; the right one stays at the tray.
-            int placed = PlaceX(rc.left, rc.top, width, height);
-            if (placed != rc.left) {
-                flags &= ~SWP_NOMOVE;
-                x = placed;
-                y = rc.top;
-            }
-        } else {
-            x = PlaceX(x, y, width, height);
+        // A resize alone would keep the left edge; the right one stays at the tray.
+        bool still = flags & SWP_NOMOVE;
+        int fromX = still ? rc.left : x, fromY = still ? rc.top : y;
+        int toX = g_on ? PlaceX(fromX, fromY, width, height) : fromX;
+        int toY = edges ? PlaceY(toX, fromY, width, height) : fromY;
+        if (!still || toX != fromX || toY != fromY) {
+            flags &= ~SWP_NOMOVE;
+            x = toX;
+            y = toY;
         }
     }
     return SetWindowPos_Original(hwnd, after, x, y, cx, cy, flags);
@@ -26615,7 +26788,8 @@ bool InShellHost() {
 
 // Quick Settings opens at the edge Windows' own setting names, read from the registry
 // here. With the mod's edge set, that read gives the mod's edge, as the taskbars'
-// reads in explorer do. -1: Windows' setting.
+// reads in explorer do: the primary's as explorer publishes it, else the common
+// setting. -1: Windows' setting.
 std::atomic<int> g_edge{-1};
 
 int EdgeSetting() {
@@ -26635,9 +26809,15 @@ LONG WINAPI RegGetValueW_Hook(HKEY key, LPCWSTR subKey, LPCWSTR value, DWORD fla
                               LPDWORD type, PVOID data, LPDWORD size) {
     DWORD room = size ? *size : 0;
     LONG ret = RegGetValueW_Original(key, subKey, value, flags, type, data, size);
-    int edge = g_edge;
-    if (edge < 0 || !value || !data || !size || room < sizeof(DWORD) ||
-        !(flags & RRF_RT_REG_DWORD) || _wcsicmp(value, L"TaskbarLocation") != 0) {
+    if (!value || !data || !size || room < sizeof(DWORD) || !(flags & RRF_RT_REG_DWORD) ||
+        _wcsicmp(value, L"TaskbarLocation") != 0) {
+        return ret;
+    }
+    int edge = PublishedEdge();
+    if (edge == kNoEdge) {
+        edge = g_edge;
+    }
+    if (edge < 0) {
         return ret;
     }
     *(DWORD*)data = (DWORD)edge;
@@ -26924,37 +27104,184 @@ void Stop() {
 // ============================================================================
 namespace position {
 // ============================================================================
-// The taskbar at the top or bottom edge whatever Windows' setting says, through
+// The taskbars at the top or bottom edge whatever Windows' setting says, through
 // the location Windows has of its own on newer builds (native): each taskbar
 // reads the location from the registry as it sets itself up, and its content
-// asks TaskbarSettings::Location. Both get the set edge. Nothing is written, so
-// turning this off or unloading puts the taskbar back where Windows' setting
-// has it. A build without the native location is left alone.
+// asks TaskbarSettings::Location. Both get the edge set for the taskbar's
+// monitor: the monitor's own in prefs.json ("taskbarEdges", which Bloom lists),
+// else the common pill.edge. Nothing is written to the registry, so turning
+// this off or unloading puts the taskbars back where Windows' setting has them.
+// A build without the native location is left alone.
+//
+// Which taskbar reads: the primary in TrayUI::_GetSaveStateAndInitRects, a
+// secondary in CSecondaryTray::_LoadSettings. That tray is the one its window
+// keeps (window long 0, as autohide finds it) or the one _CreateSecondaryTray
+// made for a monitor. Each TaskbarSettings is matched to its taskbar window as
+// it is made; one made before the mod loaded answers the primary's edge.
+// Without these hooks every taskbar gets the common edge.
 
 using SH = WindhawkUtils::SYMBOL_HOOK;
+namespace wdj = winrt::Windows::Data::Json;
 
 constexpr WCHAR kAdvancedKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
 constexpr WCHAR kLocationValue[] = L"TaskbarLocation";
+constexpr PCWSTR kEdgesField = L"taskbarEdges";
 
-bool g_native;  // set while the mod initializes
-// True on a thread while a taskbar reads its own location there.
-thread_local bool g_reading;
-// The edge the taskbars were told, -1 if none: unloading tells them Windows' again.
-std::atomic<int> g_told{-1};
+// A monitor's choice in the file: 0 the common edge, then top, bottom, left and
+// right. Left and right are kept for later and read as the common edge until
+// the taskbar can stand on them.
+enum class MonitorEdge { kCommon, kTop, kBottom, kLeft, kRight };
+
+MonitorEdge FromRecord(double value) {
+    switch ((int)std::lround(std::clamp(value, -1.0, 9.0))) {
+        case 1:
+            return MonitorEdge::kTop;
+        case 2:
+            return MonitorEdge::kBottom;
+        case 3:
+            return MonitorEdge::kLeft;
+        case 4:
+            return MonitorEdge::kRight;
+        default:
+            return MonitorEdge::kCommon;
+    }
+}
+
+// The screen edge (ABE_*, which the TaskbarLocation values are) for a monitor's
+// choice under the common setting; -1 where Windows' own setting stays.
+int EffectiveEdge(MonitorEdge choice, settings::Edge common) {
+    switch (choice) {
+        case MonitorEdge::kTop:
+            return ABE_TOP;
+        case MonitorEdge::kBottom:
+            return ABE_BOTTOM;
+        default:
+            break;
+    }
+    switch (common) {
+        case settings::Edge::kTop:
+            return ABE_TOP;
+        case settings::Edge::kBottom:
+            return ABE_BOTTOM;
+        default:
+            return -1;
+    }
+}
+
+bool g_native;      // set while the mod initializes
+bool g_perMonitor;  // the same: the hooks that tell the taskbars apart are there
+
+// Set on a thread while a taskbar reads its own location there.
+struct Reading {
+    enum Who { kNone, kPrimary, kSecondary } who;
+    void* tray;  // the secondary's CSecondaryTray
+};
+thread_local Reading g_reading;
+
+std::mutex g_lock;  // everything below; never held over a call into explorer
+// Monitor id → its choice, as the file has it.
+[[clang::no_destroy]] std::unordered_map<std::wstring, MonitorEdge> g_edges;
+std::atomic<bool> g_anyForced;  // a monitor of the file is set to top or bottom
+// Monitor ids found, by handle and device name (a handle can come back for another
+// display after a change).
+struct Known {
+    HMONITOR monitor;
+    std::wstring device, id;
+};
+[[clang::no_destroy]] std::vector<Known> g_known;
+// A CSecondaryTray → the monitor it was made for.
+[[clang::no_destroy]] std::unordered_map<void*, HMONITOR> g_trayMonitors;
+// A TaskbarSettings → its taskbar window. One gone isn't taken out: a new one at
+// the same address is matched again as it is made.
+[[clang::no_destroy]] std::unordered_map<void*, HWND> g_settingsTaskbars;
+// The edges the taskbars were told, -1 for Windows' own: unloading tells them
+// Windows' again. The secondaries' by monitor id.
+int g_toldPrimary = -1;
+[[clang::no_destroy]] std::unordered_map<std::wstring, int> g_told;
+bool g_listening;  // taskbar thread: hears of the file's changes
 
 bool Active() {
     return g_native && !core::g_unloading &&
-           settings::g.pill.edge != settings::Edge::kWindows;
+           (settings::g.pill.edge != settings::Edge::kWindows ||
+            (g_perMonitor && g_anyForced));
 }
 
-// The TaskbarLocation values are the screen edges (ABE_*).
-int SetEdge() {
-    return settings::g.pill.edge == settings::Edge::kTop ? ABE_TOP : ABE_BOTTOM;
+std::wstring IdOf(HMONITOR monitor) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+        return {};
+    }
+    {
+        std::lock_guard lock(g_lock);
+        for (auto const& k : g_known) {
+            if (k.monitor == monitor && k.device == info.szDevice) {
+                return k.id;
+            }
+        }
+    }
+    std::wstring id, name;
+    if (!prefs::MonitorKey(monitor, id, name)) {
+        return {};
+    }
+    std::lock_guard lock(g_lock);
+    std::erase_if(g_known, [&](Known const& k) { return k.monitor == monitor; });
+    g_known.push_back({monitor, info.szDevice, id});
+    return id;
 }
 
-int ForcedEdge() {
-    return Active() ? SetEdge() : -1;
+// The edge for the taskbar on `monitor` (null: not known, the common edge); -1
+// to leave it at Windows' own.
+int EdgeOn(HMONITOR monitor) {
+    if (!Active()) {
+        return -1;
+    }
+    MonitorEdge choice = MonitorEdge::kCommon;
+    if (g_perMonitor && g_anyForced && monitor) {
+        std::wstring id = IdOf(monitor);
+        std::lock_guard lock(g_lock);
+        if (auto it = g_edges.find(id); it != g_edges.end()) {
+            choice = it->second;
+        }
+    }
+    return EffectiveEdge(choice, settings::g.pill.edge);
+}
+
+HMONITOR PrimaryMonitor() {
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (tray && core::IsTaskbarWindow(tray)) {
+        return core::MonitorOf(tray);
+    }
+    return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+}
+
+int PrimaryEdge() {
+    return EdgeOn(PrimaryMonitor());
+}
+
+// A secondary taskbar's monitor from its CSecondaryTray: the one explorer set on
+// the window that keeps that tray, else the one the tray was made for, else
+// where that window is; null if none of them is known.
+HMONITOR SecondaryMonitor(void* tray) {
+    HWND window = nullptr;
+    for (HWND h = nullptr;
+         (h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr));) {
+        if (core::IsTaskbarWindow(h) && GetWindowLongPtrW(h, 0) == (LONG_PTR)tray) {
+            window = h;
+            break;
+        }
+    }
+    if (auto on = window ? (HMONITOR)GetProp(window, L"TaskbarMonitor") : nullptr) {
+        return on;
+    }
+    {
+        std::lock_guard lock(g_lock);
+        if (auto it = g_trayMonitors.find(tray); it != g_trayMonitors.end()) {
+            return it->second;
+        }
+    }
+    return window ? MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) : nullptr;
 }
 
 // Windows' own setting.
@@ -26979,13 +27306,32 @@ LONG WINAPI RegGetValueW_Hook(HKEY key,
                               LPDWORD size) {
     DWORD room = size ? *size : 0;
     LONG ret = RegGetValueW_Original(key, subKey, value, flags, type, data, size);
-    if (!g_reading || key != HKEY_CURRENT_USER || !subKey || !value || !data ||
-        !size || !(flags & RRF_RT_REG_DWORD) || room < sizeof(DWORD) ||
+    Reading reading = g_reading;
+    if (reading.who == Reading::kNone || key != HKEY_CURRENT_USER || !subKey || !value ||
+        !data || !size || !(flags & RRF_RT_REG_DWORD) || room < sizeof(DWORD) ||
         _wcsicmp(subKey, kAdvancedKey) != 0 || _wcsicmp(value, kLocationValue) != 0 ||
         !Active()) {
         return ret;
     }
-    *(DWORD*)data = (DWORD)SetEdge();
+    int edge;
+    if (reading.who == Reading::kSecondary) {
+        HMONITOR monitor = g_perMonitor ? SecondaryMonitor(reading.tray) : nullptr;
+        if (g_perMonitor && !monitor) {
+            Wh_Log(L"Secondary taskbar %p: monitor not known, the common edge", reading.tray);
+        }
+        edge = EdgeOn(monitor);
+        std::wstring id = IdOf(monitor);
+        std::lock_guard lock(g_lock);
+        g_told[id] = edge;
+    } else {
+        edge = PrimaryEdge();
+        std::lock_guard lock(g_lock);
+        g_toldPrimary = edge;
+    }
+    if (edge < 0) {
+        return ret;
+    }
+    *(DWORD*)data = (DWORD)edge;
     *size = sizeof(DWORD);
     if (type) {
         *type = REG_DWORD;
@@ -26996,7 +27342,7 @@ LONG WINAPI RegGetValueW_Hook(HKEY key,
 using TrayUI__GetSaveStateAndInitRects_t = void(WINAPI*)(void* pThis);
 TrayUI__GetSaveStateAndInitRects_t TrayUI__GetSaveStateAndInitRects_Original;
 void WINAPI TrayUI__GetSaveStateAndInitRects_Hook(void* pThis) {
-    bool was = std::exchange(g_reading, true);
+    Reading was = std::exchange(g_reading, {Reading::kPrimary, nullptr});
     TrayUI__GetSaveStateAndInitRects_Original(pThis);
     g_reading = was;
 }
@@ -27004,16 +27350,74 @@ void WINAPI TrayUI__GetSaveStateAndInitRects_Hook(void* pThis) {
 using CSecondaryTray__LoadSettings_t = HRESULT(WINAPI*)(void* pThis);
 CSecondaryTray__LoadSettings_t CSecondaryTray__LoadSettings_Original;
 HRESULT WINAPI CSecondaryTray__LoadSettings_Hook(void* pThis) {
-    bool was = std::exchange(g_reading, true);
+    Reading was = std::exchange(g_reading, {Reading::kSecondary, pThis});
     HRESULT ret = CSecondaryTray__LoadSettings_Original(pThis);
     g_reading = was;
+    return ret;
+}
+
+void NoteTaskbars();
+
+using CSecondaryTray__CreateSecondaryTray_t =
+    HRESULT(WINAPI*)(void* pThis, void* taskList, HMONITOR monitor, PCWSTR device);
+CSecondaryTray__CreateSecondaryTray_t CSecondaryTray__CreateSecondaryTray_Original;
+HRESULT WINAPI CSecondaryTray__CreateSecondaryTray_Hook(void* pThis,
+                                                        void* taskList,
+                                                        HMONITOR monitor,
+                                                        PCWSTR device) {
+    {
+        std::lock_guard lock(g_lock);
+        g_trayMonitors[pThis] = monitor;
+    }
+    HRESULT ret =
+        CSecondaryTray__CreateSecondaryTray_Original(pThis, taskList, monitor, device);
+    if (!core::g_unloading) {
+        core::Post(NoteTaskbars);  // its monitor gets a record
+    }
+    return ret;
+}
+
+using TaskbarSettings_TaskbarSettings_t = void*(WINAPI*)(void* pThis,
+                                                         void* trayComponentHost,
+                                                         IUnknown* taskListWndSite);
+TaskbarSettings_TaskbarSettings_t TaskbarSettings_TaskbarSettings_Original;
+void* WINAPI TaskbarSettings_TaskbarSettings_Hook(void* pThis,
+                                                  void* trayComponentHost,
+                                                  IUnknown* taskListWndSite) {
+    void* ret =
+        TaskbarSettings_TaskbarSettings_Original(pThis, trayComponentHost, taskListWndSite);
+    HWND taskbar = nullptr, hwnd = nullptr;
+    winrt::com_ptr<IOleWindow> window;
+    if (taskListWndSite &&
+        SUCCEEDED(taskListWndSite->QueryInterface(IID_PPV_ARGS(window.put()))) &&
+        SUCCEEDED(window->GetWindow(&hwnd)) && hwnd) {
+        taskbar = GetAncestor(hwnd, GA_ROOT);
+    }
+    std::lock_guard lock(g_lock);
+    if (taskbar) {
+        g_settingsTaskbars[pThis] = taskbar;
+    } else {
+        g_settingsTaskbars.erase(pThis);
+    }
     return ret;
 }
 
 using TaskbarSettings_Location_t = int(WINAPI*)(void* pThis);
 TaskbarSettings_Location_t TaskbarSettings_Location_Original;
 int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
-    return Active() ? SetEdge() : TaskbarSettings_Location_Original(pThis);
+    if (!Active()) {
+        return TaskbarSettings_Location_Original(pThis);
+    }
+    HWND taskbar = nullptr;
+    {
+        std::lock_guard lock(g_lock);
+        if (auto it = g_settingsTaskbars.find(pThis); it != g_settingsTaskbars.end()) {
+            taskbar = it->second;
+        }
+    }
+    int edge = taskbar && core::IsSecondary(taskbar) ? EdgeOn(core::MonitorOf(taskbar))
+                                                     : PrimaryEdge();
+    return edge >= 0 ? edge : TaskbarSettings_Location_Original(pThis);
 }
 
 // wil's state of the native location feature, and its check.
@@ -27041,9 +27445,35 @@ void CollectTaskbarDll(std::vector<SH>& list) {
     list.push_back({{LR"(private: long __cdecl CSecondaryTray::_LoadSettings(void))"},
                     &CSecondaryTray__LoadSettings_Original,
                     CSecondaryTray__LoadSettings_Hook, true});
+    list.push_back({{LR"(private: long __cdecl CSecondaryTray::_CreateSecondaryTray(struct ITaskListUI *,struct HMONITOR__ *,unsigned short const *))"},
+                    &CSecondaryTray__CreateSecondaryTray_Original,
+                    CSecondaryTray__CreateSecondaryTray_Hook, true});
+    list.push_back({{LR"(public: __cdecl winrt::WindowsUdk::UI::Shell::implementation::TaskbarSettings::TaskbarSettings(struct ITrayComponentHost *,struct ITaskListWndSite *))"},
+                    &TaskbarSettings_TaskbarSettings_Original,
+                    TaskbarSettings_TaskbarSettings_Hook, true});
     list.push_back({{LR"(public: enum winrt::WindowsUdk::UI::Shell::TaskbarLocation __cdecl winrt::WindowsUdk::UI::Shell::implementation::TaskbarSettings::Location(void))"},
                     &TaskbarSettings_Location_Original, TaskbarSettings_Location_Hook,
                     true});
+}
+
+// Each monitor's choice from the file.
+void ReadEdges() {
+    std::unordered_map<std::wstring, MonitorEdge> edges;
+    bool forced = false;
+    if (prefs::Dir()) {
+        for (auto const& entry : prefs::Records(prefs::Read(), kEdgesField)) {
+            if (entry.Value().ValueType() != wdj::JsonValueType::Object) {
+                continue;
+            }
+            MonitorEdge choice =
+                FromRecord(prefs::Number(entry.Value().GetObject(), L"edge", 0));
+            edges[std::wstring(entry.Key())] = choice;
+            forced |= EffectiveEdge(choice, settings::Edge::kWindows) >= 0;
+        }
+    }
+    std::lock_guard lock(g_lock);
+    g_edges.swap(edges);
+    g_anyForced = forced;
 }
 
 // After taskbar.dll is hooked, in Wh_ModInit: whether this build has the
@@ -27059,11 +27489,17 @@ void TaskbarDllHooked() {
     }
     g_native = native && TrayUI__GetSaveStateAndInitRects_Original &&
                TaskbarSettings_Location_Original;
-    Wh_Log(L"Taskbar location: native %d (flag %d), primary %d, secondary %d, content %d",
+    g_perMonitor = g_native && CSecondaryTray__LoadSettings_Original &&
+                   CSecondaryTray__CreateSecondaryTray_Original &&
+                   TaskbarSettings_TaskbarSettings_Original;
+    Wh_Log(L"Taskbar location: native %d (flag %d), primary %d, secondary %d, content %d, "
+           L"per monitor %d (secondary made %d, content made %d)",
            native, g_feature && g_featureIsEnabled,
            TrayUI__GetSaveStateAndInitRects_Original != nullptr,
            CSecondaryTray__LoadSettings_Original != nullptr,
-           TaskbarSettings_Location_Original != nullptr);
+           TaskbarSettings_Location_Original != nullptr, g_perMonitor,
+           CSecondaryTray__CreateSecondaryTray_Original != nullptr,
+           TaskbarSettings_TaskbarSettings_Original != nullptr);
     if (!g_native) {
         return;
     }
@@ -27073,35 +27509,127 @@ void TaskbarDllHooked() {
         !WindhawkUtils::SetFunctionHook(regGetValue, RegGetValueW_Hook,
                                         &RegGetValueW_Original)) {
         Wh_Log(L"RegGetValueW not hooked");
-        g_native = false;
+        g_native = g_perMonitor = false;
         return;
     }
-    core::g_forcedEdge = ForcedEdge;
+    core::g_forcedEdge = PrimaryEdge;
+    if (g_perMonitor) {
+        core::Guard(L"Taskbar edges", ReadEdges);
+    } else {
+        Wh_Log(L"No taskbar edges per monitor: every taskbar takes the common one");
+    }
 }
 
-// Moves the taskbars to the set edge, or back to Windows' one once unloading.
+// Moves the taskbars to their edges, or back to Windows' once unloading. The
+// primary moves with the change the Settings app sends, which has its content
+// read the location again too; the tray setting change, sent to the primary,
+// has the secondaries read theirs again. ShellHost finds the primary's edge on
+// its window.
 void Apply() {
     if (!g_native) {
         return;
     }
-    int edge = ForcedEdge();
-    if (edge < 0) {
-        if (g_told.exchange(-1) < 0) {
-            return;
+    HWND primary = core::PrimaryTaskbar();
+    if (!primary) {
+        return;
+    }
+    bool active = Active();
+    int primaryEdge = PrimaryEdge();
+    std::vector<std::pair<std::wstring, int>> secondaries;
+    for (HWND hwnd : core::Taskbars()) {
+        if (core::IsSecondary(hwnd)) {
+            HMONITOR monitor = core::MonitorOf(hwnd);
+            secondaries.emplace_back(IdOf(monitor), EdgeOn(monitor));
         }
-        edge = StoredEdge();
-    } else if (g_told.exchange(edge) == edge) {
+    }
+    bool move, reread = false;
+    {
+        std::lock_guard lock(g_lock);
+        move = std::exchange(g_toldPrimary, primaryEdge) != primaryEdge;
+        std::unordered_map<std::wstring, int> told;
+        for (auto const& [id, edge] : secondaries) {
+            auto it = g_told.find(id);
+            reread |= (it != g_told.end() ? it->second : -1) != edge;
+            told[id] = edge;
+        }
+        // A secondary that went with its monitor has nothing to undo.
+        g_told.swap(told);
+    }
+    if (active) {
+        SetProp(primary, core::kEdgeProp, (HANDLE)(INT_PTR)(primaryEdge + 2));
+    } else {
+        RemoveProp(primary, core::kEdgeProp);
+    }
+    if (!move && !reread) {
         return;
     }
-    HWND taskbar = core::PrimaryTaskbar();
-    if (!taskbar) {
+    // Both on any change, so every taskbar and its content read theirs again
+    // (the primary told the edge it has, if that stays).
+    int edge = primaryEdge >= 0 ? primaryEdge : StoredEdge();
+    Wh_Log(L"Taskbar edges: primary at %d (changed %d), secondaries changed %d", edge, move,
+           reread);
+    SendMessage(primary, core::kSettingChangeMsg, core::kLocationSetting, edge);
+    SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+}
+
+// Taskbar thread: the file changed elsewhere (Bloom set a monitor's edge).
+void OnPrefsChanged() {
+    ReadEdges();
+    Apply();
+}
+
+void OnPrefsLost() {
+    g_listening = false;
+}
+
+// Taskbar thread, as taskbars come and settings change: every monitor with a
+// taskbar has its record in the file for Bloom to list (edge 0, the common one);
+// the records there and the rest of the file stay as they are. Listens for the
+// file's changes from the first call on, and again after the folder went.
+void NoteTaskbars() {
+    if (!g_perMonitor || core::g_unloading || !prefs::Dir()) {
         return;
     }
-    Wh_Log(L"Taskbar to edge %d", edge);
-    // The primary moves with the change the Settings app sends, which has its
-    // content read the location again too; the secondaries read theirs again.
-    SendMessage(taskbar, core::kSettingChangeMsg, core::kLocationSetting, edge);
-    SendMessage(taskbar, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+    if (!g_listening) {
+        g_listening = true;
+        prefs::Watch(OnPrefsChanged, OnPrefsLost);
+        ReadEdges();
+        Apply();
+    }
+    {
+        std::lock_guard lock(g_lock);
+        g_known.clear();  // monitors may have changed
+    }
+    bool ok = false;
+    auto root = prefs::Read(&ok);
+    if (!ok) {
+        Wh_Log(L"prefs.json not read: no taskbar edge records added");
+        return;
+    }
+    wdj::JsonObject edges = prefs::Records(root, kEdgesField);
+    bool added = false;
+    for (HWND hwnd : core::Taskbars()) {
+        std::wstring id, name;
+        if (!prefs::MonitorKey(core::MonitorOf(hwnd), id, name) || edges.HasKey(id)) {
+            continue;
+        }
+        wdj::JsonObject record;
+        record.Insert(L"name", wdj::JsonValue::CreateStringValue(name));
+        record.Insert(L"edge", wdj::JsonValue::CreateNumberValue(0));
+        edges.Insert(id, record);
+        added = true;
+    }
+    if (added) {
+        root.Insert(kEdgesField, edges);
+        prefs::Write(root);
+    }
+}
+
+// Taskbar thread, at unload.
+void Stop() {
+    if (std::exchange(g_listening, false)) {
+        prefs::Unwatch(OnPrefsChanged);
+    }
 }
 
 }  // namespace position
@@ -27144,7 +27672,10 @@ Features Wanted() {
             .start = settings::g.start.mode != settings::StartMode::kWindows,
             // The stock tray is at the right end already.
             .panels = settings::g.pill.enabled && settings::g.tray.panelsNearTray,
-            .position = settings::g.pill.edge != settings::Edge::kWindows};
+            // A monitor's own edge changes in prefs.json, with no settings change
+            // to reload on: with that file's folder the hooks stay in, doing
+            // nothing while no edge is set.
+            .position = settings::g.pill.edge != settings::Edge::kWindows || prefs::Dir()};
 }
 
 // ---- shared hooks -------------------------------------------------------------
@@ -28419,6 +28950,9 @@ void ApplyAll() {
             panels::Apply(hwnd);
         }
     }
+    if (hooks::g_features.position) {
+        position::NoteTaskbars();
+    }
 }
 
 // Taskbar thread, after a taskbar's frame loaded: the taskbars that have no
@@ -28567,6 +29101,9 @@ void Wh_ModBeforeUninit() {
         entry::RestoreAll();
         hooks::g_iconLoads.clear();
         hooks::g_frameLoads.clear();
+        if (hooks::g_features.position) {
+            position::Stop();
+        }
     });
     if (hooks::g_features.position) {
         position::Apply();  // back to Windows' edge
@@ -28585,6 +29122,7 @@ void Wh_ModUninit() {
     pill::WaitForGlass();
     island::WaitForDropTargets();
     autohide::UnhookLeftover();
+    prefs::Close();  // a watch the taskbar thread couldn't stop
 }
 
 namespace changes {

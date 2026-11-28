@@ -15,7 +15,7 @@
 | `ADDON_WINDHAWK_MODS` | 거절 검사에 쓰는 Windhawk 모드 id(3절 코드 12) |
 | `ADDON_SYMBOL_MODULES` | 호스트가 `symbols.txt`를 찾는 모듈. `:core`는 Client.Core 패키지 폴더(올라온 사본 우선), 나머지는 System32. 기호를 훅하지 않는 애드온은 빈 값(`""`)으로 둔다. 그러면 호스트는 기호 준비(모듈 확인, PDB 찾기와 받기)를 통째로 건너뛰고 바로 넣는다. `symbols.txt`에 이름이 하나도 없을 때도 같다 |
 | `ADDON_TARGETS` | 런타임을 넣는 프로세스(`kTargets`). `explorer.exe`는 늘 있어야 하고, `ShellHost.exe`를 적은 애드온만 ShellHost에도 넣는다(4절 "ShellHost"). 아는 이름은 이 둘뿐이며 다른 이름은 빌드가 거절한다. 빼면 `explorer.exe`만. PillTaskbar만 둘 다 적는다 |
-| `ADDON_SCHEMA`, `ADDON_VALUES_DEFAULTS` | `settings.schema.json`을 싣는지, 모드 YAML 기본값을 덮는 JSON |
+| `ADDON_SCHEMA`, `ADDON_FILE_SETTINGS`, `ADDON_VALUES_DEFAULTS` | `settings.schema.json`을 싣는지, 거기에 파일에 두는 항목(6절)도 넣는지, 모드 YAML 기본값을 덮는 JSON |
 | `ADDON_EASY` | 스키마에 합칠 `settings.easy.json`(6절, conf 기준 경로, 비우면 없음) |
 | `ADDON_THIRD_PARTY`, `ADDON_NAME_KO/EN`, `ADDON_ABOUT_KO/EN`, `ADDON_LICENSE`, `ADDON_SOURCE`, `ADDON_MIN_BLOOM`, `ADDON_NEEDS` | 묶음의 고지 파일과 addon.json |
 
@@ -318,12 +318,16 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 ### `prefs.json`
 
 ```json
-{ "islandPositions": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "x": 500 } } }
+{ "islandPositions": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "x": 500 } },
+  "taskbarEdges": { "DEL41D9_5_1a2b3c_0_UID4352": { "name": "DEL41D9 2560×1440", "edge": 0 } } }
 ```
 
 - `islandPositions`: 모니터마다 숨김 아일랜드가 가장자리의 어디에 있는지. `x`는 0(왼쪽 끝)~1000(오른쪽 끝), 500이 가운데. 키는 모니터 장치 경로의 하드웨어·인스턴스 부분(영숫자와 `-`, 나머지는 `_`), `name`은 Bloom이 보이는 이름.
 - 모드는 아일랜드를 처음 놓는 모니터를 가운데(500)로 더하고, Ctrl을 누른 채 끌어 놓거나 Ctrl+우클릭으로 가운데로 돌릴 때 그 모니터의 항목을 쓴다. 다른 필드와 다른 모니터 항목은 그대로 둔다.
-- 모드는 데이터 폴더의 변경 알림으로 이 파일이 바뀐 것을 보고(자기 쓰기 뒤의 마지막 쓴 시각과 다를 때만) 다시 읽는다.
+- `taskbarEdges`: 모니터마다 작업표시줄을 둘 가장자리. `edge`는 0(공통 설정 `pill.edge`를 따름), 1(위), 2(아래). 3(왼쪽)과 4(오른쪽)는 나중을 위해 비워 두었고 지금은 0으로 읽는다. 공통 설정이 `windows`이고 `edge`가 0이면 그 모니터는 Windows 설정 위치 그대로다. 키와 `name`은 `islandPositions`와 같다.
+- 모드는 작업표시줄이 있는 모니터마다 항목이 없으면 `edge` 0으로 더한다(Windows 자체 위치 기능이 있는 빌드에서만). 있는 값과 다른 필드, 다른 항목은 그대로 둔다. Bloom은 있는 항목의 `edge`만 바꾸고 항목을 더하거나 지우지 않는다.
+- 모드는 바뀐 `taskbarEdges`를 다시 읽어 곧바로 작업표시줄들을 옮긴다(주 작업표시줄은 설정 앱의 위치 변경 메시지, 보조는 `TraySettings` 설정 변경). 빠른 설정(ShellHost)은 주 작업표시줄의 가장자리를 읽고, 다른 가장자리의 모니터에서는 그 모니터 작업표시줄 쪽으로 옮겨진다. 탐색기는 그 값을 주 작업표시줄 창 속성 `PillTaskbar.Edge`(가장자리 `ABE_*` + 2, Windows 설정 그대로면 1)로 알린다.
+- 모드는 데이터 폴더의 변경 알림으로 이 파일이 바뀐 것을 보고(자기 쓰기 뒤의 마지막 쓴 시각과 다를 때만) 두 필드를 다시 읽는다. 쓰는 쪽은 늘 파일 전체를 읽어 자기 필드만 바꿔 통째로 쓴다.
 
 ## 6. 설정 스키마 `settings.schema.json`
 
@@ -343,7 +347,7 @@ Bloom이 `values.json`을 바꾸면 런타임이 데이터 폴더를 `ReadDirect
 - 그룹에도 YAML에 `$description`이 있으면 `about`(`{"ko","en"}`)이 붙는다(지금 tray, size, start).
 - `key`는 `values.json`과 같은 `그룹.키` 전체 이름. `type`은 `bool`, `int`, `choice`, `text`. `about`은 YAML에 `$description`이 있을 때만.
 - 글은 `{"ko","en"}`(일본어·중국어는 없으면 Bloom이 영어로 보인다). `en`이 빠지면 스크립트가 실패한다.
-- 모드 소스의 `==BloomFileSettings==` 블록에 적은 항목(`"file"`, `"field"`가 있는 것, 지금 `island.positions` records)은 `ADDON_FILE_SETTINGS=1`로 빌드할 때(`make-schema.py --with-files`)만 그 그룹 끝에 붙는다. Bloom이 `values.json`이 아니라 그 파일의 필드를 읽고 쓴다. 그 종류를 모르는 Bloom은 스키마 전체를 버리므로, 읽는 Bloom이 나온 뒤에 켠다.
+- 모드 소스의 `==BloomFileSettings==` 블록에 적은 항목(`"file"`, `"field"`가 있는 것, 지금 `pill.monitorEdges`와 `island.positions` records)은 `ADDON_FILE_SETTINGS=1`로 빌드할 때(`make-schema.py --with-files`)만 그 그룹 끝에 붙는다. Bloom이 `values.json`이 아니라 그 파일의 필드를 읽고 쓴다. 그 종류를 모르는 Bloom은 스키마 전체를 버리므로, 그 종류를 읽는 Bloom을 `ADDON_MIN_BLOOM`으로 요구한다. PillTaskbar는 `addon.conf`에서 켜고 Bloom 1.0.0(records를 아는 첫 판)부터 받는다.
 
 ### Bloom 화면의 쉬운 말과 그림 `easy`
 
