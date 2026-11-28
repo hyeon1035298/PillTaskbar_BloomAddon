@@ -30088,7 +30088,11 @@ struct Known {
 // The edges the taskbars were told, -1 for Windows' own: unloading tells them
 // Windows' again. The secondaries' by monitor id. Their content is answered these
 // (ContentEdge), not the edges set, which can change before the taskbars move.
+// The primary's is set as the primary handles the change (TellPrimary).
 int g_toldPrimary = -1;
+// Each time TellPrimary set it: a change sent that it didn't see (no subclass on
+// the primary) is recorded by its sender once handled (MovePrimary).
+uint64_t g_primaryTellings;
 [[clang::no_destroy]] std::unordered_map<std::wstring, int> g_told;
 // Each secondary taskbar window → the edge (ABE_*) it was made for, whose
 // orientation its content keeps: Windows' own for one made before the mod loaded,
@@ -30168,6 +30172,7 @@ int TellPrimary() {
     int edge = PrimaryEdge();
     std::lock_guard lock(g_lock);
     g_toldPrimary = edge;
+    g_primaryTellings++;
     return edge;
 }
 
@@ -30370,7 +30375,10 @@ void* WINAPI TaskbarSettings_TaskbarSettings_Hook(void* pThis,
 // there (a layout cycle, which explorer doesn't survive). A secondary's content
 // keeps the orientation it was made with until it is made again: told an edge of
 // the other orientation, it is answered the edge it was made for. `taskbar` null:
-// content made before the mod loaded, which is answered the primary's.
+// content made before the mod loaded, which is answered the primary's (the
+// primary doesn't turn across a secondary with such content: HoldsPrimary). A
+// secondary whose read wasn't keyed by its monitor (that monitor not known as it
+// read) is answered the edge its window stands at.
 int ContentEdge(HWND taskbar) {
     if (!taskbar || !core::IsSecondary(taskbar)) {
         std::lock_guard lock(g_lock);
@@ -30378,17 +30386,24 @@ int ContentEdge(HWND taskbar) {
     }
     std::wstring id = IdOf(core::MonitorOf(taskbar));
     int told = -1;
+    bool seen = false;
     std::optional<int> made;
     {
         std::lock_guard lock(g_lock);
         if (auto it = g_told.find(id); it != g_told.end()) {
             told = it->second;
+            seen = true;
         }
         if (auto it = g_madeFor.find(taskbar); it != g_madeFor.end()) {
             made = it->second;
         }
     }
-    if (made && core::IsSideEdge(*made) != core::IsSideEdge(Placed(told, StoredEdge()))) {
+    int stored = StoredEdge();
+    if (!seen) {
+        int at = core::EdgeOf(taskbar);
+        told = at == stored ? -1 : at;
+    }
+    if (made && core::IsSideEdge(*made) != core::IsSideEdge(Placed(told, stored))) {
         return *made;
     }
     return told;
@@ -30624,6 +30639,63 @@ bool AnySecondary() {
     return std::ranges::any_of(core::Taskbars(), core::IsSecondary);
 }
 
+// Whether the primary, going to `edge`, waits for the remake: a secondary whose
+// content the constructor hook didn't see stands at the other orientation. That
+// content is answered the primary's edge (ContentEdge), which can't be right for
+// both windows across orientations, so the remake takes it away first.
+bool HoldsPrimary(int edge) {
+    for (HWND hwnd : core::Taskbars()) {
+        if (!core::IsSecondary(hwnd) ||
+            core::IsSideEdge(core::EdgeOf(hwnd)) == core::IsSideEdge(edge)) {
+            continue;
+        }
+        std::lock_guard lock(g_lock);
+        if (std::ranges::none_of(g_settingsTaskbars,
+                                 [&](auto const& each) { return each.second == hwnd; })) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Tells the primary the location change for `edge` (-1 Windows' own). Its content
+// is answered that edge from when the primary handles it (TellPrimary); where the
+// subclass didn't see it, from when it was handled.
+void MovePrimary(HWND primary, int edge, int stored) {
+    uint64_t tellings;
+    {
+        std::lock_guard lock(g_lock);
+        tellings = g_primaryTellings;
+    }
+    SendMessage(primary, core::kSettingChangeMsg, core::kLocationSetting, Placed(edge, stored));
+    std::lock_guard lock(g_lock);
+    if (g_primaryTellings == tellings) {
+        g_toldPrimary = edge;
+    }
+}
+
+// Apply left the primary's move to the remake it posted (HoldsPrimary).
+std::atomic<bool> g_primaryHeld;
+
+// Taskbar thread: the primary's move left to the remake, once the secondaries are
+// gone or none is made. Not where the primary was told its edge meanwhile, nor
+// while unloading, where the unload's Apply tells it Windows'.
+void TellHeldPrimary(HWND primary) {
+    if (!g_primaryHeld.exchange(false) || core::g_unloading) {
+        return;
+    }
+    int edge = PrimaryEdge();
+    {
+        std::lock_guard lock(g_lock);
+        if (g_toldPrimary == edge) {
+            return;
+        }
+    }
+    int stored = StoredEdge();
+    Wh_Log(L"Taskbar edges: primary at %d after the secondaries", Placed(edge, stored));
+    MovePrimary(primary, edge, stored);
+}
+
 // Taskbar thread: the secondaries come back, gone or not.
 void EndRemake(bool timedOut) {
     if (!g_hidingSecondaries.exchange(false)) {
@@ -30637,6 +30709,7 @@ void EndRemake(bool timedOut) {
     }
     Wh_Log(L"Secondary taskbars %s: made again", timedOut ? L"not gone in time" : L"gone");
     if (HWND primary = core::PrimaryTaskbar()) {
+        TellHeldPrimary(primary);
         SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
     }
 }
@@ -30665,9 +30738,10 @@ void CALLBACK OnRemakeTimeout(HWND, UINT, UINT_PTR, DWORD) {
     core::Guard(L"Taskbar edges", [] { EndRemake(true); });
 }
 
-// Taskbar thread, posted from Apply. Where no remake starts, the secondaries read
-// their edges now if Apply left that to it; a remake started or under way has
-// them read again as they come back (EndRemake), and the Apply at unload sends it.
+// Taskbar thread, posted from Apply. Where no remake starts, the primary moves and
+// the secondaries read their edges now if Apply left that to it; a remake started
+// or under way does both as they come back (EndRemake), and the Apply at unload
+// sends them.
 void MakeSecondariesAgain() {
     bool reread = g_rereadLeft.exchange(false);
     if (core::g_unloading || g_hidingSecondaries) {
@@ -30678,6 +30752,7 @@ void MakeSecondariesAgain() {
         return;
     }
     auto readAgain = [&] {
+        TellHeldPrimary(primary);
         if (reread) {
             SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
         }
@@ -30749,7 +30824,9 @@ void RemakeAtUnload() {
 // it; the tray setting change, sent to the primary, has the secondaries read
 // theirs again. ShellHost finds the primary's edge on its window. Secondaries
 // whose content can't follow are made again, later on the taskbar thread, and
-// read theirs as they come back instead.
+// read theirs as they come back instead; where one of them has content from
+// before the mod loaded across the primary's new orientation, the primary moves
+// then too, once they are gone.
 void Apply() {
     if (!g_native) {
         return;
@@ -30776,7 +30853,9 @@ void Apply() {
     bool move, reread = false;
     {
         std::lock_guard lock(g_lock);
-        move = std::exchange(g_toldPrimary, primaryEdge) != primaryEdge;
+        // Only read: the primary's content is answered its new edge from when the
+        // primary handles the change below (TellPrimary), not before it moves.
+        move = g_toldPrimary != primaryEdge;
         std::unordered_map<std::wstring, int> told;
         for (auto const& each : secondaries) {
             auto it = g_told.find(each.id);
@@ -30800,10 +30879,24 @@ void Apply() {
     // its content as it was, and the features would put themselves on it anew just
     // before it goes. The remake sends that read where it makes none.
     bool remake = !core::g_unloading && NeedsRemake();
-    if (remake && (move || reread)) {
-        g_rereadLeft = true;
-    }
-    if (remake && !core::Post(MakeSecondariesAgain)) {
+    // A secondary with content from before the mod loaded, at the other orientation
+    // than the primary's new edge, goes first: the primary moves once it is gone.
+    bool hold = remake && move && HoldsPrimary(Placed(primaryEdge, stored));
+    // Posted at once where the primary is told nothing here or waits for it; else
+    // once the primary was told, so the remake can't run ahead of its move.
+    if (remake && (hold || (!move && !reread))) {
+        if (hold) {
+            g_rereadLeft = true;
+            g_primaryHeld = true;
+        }
+        if (core::Post(MakeSecondariesAgain)) {
+            if (hold) {
+                Wh_Log(L"Taskbar edges: primary held for the secondaries, then at %d",
+                       Placed(primaryEdge, stored));
+            }
+            return;
+        }
+        g_primaryHeld = false;
         remake = false;
     }
     if (!remake) {
@@ -30818,7 +30911,14 @@ void Apply() {
     int edge = Placed(primaryEdge, stored);
     Wh_Log(L"Taskbar edges: primary at %d (changed %d), secondaries changed %d", edge, move,
            reread);
-    SendMessage(primary, core::kSettingChangeMsg, core::kLocationSetting, edge);
+    MovePrimary(primary, primaryEdge, stored);
+    if (remake) {
+        g_rereadLeft = true;
+        if (!core::Post(MakeSecondariesAgain)) {
+            g_rereadLeft = false;  // read below
+            remake = false;
+        }
+    }
     // Unloading, secondaries RemakeAtUnload makes again read Windows' edges as they
     // come back, and its tray setting change has the others read theirs: read here
     // first, they would move once more with their content as it was.
