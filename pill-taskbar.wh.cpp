@@ -4193,9 +4193,15 @@ void ControlCenterIcon(FrameworkElement const& iconView, int waits) {
     } else {
         content = core::ChildOfClass(grid, L"SystemTray.TextIconContent");
         auto glyph = GlyphOf(content);
-        if (!glyph && waits < kControlCenterWaits) {
+        if (!glyph && waits != kControlCenterWaits && waits < 2 * kControlCenterWaits) {
             WaitForControlCenterIcon(iconView, waits + 1);
             return;
+        }
+        if (!glyph && waits == kControlCenterWaits) {
+            // Still no glyph: the view counts as shown below, which shows a
+            // collapsed button so the view gets laid out. It's waited for once
+            // more, so it's still decided when its glyph comes then.
+            WaitForControlCenterIcon(iconView, waits + 1);
         }
         std::wstring text = glyph ? std::wstring(glyph.Text()) : L"";
         if (glyph) {
