@@ -167,7 +167,7 @@ PillTaskbarHost.exe --resolve-symbols --bloom-local <폴더> [--no-download] [--
 ```
 
 - `--serve`: 평소 실행. Bloom이 `ArgumentList`로 띄운다.
-- 한 번만 실행: `Local\Bloom.Addon.pill-taskbar.Host` 뮤텍스. 이미 떠 있으면 두 번째 실행은 자기 명령줄을 `WM_COPYDATA`(`dwData = 0x50544831`)로 첫 호스트의 숨은 창(클래스 `Bloom.Addon.pill-taskbar.Host`)에 넘기고 0으로 끝난다. 다만 `--serve`인데 `host-state.json`의 `version`이 자기와 다르면, 먼저 `--stop`을 넘기고 뮤텍스가 풀리기를 15초까지 기다린 뒤 자기가 첫 호스트가 된다(애드온 업데이트). 끝나기로 한 호스트(Bloom이 돌아오지 않아 멈추는 중 등)는 넘겨받은 `--serve`를 거절하고, 거절당한 두 번째 실행은 같은 식으로 뮤텍스를 15초까지 기다려 자기가 첫 호스트가 된다. 그 안에 풀리지 않으면 오류 코드로 끝나 Bloom이 다시 띄운다.
+- 한 번만 실행: `Local\Bloom.Addon.pill-taskbar.Host` 뮤텍스. 이미 떠 있으면 두 번째 실행은 자기 명령줄을 `WM_COPYDATA`(`dwData = 0x50544831`)로 첫 호스트의 숨은 창(클래스 `Bloom.Addon.pill-taskbar.Host`)에 넘기고 0으로 끝난다. 다만 `--serve`인데 `host-state.json`의 `version`이 자기와 다르면, 먼저 `--stop`을 넘기고 뮤텍스가 풀리기를 15초까지 기다린 뒤 자기가 첫 호스트가 된다(애드온 업데이트). 끝나기로 한 호스트(Bloom이 돌아오지 않아 멈추는 중 등)는 넘겨받은 `--serve`를 거절하고, 거절당한 두 번째 실행은 같은 식으로 뮤텍스를 15초까지 기다려 자기가 첫 호스트가 된다. 그 안에 풀리지 않으면 오류 코드로 끝나 Bloom이 다시 띄운다. 기다리는 동안 `Local\Bloom.Addon.pill-taskbar.Stop`이 켜지면 옛 호스트가 끝나기를 같은 시한까지 기다린 뒤 일을 맡지 않고 0으로 끝난다.
 - `--stop`: 런타임을 내리고(아래 4절) 끝난다. 이벤트 `Local\Bloom.Addon.pill-taskbar.Stop`을 켜는 것과 같다. 떠 있는 호스트가 없는데 런타임이 남아 있으면(호스트가 죽음) 직접 내린다. ShellHost 안에 남은 것도 같이 요청하고(`ADDON_TARGETS`에 `ShellHost.exe`가 없는 애드온도: 예전 버전이 남긴 것), 둘을 합쳐 10초까지 기다린다.
 - `--safe-mode`: `safeMode`를 켜고 `--stop`처럼 내린다. 떠 있는 호스트가 없으면 파일만 고친다.
 - `--reset-safe-mode`: Bloom의 [다시 켜기]. 시작할 때 `safeMode`와 `crashes`를 비운다.
