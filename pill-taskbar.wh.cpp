@@ -30494,7 +30494,9 @@ int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
 // window went, and is still told a change of the location. Such a frame's location
 // is held instead, and given to it after its template, inside the same template
 // call: the template sets the frame up for the location it had, and no layout
-// comes between. A frame with a template is told as before.
+// comes between. A frame with a template is told as before. Once the hooks are
+// gone nothing holds a location, so the unload first waits for the frames
+// (frames at unload, below).
 
 using TaskbarFrame_TaskbarLocation_t = void(WINAPI*)(void* impl, int location);
 TaskbarFrame_TaskbarLocation_t TaskbarFrame_TaskbarLocation_Address;  // resolved only, hooked by hand
@@ -30502,23 +30504,71 @@ TaskbarFrame_TaskbarLocation_t TaskbarFrame_TaskbarLocation_Original;
 LONG g_recognizerOffset;  // set before the hook goes in
 
 // TaskbarLocation's GestureRecognizer member, from the call it makes through it
-// unchecked (only OnApplyTemplate sets it):
-// 8A D0        mov dl,al
-// 48 8B 4F xx  mov rcx,[rdi+xx]   (or 48 8B 8F imm32)
-// E8 ...       call
-LONG FindRecognizerOffset() {
+// unchecked (only OnApplyTemplate sets it). That call counts only right after the
+// frame compared the location it has with the new one, kept the new one and asked
+// whether it is vertical, whose answer the call is given. The same bytes elsewhere
+// (another build) could be another call, through a member that may be null on a
+// frame with its template too, and every change would be held for good:
+// 48 8D B7 imm32  lea rsi,[rdi+imm32]  the location the frame has
+// 44 39 36        cmp [rsi],r14d       the same as the new one: nothing to do
+// ...
+// 44 89 36        mov [rsi],r14d       the new one kept
+// 41 8B CE        mov ecx,r14d
+// E8 rel32        call IsTaskbarVertical
+// ...             at most 0x20 bytes
+// 8A D0           mov dl,al            its answer
+// 48 8B 4F xx     mov rcx,[rdi+xx]     (or 48 8B 8F imm32)
+// E8 rel32        call
+// 0 where any of these isn't there, and `why` says which.
+LONG FindRecognizerOffset(PCWSTR* why) {
+    constexpr size_t kLength = 0x300;  // about the function's own code
+    constexpr size_t kNone = SIZE_MAX;
     auto start = (const BYTE*)TaskbarFrame_TaskbarLocation_Address;
-    for (auto p = start; p && p != start + 0x300; p++) {
-        if (p[0] == 0x8A && p[1] == 0xD0 && p[2] == 0x48 && p[3] == 0x8B) {
-            if (p[4] == 0x4F && p[6] == 0xE8 && p[5] > 0 && p[5] < 0x80) {
-                return p[5];
+    // Whether `pattern` (-1 for any byte) is at start + at.
+    auto matches = [&](size_t at, std::initializer_list<int> pattern) {
+        size_t i = at;
+        for (int b : pattern) {
+            if (b >= 0 && start[i] != b) {
+                return false;
             }
-            if (p[4] == 0x8F && p[9] == 0xE8) {
-                LONG offset = *(LONG*)(p + 5);
-                return offset > 0 && offset <= 0xFFFF ? offset : 0;
+            i++;
+        }
+        return true;
+    };
+    auto find = [&](size_t from, std::initializer_list<int> pattern) {
+        for (size_t at = from; at < kLength; at++) {
+            if (matches(at, pattern)) {
+                return at;
+            }
+        }
+        return kNone;
+    };
+    size_t compared = find(0, {0x48, 0x8D, 0xB7, -1, -1, -1, -1, 0x44, 0x39, 0x36});
+    if (compared == kNone) {
+        *why = L"no compare of the location";
+        return 0;
+    }
+    size_t kept = find(compared + 10, {0x44, 0x89, 0x36, 0x41, 0x8B, 0xCE, 0xE8});
+    if (kept == kNone) {
+        *why = L"no store of the location and orientation call";
+        return 0;
+    }
+    size_t asked = kept + 11;  // past that call
+    for (size_t at = asked; at <= asked + 0x20; at++) {
+        if (matches(at, {0x8A, 0xD0, 0x48, 0x8B, 0x4F, -1, 0xE8})) {
+            BYTE offset = start[at + 5];
+            if (offset > 0 && offset < 0x80) {
+                return offset;
+            }
+        }
+        if (matches(at, {0x8A, 0xD0, 0x48, 0x8B, 0x8F, -1, -1, -1, -1, 0xE8})) {
+            LONG offset = *(const LONG*)(start + at + 5);
+            if (offset > 0 && offset <= 0xFFFF) {
+                return offset;
             }
         }
     }
+    *why = L"no recognizer call after the orientation call";
     return 0;
 }
 
@@ -30609,6 +30659,10 @@ void OnFrameTemplate(void* pThis) {
     });
 }
 
+// The guard's hook was queued on this thread and isn't known to be in yet: the
+// hook operations applied next on it put it in (FrameLocationApplied).
+thread_local bool t_guardQueued;
+
 // After Taskbar.View.dll's symbols resolved. Without the setter's symbol or the
 // member it calls through, the frames are told their location as they were.
 void FrameLocationHooked() {
@@ -30616,9 +30670,10 @@ void FrameLocationHooked() {
         Wh_Log(L"Taskbar frame location not guarded (%s)", L"no symbol");
         return;
     }
-    g_recognizerOffset = FindRecognizerOffset();
+    PCWSTR why = L"";
+    g_recognizerOffset = FindRecognizerOffset(&why);
     if (!g_recognizerOffset) {
-        Wh_Log(L"Taskbar frame location not guarded (%s)", L"recognizer not found");
+        Wh_Log(L"Taskbar frame location not guarded (%s)", why);
         return;
     }
     if (!WindhawkUtils::SetFunctionHook(TaskbarFrame_TaskbarLocation_Address,
@@ -30627,7 +30682,22 @@ void FrameLocationHooked() {
         Wh_Log(L"Taskbar frame location not guarded (%s)", L"hook not set");
         return;
     }
-    Wh_Log(L"Taskbar frame location guarded: recognizer at +%X", g_recognizerOffset);
+    t_guardQueued = true;
+    Wh_Log(L"Taskbar frame location guard queued: recognizer at +%X", g_recognizerOffset);
+}
+
+// Once the hook operations were applied on this thread (`applied`: they went in),
+// and in Wh_ModAfterInit, which comes only once those Wh_ModInit queued went in:
+// the guard queued on it before is in now, or isn't.
+void FrameLocationApplied(bool applied) {
+    if (!std::exchange(t_guardQueued, false)) {
+        return;
+    }
+    if (applied) {
+        Wh_Log(L"Taskbar frame location guarded: recognizer at +%X", g_recognizerOffset);
+    } else {
+        Wh_Log(L"Taskbar frame location not guarded (%s)", L"hooks not applied");
+    }
 }
 
 // wil's state of the native location feature, and its check.
@@ -31020,6 +31090,166 @@ void RemakeAtUnload() {
     }
     g_hidingSecondaries = false;
     SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+}
+
+// ---- frames at unload ----------------------------------------------------------
+// Once the hooks are gone, a frame without its template ends explorer as it is
+// told a new location, and the unload tells every taskbar's content Windows' edge,
+// which reaches the frames a while after it is sent. So before that the unload
+// waits until the frame of each taskbar window has its template: such a frame
+// turns as before, with the hooks or without, and the remake at unload then takes
+// no frame away without one (it would stay subscribed to its configuration after
+// its window went). The template is what the recognizer comes from; a frame whose
+// template failed gets none by waiting, and its held location was dropped then.
+// After the taskbars went back, the frames of the secondaries made again for
+// Windows' edge get their templates too, though they were made for that edge and
+// their content answers it, so nothing changes for them. And a frame left without
+// a window and without a template (taken away by a remake before it templated) is
+// waited for until it was told Windows' edge: then it has the location its
+// configuration has, and nothing tells it another until the taskbars move again.
+// Both waits run off the taskbar thread, which lays the frames out meanwhile, and
+// share kFrameWaitMs, so a frame that never templates (its window hidden) doesn't
+// hold the unload longer.
+
+constexpr ULONGLONG kFrameWaitMs = 2000;
+
+// Frames seen without their template by the last check before the taskbars went
+// back to Windows' edge: the remake at unload may take their windows away. Taskbar
+// thread.
+[[clang::no_destroy]] std::vector<winrt::weak_ref<FrameworkElement>> g_lateFrames;
+
+// Taskbar thread: a taskbar window's TaskbarFrame; null where its tree has none yet.
+FrameworkElement FrameOf(HWND hwnd) {
+    auto isFrame = [](FrameworkElement const& e) {
+        return core::IsClass(e, L"Taskbar.TaskbarFrame");
+    };
+    auto element = core::TaskbarElement(hwnd);
+    if (!element || isFrame(element)) {
+        return element;
+    }
+    auto root = element.XamlRoot();
+    auto content = root ? root.Content().try_as<FrameworkElement>() : element;
+    if (content && isFrame(content)) {
+        return content;
+    }
+    return core::FindDescendant(content, isFrame, 8);
+}
+
+// What a location change could still find without a template once the hooks are
+// gone.
+struct FramesLeft {
+    int untemplated;  // taskbar windows whose frame has no template, or no frame yet
+    int unwindowed;   // frames without a window, not told Windows' edge yet
+};
+
+// Taskbar thread, at unload. `back`: the taskbars were told Windows' edge, and the
+// frames without a window count too.
+FramesLeft FramesWaitedFor(bool back) {
+    DropGoneHeld();
+    FramesLeft left{};
+    std::vector<FrameworkElement> framed;
+    std::vector<winrt::weak_ref<FrameworkElement>> late;
+    for (HWND hwnd : core::Taskbars()) {
+        auto frame = FrameOf(hwnd);
+        if (frame) {
+            framed.push_back(frame);
+        }
+        if (!frame || !Media::VisualTreeHelper::GetChildrenCount(frame)) {
+            left.untemplated++;
+            if (frame) {
+                late.push_back(winrt::make_weak(frame));
+            }
+        }
+    }
+    if (framed.empty()) {
+        return {};  // no taskbar's frame can be found here: nothing to wait for
+    }
+    if (!back) {
+        g_lateFrames = std::move(late);
+        return left;
+    }
+    auto windowed = [&](FrameworkElement const& frame) {
+        return std::ranges::any_of(framed,
+                                   [&](FrameworkElement const& each) { return each == frame; });
+    };
+    int windows = StoredEdge();
+    for (auto const& held : g_heldLocations) {
+        auto frame = held.frame.get();
+        if (frame && !windowed(frame) && held.location != windows) {
+            left.unwindowed++;
+        }
+    }
+    // One taken away and not held yet: its change is still to come.
+    for (auto const& each : g_lateFrames) {
+        auto frame = each.get();
+        if (frame && !windowed(frame) &&
+            std::ranges::none_of(g_heldLocations, [&](HeldLocation const& held) {
+                return held.frame.get() == frame;
+            })) {
+            left.unwindowed++;
+        }
+    }
+    return left;
+}
+
+// Off the taskbar thread, at unload while the hooks are in: waits until
+// FramesWaitedFor leaves nothing, at most `budget` ms, checking on the taskbar
+// thread between its own messages. Returns how long it waited.
+ULONGLONG WaitForFrames(bool back, ULONGLONG budget) {
+    HWND primary = core::PrimaryTaskbar();
+    if (!g_native || !primary ||
+        GetWindowThreadProcessId(primary, nullptr) == GetCurrentThreadId()) {
+        return 0;
+    }
+    ULONGLONG start = GetTickCount64(), waited = 0;
+    FramesLeft left{};
+    bool checked, settled;
+    for (bool first = true;; first = false) {
+        checked = false;
+        core::RunOn(primary, [&] {
+            core::Guard(L"Taskbar frames at unload", [&] {
+                left = FramesWaitedFor(back);
+                checked = true;
+            });
+        });
+        settled = checked && !left.untemplated && !left.unwindowed;
+        waited = GetTickCount64() - start;
+        if (first && settled) {
+            return waited;  // nothing to wait for
+        }
+        if (settled || !checked || waited >= budget) {
+            break;
+        }
+        Sleep(20);
+    }
+    Wh_Log(L"Taskbar frames %s Windows' edge: waited %llu ms, ended by %s; %d without a "
+           L"template, %d without a window and not at that edge",
+           back ? L"after" : L"before", waited,
+           settled   ? L"the condition"
+           : checked ? L"the bound"
+                     : L"a failed check",
+           left.untemplated, left.unwindowed);
+    return waited;
+}
+
+// Taskbar thread, at unload, the last thing before the hooks go: a location still
+// held is given by no template after this. A frame that templates later does so
+// for the location it had before; one without a window keeps the one its
+// configuration has.
+void DropHeld() {
+    DropGoneHeld();
+    for (auto const& held : g_heldLocations) {
+        HWND taskbar = nullptr;
+        core::Guard(L"Held frame's taskbar", [&] {
+            if (auto frame = held.frame.get()) {
+                taskbar = core::TaskbarOf(frame.XamlRoot());
+            }
+        });
+        Wh_Log(L"Taskbar frame %p (taskbar %p): location %d dropped at unload", held.impl,
+               taskbar, held.location);
+    }
+    g_heldLocations.clear();
+    g_lateFrames.clear();
 }
 
 // Moves the taskbars to their edges, or back to Windows' once unloading. The
@@ -31581,12 +31811,20 @@ bool HookLoadedModules(HMODULE loaded) {
     return any;
 }
 
+// The hook operations queued on this thread were applied (or not): what was
+// queued to go in with them is known to be in.
+void NoteApplied(bool applied) {
+    if (g_features.position) {
+        position::FrameLocationApplied(applied);
+    }
+}
+
 using LoadLibraryExW_t = decltype(&LoadLibraryExW);
 LoadLibraryExW_t LoadLibraryExW_Original;
 HMODULE WINAPI LoadLibraryExW_Hook(LPCWSTR name, HANDLE file, DWORD flags) {
     HMODULE module = LoadLibraryExW_Original(name, file, flags);
     if (module && HookLoadedModules(module)) {
-        Wh_ApplyHookOperations();
+        NoteApplied(Wh_ApplyHookOperations());
     }
     return module;
 }
@@ -31625,10 +31863,12 @@ bool Install() {
     return true;
 }
 
-// In case a module loaded while Wh_ModInit ran.
+// In case a module loaded while Wh_ModInit ran. Wh_ModAfterInit comes only once
+// the hooks Wh_ModInit queued went in.
 void AfterInit() {
+    NoteApplied(true);
     if (HookLoadedModules(nullptr)) {
-        Wh_ApplyHookOperations();
+        NoteApplied(Wh_ApplyHookOperations());
     }
 }
 
@@ -32772,8 +33012,16 @@ void Wh_ModBeforeUninit() {
         }
     });
     if (hooks::g_features.position) {
+        // The frames have their templates before the location changes below reach
+        // them, which may be after the hooks went (frames at unload).
+        ULONGLONG waited =
+            std::min(position::WaitForFrames(false, position::kFrameWaitMs), position::kFrameWaitMs);
         position::Apply();  // back to Windows' edge
         position::RemakeAtUnload();  // secondaries made for the other orientation made anew
+        position::WaitForFrames(true, position::kFrameWaitMs - waited);
+        core::RunOn(core::PrimaryTaskbar(), [] {
+            core::Guard(L"Held frame locations", position::DropHeld);
+        });
     }
     core::DetachAll();
 }
