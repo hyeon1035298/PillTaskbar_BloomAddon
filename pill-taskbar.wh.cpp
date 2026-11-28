@@ -4309,6 +4309,10 @@ std::wstring ClockText(bool seconds) {
 constexpr double kSideSecondsSize = 11;
 bool g_writingClock = false;
 std::vector<HWND> g_loggedClocks;
+// The time with its seconds on one line, as a top or bottom taskbar's clock
+// has it, kept as the side clock puts the seconds under it: the island reads
+// this in place of the two lines.
+[[clang::no_destroy]] std::wstring g_clockLine;
 
 void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
     auto text = ClockText(false);
@@ -4330,6 +4334,7 @@ void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
     GetLocalTime(&now);
     wchar_t second[4];
     swprintf_s(second, L"%02u", (unsigned)now.wSecond);
+    g_clockLine = ClockText(true);
     g_writingClock = true;
     core::Guard(L"Side clock", [&] {
         auto inlines = time.Inlines();
@@ -6549,10 +6554,9 @@ std::unordered_map<HWND, bool> g_collapsed;
 // taskbar's collapsed state changed, and, while it shows, asked whether the
 // pointer at the edge may bring the taskbar out (over an island). `along` is the
 // pointer's screen position along the edge: x on a top or bottom taskbar, y on a
-// side one. g_revealsAtPoint, when set, is asked first, with the whole point.
+// side one.
 void (*g_onCollapsedChanged)(HWND) = nullptr;
 bool (*g_revealsAt)(HWND, int along, bool& reveals) = nullptr;
-bool (*g_revealsAtPoint)(HWND, POINT pt, bool& reveals) = nullptr;
 // Also the island's: told as the taskbar starts to show itself expanded or
 // collapsed, before it draws that, and asked whether it stands in for the
 // taskbar's slide.
@@ -6568,7 +6572,7 @@ bool g_expandUnderIsland;
 bool Customized() {
     auto& s = settings::g.autohide;
     return s.revealZone < 100 || s.showDelay >= 0 || s.hideDelay >= 0 ||
-           g_revealsAt || g_revealsAtPoint;
+           g_revealsAt;
 }
 
 bool Ready(HWND hwnd) {
@@ -6622,9 +6626,6 @@ bool OutsideZone(HWND hwnd, int reason) {
     }
     bool side = core::IsSide(hwnd);
     bool reveals;
-    if (g_revealsAtPoint && g_revealsAtPoint(hwnd, pt, reveals)) {
-        return !reveals;
-    }
     if (g_revealsAt && g_revealsAt(hwnd, side ? pt.y : pt.x, reveals)) {
         return !reveals;
     }
@@ -11190,6 +11191,11 @@ struct Island {
     bool unreachable = false;  // logged that the taskbar can't be asked yet
     int edge = ABE_TOP;        // the screen edge it hangs from, its taskbar's (ABE_*)
     bool sharedEdge = false;   // another monitor is past the island's edge
+    // Another monitor is past the start or the end of the edge (the left or top
+    // end, the right or bottom one) where an island reaches it; `ends` are where
+    // along the edge those are on the screen.
+    bool sharedEnd[2] = {};
+    int ends[2] = {};
     // At a side edge, what the island found of its taskbar is logged once each:
     // its first layout, and the pill it first saw out.
     bool sideLaidOutLogged = false, sidePillLogged = false;
@@ -11742,7 +11748,7 @@ void DrawSystem(Island& g, ID2D1DeviceContext* dc, int kind, int percent, int st
 // items upright, one under another: the clock's hour, minute and seconds as
 // lines, the album art, each usage account's logo over its number, the memory
 // and CPU icons. Sizes are fractions of the thickness, as the row's are of the
-// height (the design's 35-pixel island: lines of 15 on 17, seconds 12 on 15,
+// height (for a 35-pixel island: lines of 15 on 17, seconds 12 on 15,
 // logo 14 over a number of 12 on 14, art 24); gaps are pixels at 100 %.
 
 constexpr double kColumnLinePitch = 17.0 / 15;   // a clock line, times its text
@@ -12713,6 +12719,11 @@ bool Layout(Island& g) {
     float body = fixed > 0 ? std::max(fixed, height)
                            : std::max({c.width + 2 * pad, height,
                                        std::round((float)theme::kIslandMinWidth * s)});
+    // A side island's column isn't trimmed to a set width: the width is its
+    // least length there, and the column always fits.
+    if (SideEdge(g.edge)) {
+        body = std::max(body, c.width + 2 * pad);
+    }
     int length = Along(g.edge, monitor);  // the edge's, along it
     shape.width = std::min(std::ceil(body) + 2 * shape.flare, (float)length);
     if (g.phase == Phase::kExpanding || g.phase == Phase::kCollapsing) {
@@ -12790,6 +12801,30 @@ bool Layout(Island& g) {
             across(d.rect);
         }
     }
+    // Past each end of the edge, beside the islands' thickness, where an island
+    // reaches that end: a pointer coming along the edge from a monitor there
+    // shows up on that island first.
+    g.ends[0] = start;
+    g.ends[1] = start + length;
+    for (int i = 0; i < 2; i++) {
+        bool reaches = g.sides[i].on;
+        if (centerOn) {
+            int from = AlongStart(g.edge, g.islandRect);
+            reaches |= i == 0 ? from <= g.ends[0]
+                              : from + Along(g.edge, g.islandRect) >= g.ends[1];
+        }
+        g.sharedEnd[i] = false;
+        if (reaches) {
+            RECT beyond = i == 0 ? OutRect(g.edge, monitor, -1, 0, 0, (int)height)
+                                 : OutRect(g.edge, monitor, length, length + 1, 0, (int)height);
+            int from = SideEdge(g.edge) ? beyond.left : beyond.top;
+            int to = from + Across(g.edge, beyond);
+            for (int q : {from, (from + to) / 2, to - 1}) {
+                POINT pt = SideEdge(g.edge) ? POINT{q, beyond.top} : POINT{beyond.left, q};
+                g.sharedEnd[i] |= MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) != nullptr;
+            }
+        }
+    }
     NotePill(g, monitor);
     RECT window;
     UnionRect(&window, &g.islandRect, &g.pillBox);
@@ -12828,8 +12863,8 @@ bool Layout(Island& g) {
             d.drawn = corner[i].key;
         }
     }
-    // What a side island stands on, once: the test of the native vertical taskbar
-    // reads it from the mod's log.
+    // What a side island stands on and shows, written to the mod's log once: its
+    // monitor, its taskbar's window and content, its place and its items.
     if (SideEdge(g.edge) && !std::exchange(g.sideLaidOutLogged, true)) {
         auto root = core::TaskbarRoot(g.taskbar);
         bool content = root && root.Content();
@@ -13129,8 +13164,25 @@ void Hide(Island& g, PCWSTR why) {
 
 // ---- inputs ---------------------------------------------------------------------
 
-void OnClock(winrt::hstring const& text) {
+// The clock text on one line. A side taskbar's clock with seconds is written as
+// two lines, the seconds under the time (tray::SideClock); the island takes the
+// time as that clock keeps it on one line, so that a row never breaks and the
+// column reads the seconds as such.
+std::wstring OneLineClock(winrt::hstring const& text) {
     std::wstring value(text);
+    if (value.find_first_of(L"\r\n") == std::wstring::npos) {
+        return value;
+    }
+    if (!tray::g_clockLine.empty()) {
+        return tray::g_clockLine;
+    }
+    std::ranges::replace(value, L'\r', L' ');
+    std::ranges::replace(value, L'\n', L' ');
+    return value;
+}
+
+void OnClock(winrt::hstring const& text) {
+    std::wstring value = OneLineClock(text);
     if (!g_islands.empty() && g_clock != value) {
         g_clock = std::move(value);
         SyncAll();
@@ -13152,7 +13204,7 @@ void FindClock() {
         return;
     }
     g_clockText = text;
-    g_clock = text.Text();
+    g_clock = OneLineClock(text.Text());
     // The tray's clock format watches this text too.
     core::Watch(
         text, Controls::TextBlock::TextProperty(),
@@ -13397,9 +13449,19 @@ bool EdgeHalf(Island const& g, POINT pt) {
     return fromEdge < (int)g.shape.height / 2;
 }
 
+// `along` is near an end of the edge that another monitor lies past, as near as
+// EdgeHalf is to the edge: a pointer coming along the edge from that monitor
+// shows up there first.
+bool EndHalf(Island const& g, int along) {
+    int half = (int)g.shape.height / 2;
+    return (g.sharedEnd[0] && along - g.ends[0] < half) ||
+           (g.sharedEnd[1] && g.ends[1] - 1 - along < half);
+}
+
 // While the island shows, only the pointer at the edge over it brings the
 // taskbar out. Past the edge another monitor is a way through, so a pointer
-// crossing it brings nothing; only touching the island does. In click mode,
+// crossing it brings nothing; only touching the island does. So is one past an
+// end of the edge, for the pointer near that end (EndHalf). In click mode,
 // and while Ctrl is held or the island is dragged, the pointer brings nothing.
 // `along` is where along the edge: x on a top or bottom edge, y on a side one.
 bool RevealsAt(HWND hwnd, int along, bool& reveals) {
@@ -13416,8 +13478,10 @@ bool RevealsAt(HWND hwnd, int along, bool& reveals) {
         int from = AlongStart(g.edge, r);
         return along >= from && along < from + Along(g.edge, r);
     };
-    reveals = (g.centerOn && over(g.islandRect)) ||
-              (g.sides[0].on && over(g.sides[0].rect)) || (g.sides[1].on && over(g.sides[1].rect));
+    reveals = ((g.centerOn && over(g.islandRect)) ||
+               (g.sides[0].on && over(g.sides[0].rect)) ||
+               (g.sides[1].on && over(g.sides[1].rect))) &&
+              !EndHalf(g, along);
     return true;
 }
 
@@ -13674,7 +13738,7 @@ std::optional<LRESULT> Handle(Island& g, UINT msg, WPARAM wParam, LPARAM lParam)
                 Track(g.hwnd);
                 // With Ctrl held it comes to move the island, not the taskbar.
                 if (!settings::g.island.clickToReveal && !g.ctrl) {
-                    if (g.sharedEdge && EdgeHalf(g, pt)) {
+                    if ((g.sharedEdge && EdgeHalf(g, pt)) || EndHalf(g, AlongOf(g.edge, pt))) {
                         SetTimer(g.hwnd, kCrossingTimer, kCrossingMs, nullptr);
                     } else {
                         after = Reach(g);
