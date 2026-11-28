@@ -22,7 +22,7 @@
 
 - **알약**: 작업 영역과 트레이를 가운데로 모아 유리 배경(블러, 옅은 틴트, 빛을 받는
   가장자리, 위 반사광과 아래 집광) 하나로 이어 붙입니다. 알약 양옆의 빈 곳은 클릭이 바탕 화면으로 통과합니다.
-- **위치**: 작업표시줄을 화면 위나 아래에 두고, 알약을 가장자리의 왼쪽, 가운데, 오른쪽에 붙입니다.
+- **위치**: 작업표시줄을 화면 위, 아래, 왼쪽, 오른쪽에 두고, 알약을 가장자리의 왼쪽, 가운데, 오른쪽에 붙입니다.
   Windows 설정은 바꾸지 않아서 끄면 Windows 설정 위치로 돌아갑니다.
 - **트레이**: 볼륨, 네트워크 같은 시스템 아이콘과 알림 벨을 숨기고, 시계를 시간만 보이게 합니다.
   빠른 설정(Win+A)과 알림 센터·달력(Win+N, 시계)은 화면 오른쪽 끝이 아니라 알약 트레이 쪽에 열립니다.
@@ -34,7 +34,7 @@
   바로 반영됩니다.
 - **시작 버튼**: Windows 시작 버튼을 숨기거나, 그 자리에 Bloom 런처를 여는 꽃 버튼을 둡니다. 꽃 버튼을
   누르면 Bloom이 열리고, 열려 있으면 닫힙니다. 오른쪽 클릭 메뉴는 그대로이고, 시작 메뉴는 Win 키로 열립니다.
-- **자동 숨김**: Windows 설정에서 자동 숨김을 켜면 위쪽 작업표시줄도 숨겨지고, 화면 위 가장자리
+- **자동 숨김**: Windows 설정에서 자동 숨김을 켜면 위쪽과 옆쪽 작업표시줄도 숨겨지고, 화면 위 가장자리
   어디에서 나올지, 나오고 들어가는 지연과 애니메이션 길이를 정할 수 있습니다. Bloom 런처가 열려 있는 동안에는
   숨은 작업표시줄도 나와 있습니다. 알림 센터(Win+N, 시계)가 열려 있으면 작업표시줄과 한 덩어리로 움직입니다.
   포인터가 둘 중 어디에 있든 작업표시줄이 나와 있고, 둘 다 벗어나 작업표시줄이 들어가면 알림 센터도 닫힙니다.
@@ -52,7 +52,7 @@
   설정한 위치(기본 `%USERPROFILE%\TaskbarFolders`)의 하위 폴더입니다. 고정하지 않고 켠 앱 가운데
   어느 폴더에도 없는 앱은 시계 모양 '실행 중' 폴더에 저절로 모이고, 앱을 끄면 빠집니다.
 
-Windows 11 XAML 작업표시줄(가로)만 지원합니다. 작업표시줄이 세로면 스스로 물러납니다.
+작업표시줄 모양은 Windows 11 XAML 작업표시줄(가로)만 지원합니다. 왼쪽이나 오른쪽에 둔 작업표시줄에서는 스스로 물러나 Windows 기본 세로 모양으로 둡니다.
 windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁니다).
 폴더를 켜 둔 동안에는 Taskbar Folders 모드를 꺼 두세요(같은 폴더와 창 묶기를 둘이 맡습니다).
 */
@@ -66,11 +66,13 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     $description: 끄면 Windows 기본 작업표시줄 모양으로 돌아갑니다
   - edge: windows
     $name: 작업표시줄 위치
-    $description: 화면 위나 아래에 둡니다. Windows 레지스트리 설정은 바꾸지 않으므로, 이 기능이나 모드를 끄면 원래 Windows 설정 위치로 돌아갑니다. 위에 두고 자동 숨김을 쓰려면 자동 숨김 보조도 켜 두세요
+    $description: 화면 위, 아래, 왼쪽, 오른쪽에 둡니다. Windows 레지스트리 설정은 바꾸지 않으므로, 이 기능이나 모드를 끄면 원래 Windows 설정 위치로 돌아갑니다. 위나 옆에 두고 자동 숨김을 쓰려면 자동 숨김 보조도 켜 두세요
     $options:
     - windows: Windows 설정 따름
     - top: 위
     - bottom: 아래
+    - left: 왼쪽
+    - right: 오른쪽
   - align: center
     $name: 알약 정렬
     $description: 펼친 알약을 가장자리의 어디에 둘지 정합니다
@@ -350,8 +352,8 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
     "label": "name",
     "name": {"ko": "모니터별 작업표시줄 위치", "en": "Taskbar position per monitor"},
     "about": {
-      "ko": "작업표시줄이 있는 모니터마다 한 줄씩 생깁니다. 0이면 작업표시줄 위치 설정을 따르고, 1이면 위, 2이면 아래에 둡니다",
-      "en": "Each monitor with a taskbar gets a row here. 0 follows the Taskbar position setting, 1 puts it at the top, and 2 at the bottom"
+      "ko": "작업표시줄이 있는 모니터마다 한 줄씩 생깁니다. 0이면 작업표시줄 위치 설정을 따르고, 1이면 위, 2이면 아래, 3이면 왼쪽, 4이면 오른쪽에 둡니다",
+      "en": "Each monitor with a taskbar gets a row here. 0 follows the Taskbar position setting, 1 puts it at the top, 2 at the bottom, 3 on the left, and 4 on the right"
     },
     "fields": [
       {
@@ -359,7 +361,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
         "type": "int",
         "default": 0,
         "min": 0,
-        "max": 2,
+        "max": 4,
         "name": {"ko": "위치", "en": "Position"}
       }
     ]
@@ -406,7 +408,7 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 //   prefs     애드온 데이터 폴더의 prefs.json 읽기, 통째로 쓰기, 변경 감시, 모니터 id
 //   island    F8 숨김 아일랜드 (숨은 위·아래 작업표시줄을 불러내고 그 모양으로 바뀌는 검은 아일랜드)
 //   folders   F9 작업표시줄 폴더 (앱 묶기, 폴더 창, 폴더 안 앱의 창 묶기), F10 실행 중 폴더
-//   position  F11 작업표시줄 위·아래, 모니터마다 (Windows 자체 위치 기능, 레지스트리는 읽기만)
+//   position  F11 작업표시줄 위·아래·왼쪽·오른쪽, 모니터마다 (Windows 자체 위치 기능, 레지스트리는 읽기만)
 //   hooks     켠 기능의 심볼만 훅으로 걸고 여러 기능이 쓰는 훅을 나눠 준다
 //   entry     Wh_Mod* 진입점
 // 의존 방향: hooks → 기능 구역 → core, settings. 기능 구역끼리는 region만 pill이 부르고,
@@ -416,6 +418,10 @@ windows-11-taskbar-styler와 같이 켜지 마세요(같은 속성을 둘이 씁
 // prefs를 쓴다(아일랜드 자리, 숨긴 계정, 모니터별 가장자리가 한 파일에 있다).
 // folders는 settings만 쓰고 작업 스레드와 작업표시줄 큐를 스스로 둔다.
 // 알약 정렬(settings::PillAlign)은 pill, island, autohide가 같이 읽는다.
+// 작업표시줄이 가로인지 옆쪽(왼쪽·오른쪽)인지는 작업표시줄마다 core가 답한다(EdgeOf, IsSide).
+// 옆쪽 모양이 아직 없는 기능은 그 작업표시줄에서 core::IsSide로 물러나고(어느 작업표시줄의
+// 일인지 모르는 훅은 모두 옆쪽일 때만, core::AllSide), 그 자리마다 "Side taskbar:"로
+// 시작하는 주석에 기능 이름이 있다.
 
 #include <windhawk_utils.h>
 
@@ -503,7 +509,7 @@ enum class Bell { kShown, kWhenNew, kHidden };
 enum class Clock { kTimeDate, kTime, kHidden };
 enum class LogoColor { kMono, kBrand };
 enum class StartMode { kWindows, kHidden, kBloom };
-enum class Edge { kWindows, kTop, kBottom };
+enum class Edge { kWindows, kTop, kBottom, kLeft, kRight };
 enum class Align { kCenter, kLeft, kRight };  // an unknown value reads as the first
 enum class Slot { kCenter, kLeft, kRight };   // the same
 
@@ -621,7 +627,7 @@ std::wstring Text(PCWSTR name) {
 
 void Load() {
     g.pill.enabled = Wh_GetIntSetting(L"pill.enabled");
-    g.pill.edge = (Edge)Choice(L"pill.edge", {L"windows", L"top", L"bottom"});
+    g.pill.edge = (Edge)Choice(L"pill.edge", {L"windows", L"top", L"bottom", L"left", L"right"});
     g.pill.align = (Align)Choice(L"pill.align", {L"center", L"left", L"right"});
     g.pill.style = (Style)Choice(L"pill.style", {L"bloom", L"glass", L"windowGlass"});
     g.pill.theme = (Theme)Choice(L"pill.theme", {L"system", L"dark", L"light"});
@@ -1409,15 +1415,143 @@ HWND HwndOf(XamlRoot const& root) {
     return nullptr;
 }
 
-// Vertical (left/right) taskbars keep the stock look: every shape here is
-// horizontal. Set once per apply pass.
-bool g_vertical;
+// ---- taskbar orientation ------------------------------------------------------
+// Each taskbar is horizontal (top, bottom) or at a side (left, right) of its own:
+// the monitors can have different edges (F11). A feature with no side form yet
+// asks IsSide about the taskbar it works on and steps back there, which leaves
+// Windows' own vertical look; a hook that can't tell its taskbar asks AllSide.
+// Each such place says which feature steps back in a comment that starts
+// "Side taskbar:".
 
-// The same test on every path, so the apply pass and the move check agree.
-bool LooksVertical(HWND hwnd) {
+// The edge (ABE_*) set for the taskbar on a monitor (null: not known), Windows'
+// own where none is set (F11). Asked for a window whose place tells nothing yet.
+int (*g_edgeSetFor)(HMONITOR monitor) = nullptr;
+
+bool IsSideEdge(int edge) {
+    return edge == ABE_LEFT || edge == ABE_RIGHT;
+}
+
+// The screen edge (ABE_*) a taskbar window is at: its longer side gives the
+// orientation, its middle against its monitor's the end. A hidden taskbar lies
+// mostly off its monitor and counts all the same. A window with no size yet, or
+// none (one still to come), takes the edge set for its monitor, else the bottom;
+// a window gone counts as at the bottom. Any thread and process.
+int EdgeOf(HWND taskbar) {
+    if (taskbar && !IsWindow(taskbar)) {
+        return ABE_BOTTOM;
+    }
+    HMONITOR monitor = taskbar ? MonitorOf(taskbar) : nullptr;
     RECT rc;
-    return hwnd && GetWindowRect(hwnd, &rc) &&
-           rc.bottom - rc.top > rc.right - rc.left;
+    MONITORINFO mi{.cbSize = sizeof(mi)};
+    if (taskbar && GetWindowRect(taskbar, &rc) && rc.right > rc.left && rc.bottom > rc.top &&
+        GetMonitorInfo(monitor, &mi)) {
+        const RECT& m = mi.rcMonitor;
+        if (rc.bottom - rc.top > rc.right - rc.left) {
+            return rc.left + rc.right < m.left + m.right ? ABE_LEFT : ABE_RIGHT;
+        }
+        return rc.top + rc.bottom < m.top + m.bottom ? ABE_TOP : ABE_BOTTOM;
+    }
+    int set = g_edgeSetFor ? g_edgeSetFor(monitor) : -1;
+    return set >= 0 ? set : ABE_BOTTOM;
+}
+
+// Whether a taskbar window stands at the left or right edge.
+bool IsSide(HWND taskbar) {
+    return IsSideEdge(EdgeOf(taskbar));
+}
+
+// Taskbar thread: the taskbar window whose tree a XAML root is, kept by the
+// root's identity (checked again on use, as a gone root's address can come back
+// for a flyout's); null for another tree.
+[[clang::no_destroy]] std::vector<std::pair<void*, HWND>> g_rootTaskbars;
+
+HWND TaskbarOf(XamlRoot const& root) {
+    if (!root) {
+        return nullptr;
+    }
+    void* key = winrt::get_abi(root.as<wf::IUnknown>());
+    auto known = std::ranges::find(g_rootTaskbars, key, &std::pair<void*, HWND>::first);
+    if (known != g_rootTaskbars.end()) {
+        HWND hwnd = known->second;
+        if (IsWindow(hwnd) && TaskbarRoot(hwnd) == root) {
+            return hwnd;
+        }
+        g_rootTaskbars.erase(known);
+    }
+    HWND hwnd = HwndOf(root);
+    if (hwnd) {
+        if (g_rootTaskbars.size() >= 16) {
+            g_rootTaskbars.clear();  // roots of taskbars rebuilt while their windows stayed
+        }
+        g_rootTaskbars.emplace_back(key, hwnd);
+    }
+    return hwnd;
+}
+
+// The same for the taskbar whose XAML tree `root` is; false for another tree.
+// Taskbar thread.
+bool IsSide(XamlRoot const& root) {
+    if (!root) {
+        return false;
+    }
+    // A horizontal taskbar's tree is wider than tall: no window lookup for it.
+    auto size = root.Size();
+    if (size.Width > 0 && size.Width >= size.Height) {
+        return false;
+    }
+    HWND taskbar = TaskbarOf(root);
+    return taskbar && IsSide(taskbar);
+}
+
+// The taskbar window on a monitor; null if none.
+HWND TaskbarOn(HMONITOR monitor) {
+    for (HWND hwnd : Taskbars()) {
+        if (MonitorOf(hwnd) == monitor) {
+            return hwnd;
+        }
+    }
+    return nullptr;
+}
+
+// Each taskbar window's orientation as it was last seen (attached or moved), so a
+// change of one can be told; and from those, whether every one is at a side.
+std::mutex g_sidesLock;
+[[clang::no_destroy]] std::vector<std::pair<HWND, bool>> g_sides;
+std::atomic<bool> g_allSide;
+
+// Under g_sidesLock.
+void CountSides() {
+    g_allSide = !g_sides.empty() &&
+                std::ranges::all_of(g_sides, [](auto const& s) { return s.second; });
+}
+
+// Notes where `taskbar` is now; true if it turned between horizontal and a side
+// since it was last noted (a first sight only notes).
+bool NoteSide(HWND taskbar) {
+    bool side = IsSide(taskbar);
+    std::lock_guard guard(g_sidesLock);
+    auto it = std::ranges::find(g_sides, taskbar, &std::pair<HWND, bool>::first);
+    bool turned = it != g_sides.end() && it->second != side;
+    if (it == g_sides.end()) {
+        g_sides.emplace_back(taskbar, side);
+    } else {
+        it->second = side;
+    }
+    CountSides();
+    return turned;
+}
+
+void ForgetSide(HWND taskbar) {
+    std::lock_guard guard(g_sidesLock);
+    std::erase_if(g_sides, [&](auto const& s) { return s.first == taskbar; });
+    CountSides();
+}
+
+// Whether every taskbar the mod is on stands at a side; false before it is on any.
+// For hooks that can't tell which taskbar they work for: they step back only then,
+// so the horizontal taskbars of a mixed set keep them. Any thread.
+bool AllSide() {
+    return g_allSide;
 }
 
 // ---- taskbar thread -----------------------------------------------------------
@@ -1444,11 +1578,11 @@ void (*g_onTaskbarRestacked)(HWND) = nullptr;
 bool (*g_keepsTaskbarTopmost)(HWND taskbar, HWND after) = nullptr;
 // A taskbar window is going, e.g. with its monitor.
 void (*g_onTaskbarDestroyed)(HWND) = nullptr;
-// The same for the taskbar edges (F11), while they wait for the secondary
-// taskbars to go as they have them made again.
+// The same for the taskbar edges (F11): what a secondary was made for goes with
+// it, and while they have the secondaries made again they wait for them to go.
 void (*g_onTaskbarGone)(HWND) = nullptr;
-// The primary taskbar turned vertical or back (F5); the shape features step
-// aside or come back.
+// A taskbar turned from horizontal to a side edge or back (F5, F11); the
+// features step aside there or come back.
 void (*g_onOrientationChanged)() = nullptr;
 // True to drop a tick of explorer's own timer `id` on a taskbar window (the
 // tray's hide check while auto-hide keeps the taskbar out).
@@ -1579,8 +1713,7 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
             if (g_onTaskbarRestacked && pos && !(pos->flags & SWP_NOZORDER)) {
                 Guard(L"Taskbar restacked", [&] { g_onTaskbarRestacked(hwnd); });
             }
-            if (g_onOrientationChanged && !IsSecondary(hwnd) &&
-                LooksVertical(hwnd) != g_vertical) {
+            if (g_onOrientationChanged && !g_unloading && NoteSide(hwnd)) {
                 Guard(L"Orientation", [] { g_onOrientationChanged(); });
             }
             return result;
@@ -1590,6 +1723,8 @@ LRESULT CALLBACK TaskbarSubclass(HWND hwnd,
                 std::lock_guard guard(g_lock);
                 std::erase(g_attached, hwnd);
             }
+            ForgetSide(hwnd);
+            g_rootTaskbars.clear();
             if (g_onTaskbarDestroyed) {
                 Guard(L"Taskbar destroyed", [&] { g_onTaskbarDestroyed(hwnd); });
             }
@@ -1614,6 +1749,7 @@ bool Attach(HWND hwnd) {
         Wh_Log(L"Subclassing %08X failed", (DWORD)(ULONG_PTR)hwnd);
         return false;
     }
+    NoteSide(hwnd);
     std::lock_guard guard(g_lock);
     g_attached.push_back(hwnd);
     return true;
@@ -2448,7 +2584,8 @@ void RelightAll() {
 }
 
 void StyleTaskButton(FrameworkElement const& button) {
-    if (core::g_vertical) {
+    // Side taskbar: the pill's task buttons step back.
+    if (core::IsSide(button.XamlRoot())) {
         return;
     }
     auto control = button.try_as<Controls::Control>();
@@ -2509,7 +2646,8 @@ bool ShowDesktopCorner() {
 
 // A tray icon view (SystemTray.IconView and the classes built on it).
 void StyleIcon(FrameworkElement const& icon) {
-    if (core::g_vertical) {
+    // Side taskbar: the pill's tray icons step back.
+    if (core::IsSide(icon.XamlRoot())) {
         return;
     }
     auto cls = winrt::get_class_name(icon);
@@ -2702,7 +2840,8 @@ void HoldTheme(FrameworkElement const& content, ElementTheme theme) {
 // Everything already in a taskbar's tree.
 void StyleRoot(XamlRoot const& root, HWND hwnd) {
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-    if (!content) {
+    // Side taskbar: the pill steps back, frame, background, buttons and theme.
+    if (!content || (hwnd ? core::IsSide(hwnd) : core::IsSide(root))) {
         return;
     }
     // A theme set (Bloom's own) over Windows': all under the root follows it.
@@ -2736,10 +2875,8 @@ void StyleRoot(XamlRoot const& root, HWND hwnd) {
 }
 
 // A taskbar frame whose template was just applied, e.g. a new monitor's.
+// Whether it is a side taskbar's is known once it is in the tree (StyleRoot).
 void OnFrameTemplate(FrameworkElement const& frame) {
-    if (core::g_vertical) {
-        return;
-    }
     auto it = g_pendingLoads.emplace(g_pendingLoads.end());
     *it = frame.Loaded(winrt::auto_revoke, [it](auto&& sender, auto&&) {
         auto frame = sender.template try_as<FrameworkElement>();
@@ -2753,7 +2890,8 @@ void OnFrameTemplate(FrameworkElement const& frame) {
 // A tray icon view loaded. The tray of a new taskbar shows up this way, once
 // its first icon loads, so the tray piece is styled here too.
 void OnIconLoaded(FrameworkElement const& icon) {
-    if (core::g_vertical) {
+    // Side taskbar: the pill's tray and apps pieces step back.
+    if (core::IsSide(icon.XamlRoot())) {
         return;
     }
     StyleIcon(icon);
@@ -2773,9 +2911,7 @@ void OnIconLoaded(FrameworkElement const& icon) {
 }
 
 void Apply(HWND hwnd) {
-    if (!core::g_vertical) {
-        StyleRoot(core::TaskbarRoot(hwnd), hwnd);
-    }
+    StyleRoot(core::TaskbarRoot(hwnd), hwnd);  // which steps back on a side taskbar
 }
 
 void Restore() {
@@ -3003,7 +3139,8 @@ void Add(HWND taskbar,
          int order,
          FrameworkElement const& element,
          Side side = Side::kStart) {
-    if (core::g_vertical || core::g_unloading || !taskbar) {
+    // Side taskbar: the widget panels (media, usage) step back.
+    if (core::g_unloading || !taskbar || core::IsSide(taskbar)) {
         return;
     }
     auto& bar = BarOf(taskbar);
@@ -3036,10 +3173,14 @@ void Add(HWND taskbar,
 // As tray icons load: widgets that came before their tray did (a young
 // explorer) go into it now.
 void PlaceWaiting() {
-    if (core::g_vertical || core::g_unloading) {
+    if (core::g_unloading) {
         return;
     }
     for (auto& bar : g_bars) {
+        // Side taskbar: the widget panels step back.
+        if (core::IsSide(bar.hwnd)) {
+            continue;
+        }
         for (Side side : {Side::kStart, Side::kEnd}) {
             auto host = bar.hosts[(int)side].get();
             if ((!host || !core::Parent(host)) && IsWindow(bar.hwnd) &&
@@ -3725,8 +3866,15 @@ int IconSize() {
 int ButtonWidth() {
     return IconSize() + settings::g.size.iconSpacing;  // the icon as drawn, so a cut one keeps its spacing
 }
-bool Vertical() {
-    return core::g_vertical;
+// Side taskbar: the custom height steps back on a side taskbar's frame or tray,
+// given by the element's ABI pointer. Taskbar thread.
+bool SideFrame(void* abi) {
+    bool side = false;
+    core::Guard(L"Side frame", [&] {
+        auto e = core::FromAbi(abi);
+        side = e && core::IsSide(e.XamlRoot());
+    });
+    return side;
 }
 
 STDAPI GetDpiForMonitor(HMONITOR monitor, int type, UINT* dpiX, UINT* dpiY);
@@ -3853,8 +4001,9 @@ using TrayUI_GetMinSize_t = void(WINAPI*)(void* pThis, HMONITOR, SIZE*);
 TrayUI_GetMinSize_t TrayUI_GetMinSize_Original;
 void WINAPI TrayUI_GetMinSize_Hook(void* pThis, HMONITOR monitor, SIZE* size) {
     TrayUI_GetMinSize_Original(pThis, monitor, size);
-    // Keeps an auto-hidden secondary taskbar in place.
-    if (!Vertical() && g_height) {
+    // Keeps an auto-hidden secondary taskbar in place. Side taskbar: the custom
+    // height steps back.
+    if (g_height && !core::IsSide(core::TaskbarOn(monitor))) {
         UINT dpiX = 0, dpiY = 0;
         GetDpiForMonitor(monitor, 0, &dpiX, &dpiY);
         size->cy = MulDiv(g_height, dpiY, 96);
@@ -3884,7 +4033,8 @@ using SHAppBarMessage_t = decltype(&SHAppBarMessage);
 SHAppBarMessage_t SHAppBarMessage_Original;
 UINT_PTR WINAPI SHAppBarMessage_Hook(DWORD message, PAPPBARDATA data) {
     auto ret = SHAppBarMessage_Original(message, data);
-    if (message == ABM_QUERYPOS && ret && !Vertical() && g_height) {
+    // Side taskbar: the custom height steps back for a rectangle at a side edge.
+    if (message == ABM_QUERYPOS && ret && !core::IsSideEdge(data->uEdge) && g_height) {
         if (int dpi = MonitorDpi(data->hWnd)) {
             int height = MulDiv(g_height, dpi, 96);
             if (data->uEdge == ABE_TOP) {
@@ -4012,7 +4162,9 @@ double WINAPI TaskbarConfiguration_GetFrameSize_Hook(int taskbarSize) {
     if (!g_originalHeight && regular) {
         g_originalHeight = TaskbarConfiguration_GetFrameSize_Original(taskbarSize);
     }
-    if (!Vertical() && g_height && regular) {
+    // Side taskbar: no taskbar is known here, so the custom height steps back only
+    // while every taskbar is at a side; a side one among horizontal ones gets it too.
+    if (g_height && regular && !core::AllSide()) {
         return g_height;
     }
     return TaskbarConfiguration_GetFrameSize_Original(taskbarSize);
@@ -4022,7 +4174,9 @@ using TaskbarFrame_SetDouble_t = void(WINAPI*)(void* pThis, double value);
 TaskbarFrame_SetDouble_t TaskbarFrame_MaxHeight_Original;
 TaskbarFrame_SetDouble_t TaskbarFrame_Height_Original;
 void WINAPI TaskbarFrame_Height_Hook(void* pThis, double value) {
-    if (!Vertical() && TaskbarFrame_MaxHeight_Original) {
+    // Side taskbar: the frame's open height steps back while every taskbar is at a
+    // side (the call gives no element to ask; a vertical frame gets a width instead).
+    if (TaskbarFrame_MaxHeight_Original && !core::AllSide()) {
         TaskbarFrame_MaxHeight_Original(pThis,
                                         std::numeric_limits<double>::infinity());
     }
@@ -4069,7 +4223,9 @@ double HeightMatchingWindow(FrameworkElement const& frame, int height) {
 
 bool MatchWindowHeight(FrameworkElement const& frame) {
     int height = g_height;
-    if (core::g_unloading || !height || frame.Height() != height || Vertical()) {
+    // Side taskbar: the height match steps back.
+    if (core::g_unloading || !height || frame.Height() != height ||
+        core::IsSide(frame.XamlRoot())) {
         return false;
     }
     double matched = HeightMatchingWindow(frame, height);
@@ -4093,10 +4249,15 @@ void MatchContentGridHeight(FrameworkElement const& frame) {
 using TaskbarController_UpdateFrameHeight_t = void(WINAPI*)(void* pThis);
 TaskbarController_UpdateFrameHeight_t TaskbarController_UpdateFrameHeight_Original;
 void WINAPI TaskbarController_UpdateFrameHeight_Hook(void* pThis) {
-    LONG offset = Vertical() ? 0 : TaskbarFrameOffset();
+    LONG offset = TaskbarFrameOffset();
     void* frameImpl = offset ? *(void**)((BYTE*)pThis + offset) : nullptr;
     auto frame = frameImpl ? core::FromAbi(((IUnknown**)frameImpl)[1]) : nullptr;
-    if (!frame) {
+    // Side taskbar: the frame's open height steps back.
+    bool side = false;
+    if (frame) {
+        core::Guard(L"Frame side", [&] { side = core::IsSide(frame.XamlRoot()); });
+    }
+    if (!frame || side) {
         TaskbarController_UpdateFrameHeight_Original(pThis);
         return;
     }
@@ -4552,7 +4713,8 @@ LONG LastHeightOffset() {
 }
 
 void WINAPI SystemTrayController_UpdateFrameSize_Hook(void* pThis) {
-    if (Vertical()) {
+    // Side taskbar: the primary's tray (this controller's) keeps its height.
+    if (core::IsSide(core::PrimaryTaskbar())) {
         SystemTrayController_UpdateFrameSize_Original(pThis);
         return;
     }
@@ -4577,8 +4739,10 @@ void WINAPI SystemTraySecondaryController_UpdateFrameSize_Hook(void* pThis) {
 // The tray height is set explicitly, or it may not match the custom height.
 using SystemTrayFrame_Height_t = void(WINAPI*)(void* pThis, double value);
 SystemTrayFrame_Height_t SystemTrayFrame_Height_Original;
+// pThis: the projected SystemTrayFrame, whose first word is its ABI pointer.
+// Side taskbar: the tray height steps back (SideFrame), here and in the setter.
 void WINAPI SystemTrayFrame_Height_Hook(void* pThis, double value) {
-    if (!Vertical() && g_inTrayUpdateFrameSize && g_height) {
+    if (g_inTrayUpdateFrameSize && g_height && !SideFrame(*(void**)pThis)) {
         value = g_height;
     }
     SystemTrayFrame_Height_Original(pThis, value);
@@ -4586,8 +4750,8 @@ void WINAPI SystemTrayFrame_Height_Hook(void* pThis, double value) {
 
 SetDouble_t SystemTrayFrame_SetDouble_Original;
 void WINAPI SystemTrayFrame_SetDouble_Hook(void* pThis, void* method, double* value) {
-    if (g_inTrayUpdateFrameSize && g_height && !Vertical() &&
-        VcallThunkVtableOffset(method) == kPutHeightOffset) {
+    if (g_inTrayUpdateFrameSize && g_height &&
+        VcallThunkVtableOffset(method) == kPutHeightOffset && !SideFrame(*(void**)pThis)) {
         double height = g_height;
         SystemTrayFrame_SetDouble_Original(pThis, method, &height);
         return;
@@ -4597,13 +4761,14 @@ void WINAPI SystemTrayFrame_SetDouble_Hook(void* pThis, void* method, double* va
 
 // The omni button style and the show desktop column width compare the frame
 // height with the stock 24, 32 and 72; collapsed omni buttons take no input.
-// These checks, and only they, get the stock height.
+// These checks, and only they, get the stock height. Side taskbar: a side
+// taskbar's tray isn't checked so (SideFrame).
 thread_local bool g_inTrayModeCheck;
 
 using SystemTrayFrame_GetStyle_t = int(WINAPI*)(void* pThis, void** style);
 SystemTrayFrame_GetStyle_t SystemTrayFrame_GetStyle_Original;
 int WINAPI SystemTrayFrame_GetStyle_Hook(void* pThis, void** style) {
-    g_inTrayModeCheck = true;
+    g_inTrayModeCheck = !SideFrame(pThis);
     int ret = SystemTrayFrame_GetStyle_Original(pThis, style);
     g_inTrayModeCheck = false;
     return ret;
@@ -4615,7 +4780,7 @@ SystemTrayFrame_GetShowDesktopButtonColumnWidth_t
     SystemTrayFrame_GetShowDesktopButtonColumnWidth_Original;
 int WINAPI SystemTrayFrame_GetShowDesktopButtonColumnWidth_Hook(void* pThis,
                                                                 double* width) {
-    g_inTrayModeCheck = true;
+    g_inTrayModeCheck = !SideFrame(pThis);
     int ret = SystemTrayFrame_GetShowDesktopButtonColumnWidth_Original(pThis, width);
     g_inTrayModeCheck = false;
     return ret;
@@ -4624,7 +4789,8 @@ int WINAPI SystemTrayFrame_GetShowDesktopButtonColumnWidth_Hook(void* pThis,
 using SystemTrayFrame_Height_get_t = double(WINAPI*)(void* pThis);
 SystemTrayFrame_Height_get_t SystemTrayFrame_Height_get_Original;
 double WINAPI SystemTrayFrame_Height_get_Hook(void* pThis) {
-    if (g_inTrayModeCheck && !Vertical() && g_originalHeight) {
+    // g_inTrayModeCheck is not set for a side taskbar's tray.
+    if (g_inTrayModeCheck && g_originalHeight) {
         return g_originalHeight;
     }
     return SystemTrayFrame_Height_get_Original(pThis);
@@ -4659,8 +4825,9 @@ int WINAPI SystemTrayFrame_MeasureOverride_Hook(void* pThis, Size size, Size* re
             MatchWindowHeight(frame);
         }
     });
+    // Side taskbar: the tray's stock measure extent steps back.
     if (!g_originalHeight || !FrameworkElementOverrides_MeasureOverride_Original ||
-        Vertical()) {
+        SideFrame(pThis)) {
         return SystemTrayFrame_MeasureOverride_Original(pThis, size, result);
     }
     Size available = size;
@@ -4828,7 +4995,9 @@ void Trigger(HWND taskbar) {
     ResetEvent(g_measured);
     // TrayUI::_HandleSettingChange, which then calls _StuckTrayChange.
     SendMessage(taskbar, WM_SETTINGCHANGE, SPI_SETLOGICALDPIOVERRIDE, 0);
-    if (!Vertical() && WaitForSingleObject(g_measured, 10000) != WAIT_OBJECT_0) {
+    // Side taskbar: with every taskbar at a side no frame takes the height, so no
+    // measure is waited for.
+    if (!core::AllSide() && WaitForSingleObject(g_measured, 10000) != WAIT_OBJECT_0) {
         Wh_Log(L"No measure after the size change");
     }
     g_pendingMeasure = false;
@@ -4853,8 +5022,9 @@ void Apply(int height) {
     }
 
     g_applying = true;
-    // The same height again doesn't refresh; go through another one first.
-    if (!Vertical() && height == g_height) {
+    // The same height again doesn't refresh; go through another one first. Side
+    // taskbar: not while every taskbar is at a side.
+    if (!core::AllSide() && height == g_height) {
         g_height = height - 1;
         Trigger(taskbar);
     }
@@ -4920,13 +5090,20 @@ constexpr int kReasonScreenEdge = 8;
 constexpr UINT_PTR kTimerId = 0x50414854;
 
 bool Active() {
-    return !core::g_unloading && !core::g_vertical;
+    return !core::g_unloading;
+}
+
+// Side taskbar: auto-hide's own work (reveal zone, delays, the island's and
+// Bloom's holds, the notification center hold) steps back on a side taskbar,
+// which auto-hides as Windows has it.
+bool On(HWND taskbar) {
+    return Active() && !core::IsSide(taskbar);
 }
 
 // ---- taskbar.dll ------------------------------------------------------------------
 
 // While this feature is on, the native primary taskbar doesn't auto-hide off
-// the bottom edge; the rest of auto-hide handles every edge.
+// the bottom edge; the rest of auto-hide handles every edge, the sides too.
 using WilFeature_IsEnabled_t = bool(WINAPI*)(void* pThis);
 WilFeature_IsEnabled_t WilFeature_61970341_IsEnabled_Original;
 bool WINAPI WilFeature_61970341_IsEnabled_Hook(void* pThis) {
@@ -4982,8 +5159,8 @@ bool Customized() {
            g_revealsAt;
 }
 
-bool Ready() {
-    return Active() && Customized() && ViewCoordinator_UpdateIsExpanded_Original &&
+bool Ready(HWND hwnd) {
+    return On(hwnd) && Customized() && ViewCoordinator_UpdateIsExpanded_Original &&
            ViewCoordinator_IsExpanded_Original &&
            ViewCoordinator_ShouldTaskbarBeExpanded_Original;
 }
@@ -5059,7 +5236,8 @@ void Cancel(HWND hwnd) {
 // The region code clips only a shown taskbar: a hidden one keeps just a strip
 // on the screen, which must stay for the pointer.
 bool Collapsed(HWND hwnd) {
-    if (core::g_vertical) {
+    // Side taskbar: its collapsed state isn't kept (NoteWindowPos).
+    if (core::IsSide(hwnd)) {
         return false;
     }
     auto it = g_collapsed.find(hwnd);
@@ -5096,7 +5274,8 @@ void SetCollapsed(HWND hwnd, bool collapsed) {
 // taskbar is expanded all along. The window's move tells.
 // A hidden top taskbar's window sits above the monitor.
 void NoteWindowPos(HWND hwnd) {
-    if (!core::g_unloading && !core::g_vertical) {
+    // Side taskbar: auto-hide's collapsed state steps back (nothing reads it there).
+    if (!core::g_unloading && !core::IsSide(hwnd)) {
         SetCollapsed(hwnd, LooksHidden(hwnd));
     }
 }
@@ -5110,7 +5289,7 @@ void CALLBACK OnTimer(HWND hwnd, UINT, UINT_PTR id, DWORD) {
     }
     Pending p = it->second;
     g_pending.erase(it);
-    if (!Ready()) {
+    if (!Ready(hwnd)) {
         return;
     }
     core::Guard(L"Auto-hide timer", [&] {
@@ -5162,10 +5341,10 @@ void WINAPI ViewCoordinator_UpdateIsExpanded_Hook(void* pThis,
                                                   HWND hwnd,
                                                   int reason) {
     bool handled = false;
-    if (Active()) {
+    if (On(hwnd)) {
         core::Guard(L"Expand hold", [&] { handled = HeldByWindow(pThis, hwnd, reason); });
     }
-    if (!handled && IsPointerReason(reason) && Ready()) {
+    if (!handled && IsPointerReason(reason) && Ready(hwnd)) {
         core::Guard(L"Expand request",
                     [&] { handled = Decide(pThis, hwnd, reason); });
     }
@@ -5181,10 +5360,10 @@ void WINAPI ViewCoordinator_UpdateIsExpandedAfterHoverDelay_Hook(
     bool isPointerOver,
     int reason) {
     bool handled = false;
-    if (Active()) {
+    if (On(hwnd)) {
         core::Guard(L"Hover hold", [&] { handled = HeldByWindow(pThis, hwnd, reason); });
     }
-    if (!handled && IsPointerReason(reason) && Ready()) {
+    if (!handled && IsPointerReason(reason) && Ready(hwnd)) {
         core::Guard(L"Hover request",
                     [&] { handled = Decide(pThis, hwnd, reason); });
     }
@@ -5203,7 +5382,7 @@ extern Animation g_expand;
 void WINAPI ViewCoordinator_HandleIsExpandedChanged_Hook(void* pThis, HWND hwnd) {
     ViewCoordinator_HandleIsExpandedChanged_Original(pThis, hwnd);
     core::Guard(L"Expanded changed", [&] {
-        if (!Active() || !ViewCoordinator_IsExpanded_Original) {
+        if (!On(hwnd) || !ViewCoordinator_IsExpanded_Original) {
             return;
         }
         bool expanded = ViewCoordinator_IsExpanded_Original(pThis, hwnd);
@@ -5352,7 +5531,7 @@ char* SecondaryTrayOf(HWND hwnd) {
 // Brings a hidden taskbar out as its tray's hover timer does for the pointer
 // on its edge; false if the tray can't be asked. Its slide runs inside.
 bool Reveal(HWND hwnd) {
-    if (!Active() || !OnTrayThread(hwnd) || !Collapsed(hwnd)) {
+    if (!On(hwnd) || !OnTrayThread(hwnd) || !Collapsed(hwnd)) {
         return false;
     }
     InFlight counted;
@@ -5428,16 +5607,8 @@ bool LauncherInFront() {
 
 // The taskbar of the monitor, else the primary.
 HWND TaskbarOnMonitor(HMONITOR monitor) {
-    HWND primary = nullptr;
-    for (HWND hwnd : core::Taskbars()) {
-        if (core::MonitorOf(hwnd) == monitor) {
-            return hwnd;
-        }
-        if (!primary && !core::IsSecondary(hwnd)) {
-            primary = hwnd;
-        }
-    }
-    return primary;
+    HWND hwnd = core::TaskbarOn(monitor);
+    return hwnd ? hwnd : core::PrimaryTaskbar();
 }
 
 HWND TaskbarFor(HWND window) {
@@ -5480,6 +5651,11 @@ void EvaluateForeground() {
     }
     HWND front = GetForegroundWindow();
     HWND taskbar = TaskbarFor(front);
+    // Side taskbar: Bloom's launcher hold steps back.
+    if (taskbar && core::IsSide(taskbar)) {
+        ReleaseHeld();
+        return;
+    }
     if (taskbar != g_heldOut || front != g_launcher) {
         ReleaseHeld();
     }
@@ -5524,10 +5700,18 @@ bool CenterArea(RECT& area) {
         OffsetRect(&box, area.left, area.top);
         area = box;
     }
-    if (bar.top + bar.bottom < mi.rcMonitor.top + mi.rcMonitor.bottom) {
-        area.top = mi.rcMonitor.top;
-    } else {
-        area.bottom = mi.rcMonitor.bottom;
+    switch (core::EdgeOf(g_centerTaskbar)) {
+        case ABE_TOP:
+            area.top = mi.rcMonitor.top;
+            break;
+        case ABE_LEFT:
+            area.left = mi.rcMonitor.left;
+            break;
+        case ABE_RIGHT:
+            area.right = mi.rcMonitor.right;
+            break;
+        default:
+            area.bottom = mi.rcMonitor.bottom;
     }
     return true;
 }
@@ -5618,8 +5802,13 @@ void EvaluateCenter() {
         OffsetRect(&box, panel.left, panel.top);
         panel = box;
     }
+    HWND taskbar = TaskbarOnMonitor(MonitorFromRect(&panel, MONITOR_DEFAULTTOPRIMARY));
+    // Side taskbar: the notification center hold steps back.
+    if (taskbar && core::IsSide(taskbar)) {
+        return;
+    }
     g_center = front;
-    g_centerTaskbar = TaskbarOnMonitor(MonitorFromRect(&panel, MONITOR_DEFAULTTOPRIMARY));
+    g_centerTaskbar = taskbar;
     g_centerTimer = g_centerTaskbar ? SetTimer(nullptr, 0, kCenterLookMs, CenterTick) : 0;
     core::DiagLine(L"Notification center holds %p", g_centerTaskbar);
 }
@@ -5681,8 +5870,9 @@ void EndFrontLook() {
 bool MoveFocusFromTaskbar() {
     HWND front = g_front;
     APPBARDATA data{.cbSize = sizeof(data)};
+    // Side taskbar: handing the focus on steps back.
     if (!Active() || !front || !core::IsTaskbarWindow(front) || !g_frontBefore ||
-        !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE)) {
+        !(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE) || core::IsSide(front)) {
         return true;
     }
     // A later event replaces g_front; until then, a lagging foreground or a window
@@ -5968,11 +6158,31 @@ void LogUnhide(int tray, void* pThis, int flags, int request, void* caller) {
     }
 }
 
+// The window of a tray call's taskbar (1 the primary's TrayUI, 2 a
+// CSecondaryTray), kept state or not; null if none is found.
+HWND TrayWindow(int tray, void* pThis) {
+    if (tray == 1) {
+        HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
+        return primary && core::IsTaskbarWindow(primary) ? primary : nullptr;
+    }
+    for (HWND h = nullptr;
+         (h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr));) {
+        if (core::IsTaskbarWindow(h) && GetWindowLongPtrW(h, 0) == (LONG_PTR)pThis) {
+            return h;
+        }
+    }
+    return nullptr;
+}
+
 // True if the call is dropped. The island's own requests call the originals
 // and don't come through here.
 bool OnUnhide(int tray, void* pThis, int flags, int request, void* caller) {
     // g_collapsed is the taskbar thread's.
     if (!Active() || GetCurrentThreadId() != g_trayThread) {
+        return false;
+    }
+    // Side taskbar: the holds of its tray (flashing buttons, the island) step back.
+    if (HWND hwnd = TrayWindow(tray, pThis); hwnd && core::IsSide(hwnd)) {
         return false;
     }
     core::Guard(L"Unhide diag", [&] { LogUnhide(tray, pThis, flags, request, caller); });
@@ -6011,7 +6221,9 @@ PermitAutoHide_t CTaskBtnGroup_IsFlashing_Original;
 
 int WINAPI CTaskListWnd_PermitAutoHide_Hook(void* pThis) {
     InFlight counted;
-    if (!Active() || !settings::g.autohide.keepHiddenOnFlash) {
+    // Side taskbar: the task list doesn't tell its taskbar, so keeping hidden on a
+    // flash steps back only while every taskbar is at a side.
+    if (!Active() || !settings::g.autohide.keepHiddenOnFlash || core::AllSide()) {
         return CTaskListWnd_PermitAutoHide_Original(pThis);
     }
     g_inPermitAutoHide++;
@@ -6072,7 +6284,9 @@ void NoteAnimation(Animation& a, void** result) {
     a.original = animation.Duration();
     core::DiagLine(L"Animation %s new %p", &a == &g_expand ? L"expand" : L"collapse",
                    winrt::get_abi(animation));
-    SetDuration(a, !Active());
+    // Side taskbar: the slides are shared by every taskbar; their length steps
+    // back only while every taskbar is at a side.
+    SetDuration(a, !Active() || core::AllSide());
 }
 
 using SharedAnimation_t = void**(WINAPI*)(void* pThis, void* result);
@@ -6143,7 +6357,8 @@ void CollectTaskbarView(std::vector<SH>& list) {
 }
 
 // A taskbar whose state isn't known yet counts as hidden when auto-hide is on
-// and its window is off the monitor (Windows slides the window itself).
+// and its window is off the monitor (Windows slides the window itself), across
+// the edge it stands at.
 bool LooksHidden(HWND taskbar) {
     APPBARDATA data{.cbSize = sizeof(data)};
     if (!(SHAppBarMessage(ABM_GETSTATE, &data) & ABS_AUTOHIDE)) {
@@ -6151,13 +6366,16 @@ bool LooksHidden(HWND taskbar) {
     }
     RECT rc;
     MONITORINFO monitor{.cbSize = sizeof(monitor)};
+    const RECT& m = monitor.rcMonitor;
     return GetWindowRect(taskbar, &rc) &&
            GetMonitorInfo(core::MonitorOf(taskbar), &monitor) &&
-           (rc.top < monitor.rcMonitor.top || rc.bottom > monitor.rcMonitor.bottom);
+           (core::IsSide(taskbar) ? rc.left < m.left || rc.right > m.right
+                                  : rc.top < m.top || rc.bottom > m.bottom);
 }
 
 void Apply(HWND taskbar) {
-    if (core::g_vertical) {
+    // Side taskbar: auto-hide's own work steps back (On).
+    if (core::IsSide(taskbar)) {
         return;
     }
     static bool logged;
@@ -6786,8 +7004,9 @@ void Prune() {
     }
 }
 
+// g_taskbars has no side taskbar (Apply).
 void Show(Snapshot const& s) {
-    if (g_taskbars.empty() || core::g_vertical) {
+    if (g_taskbars.empty()) {
         return;
     }
     if (g_onShow) {
@@ -6802,7 +7021,8 @@ void Show(Snapshot const& s) {
 // ---- lifecycle --------------------------------------------------------------------
 
 void Start() {
-    if (core::g_vertical || g_thread) {
+    // Side taskbar: with every taskbar at a side the media player doesn't start.
+    if (core::AllSide() || g_thread) {
         return;
     }
     g_stop = false;
@@ -6828,7 +7048,8 @@ void Start() {
 }
 
 void Apply(HWND taskbar) {
-    if (core::g_vertical || !taskbar ||
+    // Side taskbar: the media widget steps back.
+    if (!taskbar || core::IsSide(taskbar) ||
         std::ranges::find(g_taskbars, taskbar) != g_taskbars.end()) {
         return;
     }
@@ -8380,7 +8601,8 @@ void Stop() {
 }
 
 void Apply(HWND hwnd) {
-    if (core::g_vertical || core::g_unloading || !hwnd ||
+    // Side taskbar: the usage meter steps back.
+    if (core::g_unloading || !hwnd || core::IsSide(hwnd) ||
         std::ranges::find(g_taskbars, hwnd) != g_taskbars.end()) {
         return;
     }
@@ -8757,7 +8979,8 @@ void Hide(FrameworkElement const& button) {
 }
 
 void OnButton(FrameworkElement const& button) {
-    if (!IsStartButton(button)) {
+    // Side taskbar: the start button's hiding and Bloom flower step back.
+    if (!IsStartButton(button) || core::IsSide(button.XamlRoot())) {
         return;
     }
     if (settings::g.start.mode == settings::StartMode::kHidden) {
@@ -8768,7 +8991,8 @@ void OnButton(FrameworkElement const& button) {
 }
 
 void Apply(HWND hwnd) {
-    if (core::g_vertical || core::g_unloading || !hwnd) {
+    // Side taskbar: the start button's hiding and Bloom flower step back.
+    if (core::g_unloading || !hwnd || core::IsSide(hwnd)) {
         return;
     }
     size::g_onToggleButton = OnButton;
@@ -11462,7 +11686,9 @@ void Sync(Island& g) {
         return;
     }
     RECT monitor;
-    bool want = !core::g_vertical && !g.fullscreen && MonitorRect(g, monitor);
+    // Side taskbar: the island steps back (it is drawn for a top or bottom edge).
+    bool side = core::IsSide(g.taskbar);
+    bool want = !side && !g.fullscreen && MonitorRect(g, monitor);
     if (want && AtBottom(g.taskbar, monitor) != g.bottom) {
         // The taskbar went to the other edge: the island starts there afresh.
         if (g.shown) {
@@ -11489,7 +11715,7 @@ void Sync(Island& g) {
     if (want && !g.shown) {
         Show(g);
     } else if (!want && g.shown) {
-        Hide(g, core::g_vertical ? L"vertical"
+        Hide(g, side             ? L"side"
                 : g.fullscreen   ? L"fullscreen"
                 : laidOutTried   ? L"layout failed"
                                  : L"no monitor");
@@ -11955,7 +12181,8 @@ int g_buildTries = kBuildTries;
 ULONGLONG g_buildFailed;  // tick of the last failure
 
 void Apply(HWND taskbar) {
-    if (core::g_vertical || core::g_unloading || !taskbar || Of(taskbar)) {
+    // Side taskbar: the island steps back.
+    if (core::g_unloading || !taskbar || core::IsSide(taskbar) || Of(taskbar)) {
         return;
     }
     Prune();
@@ -26366,7 +26593,8 @@ void Publish(Bar& bar) {
 }
 
 void Apply(HWND hwnd) {
-    if (core::g_vertical) {
+    // Side taskbar: the panels near the tray step back (no tray span is kept).
+    if (core::IsSide(hwnd)) {
         return;
     }
     auto root = core::TaskbarRoot(hwnd);
@@ -26426,9 +26654,9 @@ LONG PlaceTop(const RECT& shown) {
     HWND taskbar = TaskbarOn(monitor);
     MONITORINFO mi{.cbSize = sizeof(mi)};
     RECT bar;
+    // Side taskbar: the notification center's top placement steps back.
     if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
-        bar.right - bar.left <= bar.bottom - bar.top ||
-        bar.top + bar.bottom >= mi.rcMonitor.top + mi.rcMonitor.bottom) {
+        core::IsSide(taskbar) || bar.top + bar.bottom >= mi.rcMonitor.top + mi.rcMonitor.bottom) {
         return shown.top;
     }
     UINT dpi = GetDpiForWindow(taskbar);  // explorer's, on that monitor
@@ -26448,8 +26676,9 @@ int PlaceY(int x, int y, int width, int height) {
     HWND taskbar = TaskbarOn(monitor);
     MONITORINFO mi{.cbSize = sizeof(mi)};
     RECT bar;
+    // Side taskbar: Quick Settings' move to its taskbar's side steps back.
     if (!taskbar || !GetWindowRect(taskbar, &bar) || !GetMonitorInfo(monitor, &mi) ||
-        bar.right - bar.left <= bar.bottom - bar.top) {
+        core::IsSide(taskbar)) {
         return y;
     }
     LONG middle = mi.rcMonitor.top + mi.rcMonitor.bottom;
@@ -26748,7 +26977,8 @@ GetShowPosition_t GetShowPosition_Original;
 
 void* WINAPI GetShowPosition_Hook(void* point, int location, double margin, void* grid,
                                   double width, double height) {
-    // WindowsUdk TaskbarLocation: 1 top, 3 bottom.
+    // WindowsUdk TaskbarLocation: 1 top, 3 bottom. Side taskbar: a side one's
+    // menus (0 left, 2 right) keep Windows' place.
     if ((location == 1 || location == 3) && grid && !core::g_unloading) {
         core::Guard(L"Tray menu", [&] {
             auto icon = core::FromAbi(*(void**)grid);
@@ -26843,6 +27073,10 @@ int EdgeSetting() {
             return ABE_TOP;
         case settings::Edge::kBottom:
             return ABE_BOTTOM;
+        case settings::Edge::kLeft:
+            return ABE_LEFT;
+        case settings::Edge::kRight:
+            return ABE_RIGHT;
         default:
             return -1;
     }
@@ -27149,8 +27383,9 @@ void Stop() {
 // ============================================================================
 namespace position {
 // ============================================================================
-// The taskbars at the top or bottom edge whatever Windows' setting says, through
-// the location Windows has of its own on newer builds (native): each taskbar
+// The taskbars at the top, bottom, left or right edge whatever Windows' setting
+// says, through the location Windows has of its own on newer builds (native),
+// which lays a taskbar at a side out vertically: each taskbar
 // reads the location from the registry as it sets itself up, and its content
 // asks TaskbarSettings::Location. Both get the edge set for the taskbar's
 // monitor: the monitor's own in prefs.json ("taskbarEdges", which Bloom lists),
@@ -27163,8 +27398,10 @@ namespace position {
 // keeps (window long 0, as autohide finds it) or the one _CreateSecondaryTray
 // made for a monitor. Each TaskbarSettings is matched to its taskbar window as
 // it is made; one made before the mod loaded answers the primary's edge, so
-// when that is wrong for its secondary the secondaries are made again, once.
-// Without these hooks every taskbar gets the common edge.
+// when that is wrong for its secondary the secondaries are made again, once. A
+// secondary takes its orientation only as it is made, so they are made again too
+// whenever one goes between horizontal and a side (secondaries made again,
+// below). Without these hooks every taskbar gets the common edge.
 
 using SH = WindhawkUtils::SYMBOL_HOOK;
 namespace wdj = winrt::Windows::Data::Json;
@@ -27180,8 +27417,7 @@ constexpr PCWSTR kEdgesField = L"taskbarEdges";
 constexpr PCWSTR kPerMonitorField = L"perMonitorEdges";
 
 // A monitor's choice in the file: 0 the common edge, then top, bottom, left and
-// right. Left and right are kept for later and read as the common edge until
-// the taskbar can stand on them.
+// right.
 enum class MonitorEdge { kCommon, kTop, kBottom, kLeft, kRight };
 
 MonitorEdge FromRecord(double value) {
@@ -27207,6 +27443,10 @@ int EffectiveEdge(MonitorEdge choice, settings::Edge common) {
             return ABE_TOP;
         case MonitorEdge::kBottom:
             return ABE_BOTTOM;
+        case MonitorEdge::kLeft:
+            return ABE_LEFT;
+        case MonitorEdge::kRight:
+            return ABE_RIGHT;
         default:
             break;
     }
@@ -27215,6 +27455,10 @@ int EffectiveEdge(MonitorEdge choice, settings::Edge common) {
             return ABE_TOP;
         case settings::Edge::kBottom:
             return ABE_BOTTOM;
+        case settings::Edge::kLeft:
+            return ABE_LEFT;
+        case settings::Edge::kRight:
+            return ABE_RIGHT;
         default:
             return -1;
     }
@@ -27233,7 +27477,7 @@ thread_local Reading g_reading;
 std::mutex g_lock;  // everything below; never held over a call into explorer
 // Monitor id → its choice, as the file has it.
 [[clang::no_destroy]] std::unordered_map<std::wstring, MonitorEdge> g_edges;
-std::atomic<bool> g_anyForced;  // a monitor of the file is set to top or bottom
+std::atomic<bool> g_anyForced;  // a monitor of the file is set to an edge
 // Monitor ids found, by handle and device name (a handle can come back for another
 // display after a change).
 struct Known {
@@ -27250,6 +27494,10 @@ struct Known {
 // Windows' again. The secondaries' by monitor id.
 int g_toldPrimary = -1;
 [[clang::no_destroy]] std::unordered_map<std::wstring, int> g_told;
+// Each secondary taskbar window → the edge (ABE_*) it was made for, whose
+// orientation its content keeps: Windows' own for one made before the mod loaded,
+// else the edge it was told as it was made. Taken out as the window goes.
+[[clang::no_destroy]] std::unordered_map<HWND, int> g_madeFor;
 bool g_listening;  // taskbar thread: hears of the file's changes
 // While set, explorer reads that the taskbar isn't on every display, and a tray
 // setting change takes the secondaries away (MakeSecondariesAgain).
@@ -27314,18 +27562,22 @@ int PrimaryEdge() {
     return EdgeOn(PrimaryMonitor());
 }
 
+// The secondary taskbar window that keeps a CSecondaryTray; null if none does (yet).
+HWND WindowOfTray(void* tray) {
+    for (HWND h = nullptr;
+         (h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr));) {
+        if (core::IsTaskbarWindow(h) && GetWindowLongPtrW(h, 0) == (LONG_PTR)tray) {
+            return h;
+        }
+    }
+    return nullptr;
+}
+
 // A secondary taskbar's monitor from its CSecondaryTray: the one explorer set on
 // the window that keeps that tray, else the one the tray was made for, else
 // where that window is; null if none of them is known.
 HMONITOR SecondaryMonitor(void* tray) {
-    HWND window = nullptr;
-    for (HWND h = nullptr;
-         (h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr));) {
-        if (core::IsTaskbarWindow(h) && GetWindowLongPtrW(h, 0) == (LONG_PTR)tray) {
-            window = h;
-            break;
-        }
-    }
+    HWND window = WindowOfTray(tray);
     if (auto on = window ? (HMONITOR)GetProp(window, L"TaskbarMonitor") : nullptr) {
         return on;
     }
@@ -27338,19 +27590,32 @@ HMONITOR SecondaryMonitor(void* tray) {
     return window ? MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) : nullptr;
 }
 
-// Windows' own setting.
+using RegGetValueW_t = decltype(&RegGetValueW);
+RegGetValueW_t RegGetValueW_Original;
+
+// Windows' own setting, past the hook below (asked inside a taskbar's own read too).
 int StoredEdge() {
+    auto get = RegGetValueW_Original ? RegGetValueW_Original : &RegGetValueW;
     DWORD edge = ABE_BOTTOM, size = sizeof(edge);
-    if (RegGetValueW(HKEY_CURRENT_USER, kAdvancedKey, kLocationValue, RRF_RT_REG_DWORD,
-                     nullptr, &edge, &size) != ERROR_SUCCESS ||
+    if (get(HKEY_CURRENT_USER, kAdvancedKey, kLocationValue, RRF_RT_REG_DWORD, nullptr, &edge,
+            &size) != ERROR_SUCCESS ||
         edge > ABE_BOTTOM) {
         edge = ABE_BOTTOM;
     }
     return (int)edge;
 }
 
-using RegGetValueW_t = decltype(&RegGetValueW);
-RegGetValueW_t RegGetValueW_Original;
+// An edge as the taskbar has it, Windows' own for -1.
+int Placed(int edge, int stored) {
+    return edge >= 0 ? edge : stored;
+}
+
+// The edge a monitor's taskbar is set to, Windows' own where none is (for
+// core::EdgeOf, a window whose place tells nothing yet).
+int EdgeSetFor(HMONITOR monitor) {
+    return Placed(EdgeOn(monitor), StoredEdge());
+}
+
 LONG WINAPI RegGetValueW_Hook(HKEY key,
                               LPCWSTR subKey,
                               LPCWSTR value,
@@ -27379,7 +27644,9 @@ LONG WINAPI RegGetValueW_Hook(HKEY key,
     }
     int edge;
     if (reading.who == Reading::kSecondary) {
-        HMONITOR monitor = g_perMonitor ? SecondaryMonitor(reading.tray) : nullptr;
+        // Without the per-monitor hooks every monitor has the common edge; the
+        // monitor still keys what it was told, as Apply keys it.
+        HMONITOR monitor = SecondaryMonitor(reading.tray);
         if (g_perMonitor && !monitor) {
             Wh_Log(L"Secondary taskbar %p: monitor not known, the common edge", reading.tray);
         }
@@ -27435,6 +27702,12 @@ HRESULT WINAPI CSecondaryTray__CreateSecondaryTray_Hook(void* pThis,
     }
     HRESULT ret =
         CSecondaryTray__CreateSecondaryTray_Original(pThis, taskList, monitor, device);
+    // The edge it read as it was made, which its content keeps the orientation of.
+    if (HWND window = WindowOfTray(pThis)) {
+        int made = EdgeSetFor(monitor);
+        std::lock_guard lock(g_lock);
+        g_madeFor[window] = made;
+    }
     if (!core::g_unloading) {
         core::Post(NoteTaskbars);  // its monitor gets a record
     }
@@ -27548,9 +27821,24 @@ bool ReadEdges() {
     return true;
 }
 
+void OnTaskbarGone(HWND hwnd);
+
+// In Wh_ModInit, before the hooks run: the secondaries there were made before the
+// mod loaded, for Windows' own edge.
+void NoteMadeBefore() {
+    int stored = StoredEdge();
+    for (HWND hwnd : core::Taskbars()) {
+        if (core::IsSecondary(hwnd)) {
+            std::lock_guard lock(g_lock);
+            g_madeFor.try_emplace(hwnd, stored);
+        }
+    }
+}
+
 // After taskbar.dll is hooked, in Wh_ModInit: whether this build has the
 // location of its own, and if so the registry read is caught too.
 void TaskbarDllHooked() {
+    core::g_edgeSetFor = EdgeSetFor;
     bool native;
     if (g_feature && g_featureIsEnabled) {
         constexpr int kReportingKindNone = 0;
@@ -27585,6 +27873,8 @@ void TaskbarDllHooked() {
         return;
     }
     core::g_forcedEdge = PrimaryEdge;
+    core::g_onTaskbarGone = OnTaskbarGone;
+    NoteMadeBefore();
     if (g_perMonitor) {
         core::Guard(L"Taskbar edges", ReadEdges);
     } else {
@@ -27593,50 +27883,71 @@ void TaskbarDllHooked() {
 }
 
 // ---- secondaries made again ----------------------------------------------------
-// A secondary's content made before the mod loaded has a TaskbarSettings the
-// constructor hook never saw, which answers the primary's edge (Location hook).
-// Where that isn't the secondary's own, the secondaries are made again, once
-// since the mod loaded, as Windows does when the taskbar is turned off and on
-// for the other displays: a tray setting change with MMTaskbarEnabled read as 0
-// takes them away, the next with the real value makes them anew, through the
-// hooks, and the features put themselves on them as on a monitor that came.
+// A secondary taskbar lays its content out horizontally or vertically only as it
+// is made: told another edge later, its window goes there with its content as it
+// was. And a secondary's content made before the mod loaded has a
+// TaskbarSettings the constructor hook never saw, which answers the primary's
+// edge (Location hook). So the secondaries are made again whenever one of them
+// was made for the other orientation than its edge has now, and once since the
+// mod loaded where content made before answers another edge than its own. That
+// is as Windows does when the taskbar is turned off and on for the other
+// displays: a tray setting change with MMTaskbarEnabled read as 0 takes them
+// away, the next with the real value makes them anew, through the hooks, and the
+// features put themselves on them as on a monitor that came.
 //
-// The taskbar thread doesn't wait in between: it is the thread that handles the
-// messages taking the secondaries away, so waiting there could only time out.
-// Each step is posted instead; the last secondary window gone (the subclass'
-// destroy notification) or kRemakeTimeoutMs takes the next.
+// Never from a hook or under g_lock: Apply posts it to the taskbar thread. That
+// thread doesn't wait in between: it is the thread that handles the messages
+// taking the secondaries away, so waiting there could only time out. Each step is
+// posted instead; the last secondary window gone (the subclass' destroy
+// notification) or kRemakeTimeoutMs takes the next. At unload nothing posted runs
+// any more: RemakeAtUnload waits off the taskbar thread, as long at most.
 
 constexpr UINT kRemakeTimeoutMs = 2000;
+// Past this many remakes whose secondaries didn't go in time (or had no timer),
+// none is asked for any more, so a build that won't take them away isn't asked
+// over and over; they stay as they are.
+constexpr int kMaxRemakeFailures = 2;
 std::atomic<bool> g_remade;  // asked for since the mod loaded
+int g_remakeFailures;        // taskbar thread
 UINT_PTR g_remakeTimer;      // taskbar thread
 
-// An edge as the taskbar has it, Windows' own for -1.
-int Placed(int edge, int stored) {
-    return edge >= 0 ? edge : stored;
-}
-
-// Whether the content of a secondary answers another edge than its own.
-bool ContentMisplaced() {
-    if (!g_perMonitor || !Active()) {
+// Whether a secondary's content can't follow its edge: made for the other
+// orientation, or (until the first remake) made before the mod loaded and
+// answering the primary's edge where that isn't its own.
+bool NeedsRemake() {
+    if (!g_native) {
         return false;
     }
     int stored = StoredEdge();
     int primary = Placed(PrimaryEdge(), stored);
+    bool answersPrimary = g_perMonitor && Active() && !g_remade;
     for (HWND hwnd : core::Taskbars()) {
         if (!core::IsSecondary(hwnd)) {
             continue;
         }
+        int own = EdgeSetFor(core::MonitorOf(hwnd));
         bool known;
+        std::optional<int> made;
         {
             std::lock_guard lock(g_lock);
             known = std::ranges::any_of(g_settingsTaskbars,
                                         [&](auto const& each) { return each.second == hwnd; });
+            if (auto it = g_madeFor.find(hwnd); it != g_madeFor.end()) {
+                made = it->second;
+            }
         }
-        if (!known && Placed(EdgeOn(core::MonitorOf(hwnd)), stored) != primary) {
+        if (made && core::IsSideEdge(*made) != core::IsSideEdge(own)) {
+            return true;
+        }
+        if (answersPrimary && !known && own != primary) {
             return true;
         }
     }
     return false;
+}
+
+bool AnySecondary() {
+    return std::ranges::any_of(core::Taskbars(), core::IsSecondary);
 }
 
 // Taskbar thread: the secondaries come back, gone or not.
@@ -27647,7 +27958,9 @@ void EndRemake(bool timedOut) {
     if (g_remakeTimer) {
         KillTimer(nullptr, std::exchange(g_remakeTimer, 0));
     }
-    core::g_onTaskbarGone = nullptr;
+    if (timedOut) {
+        g_remakeFailures++;
+    }
     Wh_Log(L"Secondary taskbars %s: made again", timedOut ? L"not gone in time" : L"gone");
     if (HWND primary = core::PrimaryTaskbar()) {
         SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
@@ -27656,19 +27969,18 @@ void EndRemake(bool timedOut) {
 
 // Taskbar thread, posted: once no secondary is left.
 void CheckSecondariesGone() {
-    if (!g_hidingSecondaries) {
-        return;
+    if (g_hidingSecondaries && !AnySecondary()) {
+        EndRemake(false);
     }
-    for (HWND hwnd : core::Taskbars()) {
-        if (core::IsSecondary(hwnd)) {
-            return;
-        }
-    }
-    EndRemake(false);
 }
 
-// From a taskbar window's destruction: the check comes after it.
-void OnTaskbarGone(HWND) {
+// From a taskbar window's destruction: what it was made for goes with it, and
+// while the secondaries are taken away the check comes after it.
+void OnTaskbarGone(HWND hwnd) {
+    {
+        std::lock_guard lock(g_lock);
+        g_madeFor.erase(hwnd);
+    }
     if (g_hidingSecondaries) {
         core::Post(CheckSecondariesGone);
     }
@@ -27680,7 +27992,8 @@ void CALLBACK OnRemakeTimeout(HWND, UINT, UINT_PTR, DWORD) {
 
 // Taskbar thread, posted from Apply.
 void MakeSecondariesAgain() {
-    if (core::g_unloading || g_hidingSecondaries || g_remade || !ContentMisplaced()) {
+    if (core::g_unloading || g_hidingSecondaries || g_remakeFailures >= kMaxRemakeFailures ||
+        !NeedsRemake()) {
         return;
     }
     HWND primary = core::PrimaryTaskbar();
@@ -27691,22 +28004,53 @@ void MakeSecondariesAgain() {
     // Without the timeout the secondaries could stay away; then they stay as they are.
     g_remakeTimer = SetTimer(nullptr, 0, kRemakeTimeoutMs, OnRemakeTimeout);
     if (!g_remakeTimer) {
+        g_remakeFailures++;
         Wh_Log(L"Secondary taskbars not made again: no timer");
         return;
     }
-    Wh_Log(L"Secondary taskbars made again: their content was made before the mod loaded");
-    core::g_onTaskbarGone = OnTaskbarGone;
+    Wh_Log(L"Secondary taskbars made again: their content can't follow their edges");
     g_hidingSecondaries = true;
     SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
     core::Post(CheckSecondariesGone);  // they may be gone already
 }
 
+// Wh_ModBeforeUninit, after Apply told every taskbar Windows' edge, off the
+// taskbar thread: secondaries made for the other orientation than Windows' edge
+// are made again for it, waited for here.
+void RemakeAtUnload() {
+    HWND primary = core::PrimaryTaskbar();
+    if (!g_native || !primary ||
+        GetWindowThreadProcessId(primary, nullptr) == GetCurrentThreadId()) {
+        return;
+    }
+    bool side = core::IsSideEdge(StoredEdge());
+    bool needed = false;
+    {
+        std::lock_guard lock(g_lock);
+        for (auto const& [hwnd, made] : g_madeFor) {
+            needed |= IsWindow(hwnd) && core::IsSideEdge(made) != side;
+        }
+    }
+    if (!needed) {
+        return;
+    }
+    Wh_Log(L"Secondary taskbars made again for Windows' own edge");
+    g_hidingSecondaries = true;
+    SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+    for (ULONGLONG until = GetTickCount64() + kRemakeTimeoutMs;
+         AnySecondary() && GetTickCount64() < until;) {
+        Sleep(20);
+    }
+    g_hidingSecondaries = false;
+    SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+}
+
 // Moves the taskbars to their edges, or back to Windows' once unloading. The
 // primary moves with the change the Settings app sends, which has its content
-// read the location again too; the tray setting change, sent to the primary,
-// has the secondaries read theirs again. ShellHost finds the primary's edge on
-// its window. A secondary whose content can't follow is made again, later on
-// the taskbar thread.
+// read the location again too, and turns between horizontal and vertical with
+// it; the tray setting change, sent to the primary, has the secondaries read
+// theirs again. ShellHost finds the primary's edge on its window. Secondaries
+// whose content can't follow are made again, later on the taskbar thread.
 void Apply() {
     if (!g_native) {
         return;
@@ -27717,11 +28061,17 @@ void Apply() {
     }
     bool active = Active();
     int primaryEdge = PrimaryEdge();
-    std::vector<std::pair<std::wstring, int>> secondaries;
+    int stored = StoredEdge();
+    struct Secondary {
+        HWND hwnd;
+        std::wstring id;
+        int edge;
+    };
+    std::vector<Secondary> secondaries;
     for (HWND hwnd : core::Taskbars()) {
         if (core::IsSecondary(hwnd)) {
             HMONITOR monitor = core::MonitorOf(hwnd);
-            secondaries.emplace_back(IdOf(monitor), EdgeOn(monitor));
+            secondaries.push_back({hwnd, IdOf(monitor), EdgeOn(monitor)});
         }
     }
     bool move, reread = false;
@@ -27729,10 +28079,14 @@ void Apply() {
         std::lock_guard lock(g_lock);
         move = std::exchange(g_toldPrimary, primaryEdge) != primaryEdge;
         std::unordered_map<std::wstring, int> told;
-        for (auto const& [id, edge] : secondaries) {
-            auto it = g_told.find(id);
-            reread |= (it != g_told.end() ? it->second : -1) != edge;
-            told[id] = edge;
+        for (auto const& each : secondaries) {
+            auto it = g_told.find(each.id);
+            int was = it != g_told.end() ? it->second : -1;
+            reread |= was != each.edge;
+            told[each.id] = each.edge;
+            // One made since the mod loaded whose making wasn't seen was made for
+            // the edge its monitor was told then.
+            g_madeFor.try_emplace(each.hwnd, Placed(was, stored));
         }
         // A secondary that went with its monitor has nothing to undo.
         g_told.swap(told);
@@ -27742,7 +28096,7 @@ void Apply() {
     } else {
         RemoveProp(primary, core::kEdgeProp);
     }
-    if (active && !g_remade && ContentMisplaced()) {
+    if (NeedsRemake()) {
         core::Post(MakeSecondariesAgain);
     }
     if (!move && !reread) {
@@ -27750,7 +28104,7 @@ void Apply() {
     }
     // Both on any change, so every taskbar and its content read theirs again
     // (the primary told the edge it has, if that stays).
-    int edge = primaryEdge >= 0 ? primaryEdge : StoredEdge();
+    int edge = Placed(primaryEdge, stored);
     Wh_Log(L"Taskbar edges: primary at %d (changed %d), secondaries changed %d", edge, move,
            reread);
     SendMessage(primary, core::kSettingChangeMsg, core::kLocationSetting, edge);
@@ -27824,6 +28178,7 @@ void Stop() {
         prefs::Unwatch(OnPrefsChanged);
     }
     EndRemake(false);
+    core::g_onTaskbarGone = nullptr;
 }
 
 }  // namespace position
@@ -27919,18 +28274,16 @@ int WINAPI TaskbarFrame_OnApplyTemplate_Hook(void* pThis) {
 OnApplyTemplate_t TaskbarBackground_OnApplyTemplate_Original;
 int WINAPI TaskbarBackground_OnApplyTemplate_Hook(void* pThis) {
     int ret = TaskbarBackground_OnApplyTemplate_Original(pThis);
-    if (!core::g_unloading && !core::g_vertical) {
+    if (!core::g_unloading) {
         core::Guard(L"Background template", [&] {
             // Thumbnail previews use the same control, in another window or a
             // popup; only the one in a taskbar's own tree is the bar.
+            // Side taskbar: the pill's background steps back.
             auto bg = core::FromAbi(pThis);
             auto root = bg ? bg.XamlRoot() : nullptr;
             auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-            bool bar = content &&
-                       std::ranges::any_of(core::Taskbars(),
-                                           [&](HWND hwnd) {
-                                               return core::TaskbarRoot(hwnd) == root;
-                                           }) &&
+            HWND taskbar = content ? core::TaskbarOf(root) : nullptr;
+            bool bar = taskbar && !core::IsSide(taskbar) &&
                        core::FindAncestor(bg, [&](auto& p) { return p == content; });
             if (bar) {
                 pill::StyleBackground(bg);
@@ -29108,15 +29461,17 @@ void Stop() {
 namespace entry {
 // ============================================================================
 
-// Taskbar thread: puts every enabled feature onto the taskbars that exist.
+// Taskbar thread: puts every enabled feature onto the taskbars that exist. Each
+// feature steps back by itself on a side taskbar (core::IsSide).
 void ApplyAll() {
     core::NoteUiThread();
-    core::g_vertical = core::LooksVertical(core::PrimaryTaskbar());
-    if (core::g_vertical) {
-        Wh_Log(L"Vertical taskbar: shape features stay off");
-    }
     for (HWND hwnd : core::Taskbars()) {
-        core::Attach(hwnd);
+        if (core::Attach(hwnd)) {
+            core::NoteSide(hwnd);  // as it is now, for the next change to be told
+        }
+        if (core::IsSide(hwnd)) {
+            Wh_Log(L"Side taskbar %p: shape features stay off there", hwnd);
+        }
         if (hooks::g_features.pill) {
             pill::Apply(hwnd);
         }
@@ -29158,7 +29513,7 @@ void ApplyNew() {
     if (hooks::g_features.position && !core::g_unloading) {
         position::NoteTaskbars();
     }
-    if (core::g_vertical || core::g_unloading) {
+    if (core::g_unloading) {
         return;
     }
     for (HWND hwnd : core::Taskbars()) {
@@ -29207,7 +29562,8 @@ void RestoreAll() {
     core::RestoreAll();
 }
 
-// Once per change: the posted pass sets g_vertical again.
+// Once per change: the posted pass applies each feature anew, where each steps
+// back on the taskbars at a side.
 std::atomic<bool> g_orientationPending;
 
 void OnOrientationChanged() {
@@ -29307,6 +29663,7 @@ void Wh_ModBeforeUninit() {
     });
     if (hooks::g_features.position) {
         position::Apply();  // back to Windows' edge
+        position::RemakeAtUnload();  // secondaries made for the other orientation made anew
     }
     core::DetachAll();
 }

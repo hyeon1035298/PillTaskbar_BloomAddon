@@ -90,6 +90,26 @@
               { "box": [20, 33, 32, 7], "r": 3.5, "fill": "accent" }
             ]
           }
+        },
+        "left": {
+          "name": { "ko": "왼쪽", "en": "Left", "ja": "左", "zh": "左侧" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [4, 6, 7, 32], "r": 3.5, "fill": "accent" }
+            ]
+          }
+        },
+        "right": {
+          "name": { "ko": "오른쪽", "en": "Right", "ja": "右", "zh": "右侧" },
+          "picture": {
+            "shapes": [
+              { "box": [1, 1, 70, 42], "r": 4, "alpha": 0.05 },
+              { "box": [1, 1, 70, 42], "r": 4, "stroke": "ink", "alpha": 0.45 },
+              { "box": [61, 6, 7, 32], "r": 3.5, "fill": "accent" }
+            ]
+          }
         }
       }
     },

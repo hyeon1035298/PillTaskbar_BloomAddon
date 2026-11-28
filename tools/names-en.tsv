@@ -2,10 +2,12 @@ group:pill	Pill
 pill.enabled	Pill shape
 pill.enabled#about	Turn off to restore the default Windows taskbar style
 pill.edge	Taskbar position
-pill.edge#about	Place at the top or bottom of the screen. Doesn't modify the Windows registry, so turning off this option or mod restores the Windows setting. Enable Auto-hide helper as well to use auto-hide at the top
+pill.edge#about	Place at the top, bottom, left, or right of the screen. Doesn't modify the Windows registry, so turning off this option or mod restores the Windows setting. Enable Auto-hide helper as well to use auto-hide at the top or sides
 pill.edge=windows	Follow Windows setting
 pill.edge=top	Top
 pill.edge=bottom	Bottom
+pill.edge=left	Left
+pill.edge=right	Right
 pill.align	Pill alignment
 pill.align#about	Where to align the taskbar pill along the screen edge
 pill.align=left	Left
