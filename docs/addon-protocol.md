@@ -78,7 +78,7 @@ JSON은 모두 UTF-8이고, 쓰는 쪽이 임시 파일에 쓴 뒤 이름을 바
 
 #### 트레이 자리 창 속성
 
-모드는 explorer에서 작업표시줄 창(`Shell_TrayWnd`, `Shell_SecondaryTrayWnd`)마다 창 속성 `PillTaskbar.TraySpan`에 알약 트레이의 화면 x 범위를 둔다. 값은 포인터 크기 정수 하나로, 아래 32비트가 왼쪽, 위 32비트가 오른쪽(둘 다 부호 있는 화면 픽셀)이다. 트레이가 없는 작업표시줄(보조 모니터)은 알약 전체의 범위다. 레이아웃이 바뀔 때마다 고치고, 기능을 끄거나 모드를 내리면 지운다. 빠른 설정과 알림 센터를 놓을 때(`tray.panelsNearTray`) ShellHost 안의 모드와 explorer 안의 모드가 읽는다. 파일이나 공유 메모리를 쓰지 않으므로 explorer가 끝나면 함께 없어진다.
+모드는 explorer에서 작업표시줄 창(`Shell_TrayWnd`, `Shell_SecondaryTrayWnd`)마다 창 속성 `PillTaskbar.TraySpan`에 알약 트레이의 화면 x 범위를 둔다. 값은 포인터 크기 정수 하나로, 아래 32비트가 왼쪽, 위 32비트가 오른쪽(둘 다 부호 있는 화면 픽셀)이다. 트레이가 없는 작업표시줄(보조 모니터)은 알약 전체의 범위다. 옆쪽(왼쪽·오른쪽) 작업표시줄은 이 속성 대신 `PillTaskbar.TraySpanY`에 화면 y 범위를 같은 꼴(아래 32비트가 위, 위 32비트가 아래)로 둔다. 레이아웃이 바뀔 때마다 고치고, 기능을 끄거나 모드를 내리면 지운다. 빠른 설정과 알림 센터를 놓을 때(`tray.panelsNearTray`) ShellHost 안의 모드와 explorer 안의 모드가 읽는다. 파일이나 공유 메모리를 쓰지 않으므로 explorer가 끝나면 함께 없어진다.
 
 `pill.glass`가 거짓이면 모드는 알약 조각, 숨김 아일랜드가 알약으로 바뀌는 색, 폴더 창 바탕을 블러·백드롭 없이 테마 틴트 색(`SystemChromeMediumColor`, 폴더 창은 팔레트의 surface)으로 불투명하게 칠한다. 윤곽선(Bloom 모양의 옅은 선, 글래스모피즘의 가장자리 빛)은 그대로다. `Wh_ModSettingsChanged`가 알약과 아일랜드를 다시 그리므로 explorer를 다시 시작하지 않고 양쪽으로 바뀐다. 폴더 창은 다음에 열 때 반영된다.
 
