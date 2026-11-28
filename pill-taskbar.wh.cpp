@@ -6626,6 +6626,17 @@ void ApplySettings() {
     Apply(settings::g.size.taskbarHeight);
 }
 
+// Wh_ModAfterInit, before the taskbars go to their edges: a taskbar that turns to a
+// side takes the thickness as its width as it turns. Without it the turn keeps the
+// width of the frame it had, and the window stays wider than it is tall, so it is
+// never taken for a side one. ApplySettings then gives the height as at any change.
+void NoteHeight() {
+    if (!g_height) {
+        g_iconRoom = g_height = std::max(settings::g.size.taskbarHeight, 2);
+        Wh_Log(L"Taskbar thickness %d set before the edges are applied", g_height);
+    }
+}
+
 void Unapply() {
     Apply(g_originalHeight ? g_originalHeight : 48);
 }
@@ -30034,7 +30045,8 @@ struct Known {
 // the same address is matched again as it is made.
 [[clang::no_destroy]] std::unordered_map<void*, HWND> g_settingsTaskbars;
 // The edges the taskbars were told, -1 for Windows' own: unloading tells them
-// Windows' again. The secondaries' by monitor id.
+// Windows' again. The secondaries' by monitor id. Their content is answered these
+// (ContentEdge), not the edges set, which can change before the taskbars move.
 int g_toldPrimary = -1;
 [[clang::no_destroy]] std::unordered_map<std::wstring, int> g_told;
 // Each secondary taskbar window → the edge (ABE_*) it was made for, whose
@@ -30109,6 +30121,15 @@ int PrimaryEdge() {
     return EdgeOn(PrimaryMonitor());
 }
 
+// The primary's edge for a change of the location setting (core::g_forcedEdge),
+// which tells the primary that edge: its content is answered it from then on.
+int TellPrimary() {
+    int edge = PrimaryEdge();
+    std::lock_guard lock(g_lock);
+    g_toldPrimary = edge;
+    return edge;
+}
+
 // The secondary taskbar window that keeps a CSecondaryTray; null if none does (yet).
 HWND WindowOfTray(void* tray) {
     for (HWND h = nullptr;
@@ -30161,6 +30182,13 @@ int Placed(int edge, int stored) {
 // core::EdgeOf, a window whose place tells nothing yet).
 int EdgeSetFor(HMONITOR monitor) {
     return Placed(EdgeOn(monitor), StoredEdge());
+}
+
+// Some taskbar is set to a side.
+bool AnySideSet() {
+    return std::ranges::any_of(core::Taskbars(), [](HWND hwnd) {
+        return core::IsSideEdge(EdgeSetFor(core::MonitorOf(hwnd)));
+    });
 }
 
 LONG WINAPI RegGetValueW_Hook(HKEY key,
@@ -30294,12 +30322,42 @@ void* WINAPI TaskbarSettings_TaskbarSettings_Hook(void* pThis,
     return ret;
 }
 
+// The edge a taskbar's content is answered, -1 for Windows' own: the one its
+// taskbar was last told (as it read its location, by Apply, or by a change of the
+// location setting), so the content never turns before its window does. A tray
+// told an edge its taskbar isn't at turns inside it, and XAML gives up its layout
+// there (a layout cycle, which explorer doesn't survive). A secondary's content
+// keeps the orientation it was made with until it is made again: told an edge of
+// the other orientation, it is answered the edge it was made for. `taskbar` null:
+// content made before the mod loaded, which is answered the primary's.
+int ContentEdge(HWND taskbar) {
+    if (!taskbar || !core::IsSecondary(taskbar)) {
+        std::lock_guard lock(g_lock);
+        return g_toldPrimary;
+    }
+    std::wstring id = IdOf(core::MonitorOf(taskbar));
+    int told = -1;
+    std::optional<int> made;
+    {
+        std::lock_guard lock(g_lock);
+        if (auto it = g_told.find(id); it != g_told.end()) {
+            told = it->second;
+        }
+        if (auto it = g_madeFor.find(taskbar); it != g_madeFor.end()) {
+            made = it->second;
+        }
+    }
+    if (made && core::IsSideEdge(*made) != core::IsSideEdge(Placed(told, StoredEdge()))) {
+        return *made;
+    }
+    return told;
+}
+
 using TaskbarSettings_Location_t = int(WINAPI*)(void* pThis);
 TaskbarSettings_Location_t TaskbarSettings_Location_Original;
+// Also while the mod unloads: until Apply tells the taskbars Windows' edge, their
+// content keeps the edges they stand at.
 int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
-    if (!Active()) {
-        return TaskbarSettings_Location_Original(pThis);
-    }
     HWND taskbar = nullptr;
     {
         std::lock_guard lock(g_lock);
@@ -30307,8 +30365,8 @@ int WINAPI TaskbarSettings_Location_Hook(void* pThis) {
             taskbar = it->second;
         }
     }
-    int edge = taskbar && core::IsSecondary(taskbar) ? EdgeOn(core::MonitorOf(taskbar))
-                                                     : PrimaryEdge();
+    int edge = -1;
+    core::Guard(L"Taskbar location", [&] { edge = ContentEdge(taskbar); });
     return edge >= 0 ? edge : TaskbarSettings_Location_Original(pThis);
 }
 
@@ -30348,9 +30406,17 @@ void CollectTaskbarDll(std::vector<SH>& list) {
                     true});
 }
 
+// The reads of the file, numbered as they start (the taskbar thread and a
+// settings change's thread pool thread both read), and the one whose choices are
+// in, under g_lock: a read that finishes after a later one is dropped, as the
+// file it read is the older.
+std::atomic<uint64_t> g_edgeReads;
+uint64_t g_edgesTaken;
+
 // Each monitor's choice from the file. False, with the choices as they were,
 // when the file is there but can't be read.
 bool ReadEdges() {
+    uint64_t read = ++g_edgeReads;
     std::unordered_map<std::wstring, MonitorEdge> edges;
     bool forced = false;
     if (prefs::Dir()) {
@@ -30371,6 +30437,10 @@ bool ReadEdges() {
         }
     }
     std::lock_guard lock(g_lock);
+    if (read < g_edgesTaken) {
+        return true;  // a later read's choices are in
+    }
+    g_edgesTaken = read;
     g_edges.swap(edges);
     g_anyForced = forced;
     return true;
@@ -30430,7 +30500,7 @@ void TaskbarDllHooked() {
         g_native = g_perMonitor = false;
         return;
     }
-    core::g_forcedEdge = PrimaryEdge;
+    core::g_forcedEdge = TellPrimary;
     core::g_onTaskbarGone = OnTaskbarGone;
     NoteMadeBefore();
     if (g_perMonitor) {
@@ -30469,6 +30539,8 @@ std::atomic<bool> g_remade;  // asked for since the mod loaded
 // Apply left the secondaries' read of their edges to the remake it posted; sent
 // there where none is made.
 std::atomic<bool> g_rereadLeft;
+// The Apply at unload left the secondaries' read of Windows' edges to RemakeAtUnload.
+std::atomic<bool> g_readAtUnload;
 int g_remakeFailures;        // taskbar thread
 UINT_PTR g_remakeTimer;      // taskbar thread
 
@@ -30588,14 +30660,12 @@ void MakeSecondariesAgain() {
     core::Post(CheckSecondariesGone);  // they may be gone already
 }
 
-// Wh_ModBeforeUninit, after Apply told every taskbar Windows' edge, off the
-// taskbar thread: secondaries made for the other orientation than Windows' edge
-// are made again for it, waited for here.
-void RemakeAtUnload() {
-    HWND primary = core::PrimaryTaskbar();
+// Whether RemakeAtUnload makes the secondaries again: off the taskbar thread, a
+// secondary was made for the other orientation than Windows' edge.
+bool RemakesAtUnload(HWND primary) {
     if (!g_native || !primary ||
         GetWindowThreadProcessId(primary, nullptr) == GetCurrentThreadId()) {
-        return;
+        return false;
     }
     bool side = core::IsSideEdge(StoredEdge());
     bool needed = false;
@@ -30605,7 +30675,20 @@ void RemakeAtUnload() {
             needed |= IsWindow(hwnd) && core::IsSideEdge(made) != side;
         }
     }
-    if (!needed) {
+    return needed;
+}
+
+// Wh_ModBeforeUninit, after Apply told every taskbar Windows' edge, off the
+// taskbar thread: secondaries made for the other orientation than Windows' edge
+// are made again for it, waited for here.
+void RemakeAtUnload() {
+    HWND primary = core::PrimaryTaskbar();
+    bool read = g_readAtUnload.exchange(false);
+    if (!RemakesAtUnload(primary)) {
+        // The read Apply left here, where the remake isn't needed by now.
+        if (read && primary) {
+            SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+        }
         return;
     }
     Wh_Log(L"Secondary taskbars made again for Windows' own edge");
@@ -30695,8 +30778,15 @@ void Apply() {
     Wh_Log(L"Taskbar edges: primary at %d (changed %d), secondaries changed %d", edge, move,
            reread);
     SendMessage(primary, core::kSettingChangeMsg, core::kLocationSetting, edge);
+    // Unloading, secondaries RemakeAtUnload makes again read Windows' edges as they
+    // come back, and its tray setting change has the others read theirs: read here
+    // first, they would move once more with their content as it was.
     if (!remake) {
-        SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+        if (core::g_unloading && RemakesAtUnload(primary)) {
+            g_readAtUnload = true;
+        } else {
+            SendMessage(primary, WM_SETTINGCHANGE, 0, (LPARAM)L"TraySettings");
+        }
     }
 }
 
@@ -32213,7 +32303,7 @@ void OnOrientationChanged() {
         return;
     }
     Wh_Log(L"Taskbar orientation changed");
-    core::Post([] {
+    bool posted = core::Post([] {
         g_orientationPending = false;
         // What a taskbar that left a side was sized with goes back first, so the
         // features below record Windows' own values for it.
@@ -32223,6 +32313,10 @@ void OnOrientationChanged() {
         RestoreAll();
         ApplyAll();
     });
+    // Not posted (the taskbar thread not known yet): the next change is told again.
+    if (!posted) {
+        g_orientationPending = false;
+    }
 }
 
 }  // namespace entry
@@ -32248,9 +32342,20 @@ void Wh_ModAfterInit() {
     }
     hooks::AfterInit();
     if (hooks::g_features.position) {
+        if (hooks::g_features.size && position::AnySideSet()) {
+            size::NoteHeight();
+        }
+        // The taskbar thread known and the primary watched before it moves: a turn
+        // is then seen and handled as while running (the posted pass), and the
+        // secondaries' remake is posted rather than their read sent at once.
+        core::RunOn(core::PrimaryTaskbar(), core::NoteUiThread);
         position::Apply();
     }
-    core::RunOn(core::PrimaryTaskbar(), entry::ApplyAll);
+    // Taken off first, as a turn's pass does: that pass may have run already.
+    core::RunOn(core::PrimaryTaskbar(), [] {
+        entry::RestoreAll();
+        entry::ApplyAll();
+    });
     if (hooks::g_features.size) {
         size::ApplySettings();
     }
