@@ -38,7 +38,8 @@ constexpr int kContinue = -100;
 // How long the runtime in ShellHost gets to bring the mod up.
 constexpr DWORD kPanelStartMs = 15000;
 // How long a new host waits for one that is stopping (or stepping down for an update)
-// to exit: the old host needs up to kUnloadWaitMs to unload, so a little more.
+// to exit: a host that has decided to end takes its runtimes out within one
+// kUnloadWaitMs budget (Leave), so a little more.
 constexpr DWORD kOldHostExitMs = 15000;
 
 // Checks that pid is a running Bloom.exe, and the same file as --bloom when given.
@@ -107,6 +108,8 @@ private:
         return [this](const std::vector<HANDLE>& h, DWORD ms, bool stop) { return Wait(h, ms, stop); };
     }
 
+    // Marks the host leaving and starts the one budget its runtimes get to unload in.
+    void Leave();
     int Finish(int code, const std::wstring& reason = {});
     // code: the exit code when nothing else decides it (safe mode asked wins).
     int Shutdown(int code = addon::kExitOk);
@@ -147,6 +150,7 @@ private:
     // forwarded --serve is refused, so the host that sent it waits for this one to exit
     // and serves that Bloom itself.
     bool leaving_ = false;
+    ULONGLONG leaveBy_ = 0;           // with leaving_: every unload on the way out ends by then
     bool taskbarCreated_ = false;
     bool wakeOnTaskbar_ = false;      // only the main loop's wait returns on TaskbarCreated
 
@@ -207,9 +211,17 @@ bool Host::CreateHostWindow() {
 }
 
 int Host::AcquireInstance() {
+    // Opened first: a Stop already set now was left by an earlier session (Bloom clears
+    // it before it starts a host), and one set from here on is meant for this host.
+    stopEvent_.Reset(CreateEventW(nullptr, TRUE, FALSE, addon::kHostStopEvent));
+    bool staleStop = stopEvent_ && WaitForSingleObject(stopEvent_.get(), 0) == WAIT_OBJECT_0;
     mutex_.Reset(CreateMutexW(nullptr, TRUE, addon::kHostMutex));
     if (!mutex_) return addon::kExitError;
-    if (GetLastError() != ERROR_ALREADY_EXISTS) return kContinue;
+    if (GetLastError() != ERROR_ALREADY_EXISTS) {
+        // A Stop left set by an earlier session would end this host at once.
+        if (staleStop) ResetEvent(stopEvent_.get());
+        return kContinue;
+    }
 
     StateFile other;
     other.Init(dataDir_, true);
@@ -228,11 +240,31 @@ int Host::AcquireInstance() {
         Log(L"host %ls is running; asking it to stop", running.c_str());
         ForwardToHost(L"--stop");
     }
+    // A Stop that comes meanwhile ends this host without serving, once the old one is
+    // gone, so whoever asked for it can count on no host being left. A Stop left from
+    // before cannot be told apart from a new one; then only the mutex is waited for.
+    ULONGLONG deadline = GetTickCount64() + kOldHostExitMs;
+    if (stopEvent_ && !staleStop) {
+        HANDLE both[] = {stopEvent_.get(), mutex_.get()};
+        DWORD r = WaitForMultipleObjects(2, both, FALSE, kOldHostExitMs);
+        if (r == WAIT_OBJECT_0) {
+            Log(L"stop asked for while waiting for the old host; ending once it has exited");
+            r = WaitForSingleObject(mutex_.get(), MsUntil(deadline));
+            if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) Log(L"the old host did not stop");
+            return addon::kExitOk;
+        }
+        if (r != WAIT_OBJECT_0 + 1 && r != WAIT_ABANDONED_0 + 1) {
+            Log(L"the old host did not stop");
+            return addon::kExitError;
+        }
+        return kContinue;
+    }
     DWORD r = WaitForSingleObject(mutex_.get(), kOldHostExitMs);
     if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) {
         Log(L"the old host did not stop");
         return addon::kExitError;
     }
+    if (staleStop) ResetEvent(stopEvent_.get());
     return kContinue;
 }
 
@@ -337,9 +369,18 @@ addon::Config Host::MakeConfig() const {
     return c;
 }
 
-int Host::Finish(int code, const std::wstring& reason) {
+void Host::Leave() {
+    if (leaving_) return;
     leaving_ = true;
-    StopPanel();
+    leaveBy_ = GetTickCount64() + addon::kUnloadWaitMs;
+    // Every way out takes ShellHost's runtime out too; asked now, it unloads while
+    // explorer's does instead of after it.
+    if (havePanel_ && panel_.runtimeIn) AskUnload(panel_);
+}
+
+int Host::Finish(int code, const std::wstring& reason) {
+    Leave();
+    StopPanel(MsUntil(leaveBy_));
     HostState& s = state_.state();
     if (code == addon::kExitCrashes) s.safeMode = true;
     std::wstring why = reason.empty() && code != addon::kExitOk ? std::wstring(ExitReason(code)) : reason;
@@ -351,7 +392,7 @@ int Host::Finish(int code, const std::wstring& reason) {
 
 // Takes the runtime out (if one is in) and ends the host.
 int Host::Shutdown(int code) {
-    leaving_ = true;
+    Leave();
     state_.SetPhase(L"stopping");
     std::wstring reason;
     // A stop that cut the hook wait short can race a runtime that was just arriving.
@@ -362,7 +403,7 @@ int Host::Shutdown(int code) {
     // Explorer's runtime and ShellHost's are asked at once and share one budget: Bloom
     // kills a host that has not ended soon after kUnloadWaitMs, and waiting for one
     // after the other could leave the ShellHost runtime without a host.
-    ULONGLONG deadline = GetTickCount64() + addon::kUnloadWaitMs;
+    ULONGLONG deadline = leaveBy_;
     bool inExplorer = haveExplorer_ && ex_.runtimeIn;
     if (inExplorer) AskUnload(ex_);
     if (havePanel_ && panel_.runtimeIn) AskUnload(panel_);
@@ -609,15 +650,19 @@ int Host::WaitRuntimeReady() {
                 KeepAutoHideForIsland(dataDir_);
                 return kContinue;
             }
+            // The host ends from here on: marked leaving before the unload pumps messages,
+            // so a --serve forwarded meanwhile is refused and not lost with this host.
             if (rs.state == L"initFailed") {
-                UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
+                Leave();
+                UnloadRuntime(ex_, MsUntil(leaveBy_), Waiter());
                 if (!ex_.runtimeIn) state_.state().loaded.reset();
                 if (rs.reason == L"symbols" && !symbols_.PortedKeys().empty()) return PortedSymbolsFailed();
                 return rs.reason == L"symbols" ? addon::kExitNoSymbols : addon::kExitError;
             }
             if (rs.state == L"refused") {
                 // A refusing runtime keeps Loaded and its reason until it is asked to go.
-                UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
+                Leave();
+                UnloadRuntime(ex_, MsUntil(leaveBy_), Waiter());
                 if (!ex_.runtimeIn) state_.state().loaded.reset();
                 if (rs.reason == L"windhawk") return addon::kExitWindhawk;
                 if (rs.reason == L"restart") return addon::kExitRestart;
@@ -633,7 +678,8 @@ int Host::WaitRuntimeReady() {
         if (r == 0 || r == kWaitStop) return kContinue;  // the main loop handles both
     }
     Log(L"the runtime did not leave starting within %lu s", kRuntimeStartMs / 1000);
-    UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
+    Leave();
+    UnloadRuntime(ex_, MsUntil(leaveBy_), Waiter());
     if (!ex_.runtimeIn) state_.state().loaded.reset();
     return addon::kExitError;
 }
@@ -807,8 +853,8 @@ void Host::OnPanelExit() {
     }
 }
 
-// timeoutMs: less than kUnloadWaitMs when Shutdown asked this runtime together with
-// explorer's and part of the budget is gone.
+// timeoutMs: less than kUnloadWaitMs when the host is leaving, this runtime was asked
+// together with explorer's (Leave) and part of the budget is gone.
 void Host::StopPanel(DWORD timeoutMs) {
     if (!havePanel_) return;
     havePanel_ = false;
@@ -844,9 +890,6 @@ bool Host::TaskbarReady(const Taskbar& t) {
 int Host::Run() {
     int r = AcquireInstance();
     if (r != kContinue) return r;
-    stopEvent_.Reset(CreateEventW(nullptr, TRUE, FALSE, addon::kHostStopEvent));
-    // A Stop left set by an earlier session would end this host at once.
-    if (stopEvent_) ResetEvent(stopEvent_.get());
     g_host = this;
     if (!CreateHostWindow()) {
         Log(L"could not create the host window (%lu)", GetLastError());
@@ -912,11 +955,12 @@ int Host::Run() {
                     injectNotBefore_ = 0;
                     r = StartExplorer(t);
                     if (r != kContinue) {
-                        leaving_ = true;
-                        // Leave nothing behind when giving up with a runtime inside.
-                        if (haveExplorer_ && ex_.runtimeIn) UnloadRuntime(ex_, addon::kUnloadWaitMs, Waiter());
+                        Leave();
+                        // Leave nothing behind when giving up with a runtime inside, within
+                        // what is left of the budget an earlier unload on this way out began.
+                        if (haveExplorer_ && ex_.runtimeIn) UnloadRuntime(ex_, MsUntil(leaveBy_), Waiter());
                         if (!ex_.runtimeIn) state_.state().loaded.reset();
-                        StopPanel();  // Finish does it too, but is skipped below
+                        StopPanel(MsUntil(leaveBy_));  // Finish does it too, but is skipped below
                         return state_.state().phase == L"failed" ? r : Finish(r);
                     }
                     // On to the wait: it watches the new explorer, or polls again in a
