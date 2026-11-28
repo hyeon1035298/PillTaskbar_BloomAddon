@@ -2577,8 +2577,14 @@ void StyleAppsPiece(FrameworkElement const& frame, bool withTray, bool side = fa
     }
 }
 
+bool ShowDesktopCorner();
+constexpr double kSideSliverEnd = 4;
+
 // The tray piece of a side taskbar: the row under the apps (StyleSideFrame), its
 // bottom end rounded. Its width stays the taskbar's (size gives it the thickness).
+// The show-desktop sliver ends the column there (widgets::EndSlot), so the end
+// padding is less by what the sliver adds, and the last item keeps as far off the
+// pill's end as the first one off its top.
 void StyleSideTray(FrameworkElement const& trayFrame) {
     core::Set(trayFrame, Controls::Grid::RowProperty(), box_value(2));
     core::Set(trayFrame, Controls::Grid::ColumnProperty(), box_value(0));
@@ -2589,7 +2595,11 @@ void StyleSideTray(FrameworkElement const& trayFrame) {
     core::Set(trayFrame, FrameworkElement::MarginProperty(), box_value(Thickness{}));
     if (auto grid = core::ChildNamed(trayFrame, L"SystemTrayFrameGrid")) {
         double r = settings::g.pill.cornerRadius;
-        StylePiece(grid, Turned(settings::TrayMargin()), Turned(theme::kTrayPadding),
+        Thickness padding = Turned(theme::kTrayPadding);
+        if (ShowDesktopCorner()) {
+            padding.Bottom = kSideSliverEnd;
+        }
+        StylePiece(grid, Turned(settings::TrayMargin()), padding,
                    Turned(theme::kTrayBorder), Turned(Corners(0, r)), true);
     } else {
         Wh_Log(L"Side taskbar: no SystemTrayFrameGrid");
@@ -3516,8 +3526,11 @@ uint32_t LineCount(Controls::Grid const& grid, bool rows) {
 }
 
 // Just after the child holding the clock and the show-desktop sliver that
-// follows it, so the pill ends with the widgets; else at the end.
-uint32_t EndSlot(Controls::Panel const& tray, bool rows = false) {
+// follows it, so the pill ends with the widgets; else at the end. `upright`
+// (a side taskbar's column): before the sliver, which stays at the column's
+// far end as Windows has it, so it doesn't stand between the clock and the
+// widgets.
+uint32_t EndSlot(Controls::Panel const& tray, bool rows = false, bool upright = false) {
     auto children = tray.Children();
     auto grid = tray.try_as<G>();
     auto after = [&](uint32_t i) {
@@ -3533,7 +3546,10 @@ uint32_t EndSlot(Controls::Panel const& tray, bool rows = false) {
                           3))) {
             uint32_t slot = after(i);
             uint32_t desk;
-            auto sliver = core::ChildNamed(tray, L"ShowDesktopStack");
+            FrameworkElement sliver{nullptr};
+            if (!upright) {
+                sliver = core::ChildNamed(tray, L"ShowDesktopStack");
+            }
             if (sliver && children.IndexOf(sliver, desk) &&
                 (grid ? uint32_t(LineOf(sliver, rows)) : desk) == slot) {
                 slot = after(desk);
@@ -3680,7 +3696,7 @@ Controls::StackPanel Host(Bar& bar, Side side) {
             InsertInTray(tray, 0, host, rows);
         } else {
             host.Margin({0, kHostGap, 0, 0});
-            InsertInTray(tray, EndSlot(tray, rows), host, rows);
+            InsertInTray(tray, EndSlot(tray, rows, true), host, rows);
         }
     } else {
         host.Orientation(Controls::Orientation::Horizontal);
@@ -4357,17 +4373,48 @@ std::wstring ClockText(bool seconds) {
                : L"";
 }
 
-// Side taskbar: the time without its seconds, and under it the seconds
-// smaller and in the muted text color. Writing the lines comes back here through
-// the text's watch, which this keeps from writing again.
-constexpr double kSideSecondsSize = 11;
+// The clock text's parts, one line each: split at its colons, line breaks and
+// spaces (a 12-hour clock's "PM" stands on a line of its own). A part that is a
+// lone digit (an "H:mm" format's hour) gets a leading zero, so the lines of a
+// side clock stand as wide as each other. `seconds` is set when they read as
+// hours, minutes and seconds.
+std::vector<std::wstring> ClockParts(std::wstring const& clock, bool& seconds) {
+    std::vector<std::wstring> parts;
+    std::wstring part;
+    int colons = 0;
+    for (wchar_t ch : clock + L' ') {
+        bool cut = ch == L':' || ch == L'\n' || ch == L'\r' || iswspace(ch) ||
+                   ch == L'\u00A0' || ch == L'\u202F';
+        colons += ch == L':';
+        if (ch == 0x200E || ch == 0x200F) {
+            continue;  // direction marks some locales put in the time
+        }
+        if (!cut) {
+            part += ch;
+        } else if (!part.empty()) {
+            if (part.size() == 1 && iswdigit(part[0])) {
+                part.insert(0, 1, L'0');
+            }
+            parts.push_back(std::exchange(part, {}));
+        }
+    }
+    seconds = colons == 2 && parts.size() == 3 &&
+              std::ranges::all_of(parts.back(), [](wchar_t ch) { return iswdigit(ch) != 0; });
+    return parts;
+}
+
+// Side taskbar: the clock's parts one under another (ClockParts: an "H:mm"
+// hour gets two digits), and under them the seconds in the muted text color,
+// as large as the time and each digit as wide as the others: the lines are of
+// one width and keep one middle as the time moves. Writing the lines comes back
+// here through the text's watch, which this keeps from writing again.
 bool g_writingClock = false;
 std::vector<HWND> g_loggedClocks;
-// The time with its seconds on one line, as a top or bottom taskbar's clock
-// has it, kept as the side clock puts the seconds under it: the island reads
-// this in place of the two lines.
+// The time (with its seconds if shown) on one line, as a top or bottom
+// taskbar's clock has it, kept as the side clock stands its parts in lines: the
+// island reads this in place of the lines.
 [[clang::no_destroy]] std::wstring g_clockLine;
-// Told when a side clock's seconds were written (the island, which reads
+// Told when a side clock's lines were written (the island, which reads
 // g_clockLine): a change of the text's runs may not come through a watch on its text.
 void (*g_onClockLine)(Controls::TextBlock const& time) = nullptr;
 
@@ -4381,32 +4428,43 @@ void SideClock(Controls::TextBlock const& time, HWND taskbar, bool seconds) {
                std::wstring(time.Text()).c_str(), time.ActualWidth(), time.ActualHeight(),
                seconds);
     }
-    if (!seconds) {
-        if (text != std::wstring_view(time.Text())) {
-            time.Text(text);
-        }
+    bool hms = false;
+    auto parts = ClockParts(text, hms);
+    if (parts.empty()) {
         return;
     }
-    SYSTEMTIME now;
-    GetLocalTime(&now);
-    wchar_t second[4];
-    swprintf_s(second, L"%02u", (unsigned)now.wSecond);
-    g_clockLine = ClockText(true);
+    wchar_t second[4]{};
+    if (seconds) {
+        SYSTEMTIME now;
+        GetLocalTime(&now);
+        swprintf_s(second, L"%02u", (unsigned)now.wSecond);
+    }
+    g_clockLine = ClockText(seconds);
     g_writingClock = true;
     core::Guard(L"Side clock", [&] {
         auto inlines = time.Inlines();
         inlines.Clear();
-        Documents::Run main;
-        main.Text(text);
-        inlines.Append(main);
-        inlines.Append(Documents::LineBreak());
-        Documents::Run rest;
-        rest.Text(second);
-        rest.FontSize(kSideSecondsSize);
-        bool dark = time.ActualTheme() == ElementTheme::Dark;
-        rest.Foreground(Media::SolidColorBrush(dark ? settings::theme::kUsageDark.muted
-                                                    : settings::theme::kUsageLight.muted));
-        inlines.Append(rest);
+        auto line = [&](PCWSTR words) {
+            if (inlines.Size() > 0) {
+                inlines.Append(Documents::LineBreak());
+            }
+            Documents::Run run;
+            run.Text(words);
+            // On the runs, not the text block: Explorer's next write of its text
+            // takes them away with the lines.
+            Documents::Typography::SetNumeralAlignment(run, FontNumeralAlignment::Tabular);
+            inlines.Append(run);
+            return run;
+        };
+        for (auto const& part : parts) {
+            line(part.c_str());
+        }
+        if (seconds) {
+            auto rest = line(second);
+            bool dark = time.ActualTheme() == ElementTheme::Dark;
+            rest.Foreground(Media::SolidColorBrush(dark ? settings::theme::kUsageDark.muted
+                                                        : settings::theme::kUsageLight.muted));
+        }
     });
     g_writingClock = false;
     if (g_onClockLine) {
@@ -8453,6 +8511,9 @@ std::wstring WidgetXaml(bool themed, bool upright) {
         L"<Setter Property=\"Height\" Value=\"" +
         n(upright ? kSideButtonHeight : t::kMediaButtonHeight) + L"\"/>"
         L"<Setter Property=\"Padding\" Value=\"0\"/>"
+        // A button keeps to the left of a column wider than it (the art's)
+        // unless set to its middle.
+        L"<Setter Property=\"HorizontalAlignment\" Value=\"Center\"/>"
         L"<Setter Property=\"FontFamily\" Value=\"" + kGlyphFont + L"\"/>"
         L"<Setter Property=\"FontSize\" Value=\"" + n(t::kMediaGlyphSize) + L"\"/>" +
         (themed ? L"<Setter Property=\"Foreground\""
@@ -9868,8 +9929,14 @@ Media::Imaging::WriteableBitmap IconBitmap(IconPixels const& icon) {
 // Side taskbar: an account stands upright, its logo over its number,
 // the bar under them this wide; the name tag stays in the tooltip.
 constexpr double kSideBarWidth = 30;
+// The unit after the number: this size, this faint, this far from it, and lifted
+// this much to the number's baseline.
+constexpr double kSideUnitSize = 9;
+constexpr double kSideUnitOpacity = 0.6;
+constexpr double kSideUnitGap = 1;
+constexpr double kSideUnitLift = 1;
 
-// The upright block: the mark, the number and its unit, the bar, each centred.
+// The upright block: the mark, the number with its unit and the bar, each centred.
 std::wstring UprightXaml(std::wstring const& mark, std::wstring const& radius) {
     return L"<StackPanel xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/"
            L"presentation\" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\""
@@ -9985,6 +10052,18 @@ View MakeView(std::wstring const& id, std::wstring const& markKey, Mark markKind
     // Digits of one width, so the number keeps its place as it changes.
     Documents::Typography::SetNumeralAlignment(v.percent, FontNumeralAlignment::Tabular);
     v.unit.Text(theme::kUsageUnit);
+    if (upright) {
+        // Under the mark the number and its unit are centred together: the unit
+        // small, faint and right after the number, so the number stays near the
+        // middle whatever its digits. Both sit on the bottom; the unit's smaller
+        // descent is made up so the two share a baseline.
+        v.unit.Text(L"%");
+        v.unit.FontSize(kSideUnitSize);
+        v.unit.Opacity(kSideUnitOpacity);
+        v.unit.Margin({kSideUnitGap, 0, 0, kSideUnitLift});
+        v.unit.VerticalAlignment(VerticalAlignment::Bottom);
+        v.percent.VerticalAlignment(VerticalAlignment::Bottom);
+    }
     return v;
 }
 
@@ -11319,6 +11398,10 @@ struct Text {
     com_ptr<IDWriteTextLayout> layout;
     float width = 0;
     float height = 0;
+    // The middle of the drawn ink, from the layout's left: a column centres
+    // each line on it, so a line stays on the column's middle whatever its
+    // digits and their side bearings.
+    float ink = 0;
 };
 
 // An account of the usage meter: its icon or letter, its tag and its number.
@@ -11354,7 +11437,7 @@ struct Content {
     bool column = false;
     std::vector<Text> clockLines;
     std::vector<float> clockPitch;  // each line's height in the column
-    bool clockSeconds = false;      // the last line is the seconds, smaller and dimmer
+    bool clockSeconds = false;      // the last line is the seconds, dimmer
 };
 
 enum class Phase {
@@ -11972,12 +12055,11 @@ void DrawSystem(Island& g, ID2D1DeviceContext* dc, int kind, int percent, int st
 // items upright, one under another: the clock's hour, minute and seconds as
 // lines, the album art, each usage account's logo over its number, the memory
 // and CPU icons. Sizes are fractions of the thickness, as the row's are of the
-// height (for a 35-pixel island: lines of 15 on 17, seconds 12 on 15,
-// logo 14 over a number of 12 on 14, art 24); gaps are pixels at 100 %.
+// height (for a 35-pixel island: clock lines of 15 on 17, the seconds as large
+// as the time so the lines are of one width, logo 14 over a number of 12 on 14,
+// art 24); gaps are pixels at 100 %.
 
 constexpr double kColumnLinePitch = 17.0 / 15;   // a clock line, times its text
-constexpr double kColumnSecondsSize = 12.0 / 35;  // times the thickness
-constexpr double kColumnSecondsPitch = 15.0 / 12;
 constexpr double kColumnArtSize = 24.0 / 35;
 constexpr double kColumnLogoSize = 14.0 / 35;
 constexpr double kColumnNumberSize = 12.0 / 35;
@@ -11985,31 +12067,6 @@ constexpr double kColumnNumberPitch = 14.0 / 12;
 constexpr double kColumnGap = 9;      // between items
 constexpr double kColumnLogoGap = 2;  // a logo to its number
 constexpr double kColumnSystemInset = 2;  // the memory and CPU icons off each long side
-
-// The clock text's parts, one line each: split at its colons, line breaks and
-// spaces (a 12-hour clock's "PM" stands on a line of its own). `seconds` is set
-// when they read as hours, minutes and seconds.
-std::vector<std::wstring> ClockParts(std::wstring const& clock, bool& seconds) {
-    std::vector<std::wstring> parts;
-    std::wstring part;
-    int colons = 0;
-    for (wchar_t ch : clock + L' ') {
-        bool cut = ch == L':' || ch == L'\n' || ch == L'\r' || iswspace(ch) ||
-                   ch == L'\u00A0' || ch == L'\u202F';
-        colons += ch == L':';
-        if (ch == 0x200E || ch == 0x200F) {
-            continue;  // direction marks some locales put in the time
-        }
-        if (!cut) {
-            part += ch;
-        } else if (!part.empty()) {
-            parts.push_back(std::exchange(part, {}));
-        }
-    }
-    seconds = colons == 2 && parts.size() == 3 &&
-              std::ranges::all_of(parts.back(), [](wchar_t ch) { return iswdigit(ch) != 0; });
-    return parts;
-}
 
 // The usage account's logo in its `size` square at (x, top), as the row draws it.
 void DrawLogo(ID2D1DeviceContext* dc, Meter const& m, float x, float top, float opacity,
@@ -12060,6 +12117,8 @@ void DrawColumn(Island& g,
         auto text = Brush(dc, textColor);
         auto dim = Brush(dc, dimColor);
         auto middle = [&](float w) { return std::round((across - w) / 2); };
+        // A line of text by its ink, unrounded: every line's middle on the column's.
+        auto inkAt = [&](Text const& t) { return across / 2 - t.ink; };
         D2D1_RECT_F bodyRect{0, shape.flushLeft ? 0 : shape.flare, across,
                              shape.width - (shape.flushRight ? 0 : shape.flare)};
         dc->PushAxisAlignedClip(&bodyRect, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -12068,7 +12127,7 @@ void DrawColumn(Island& g,
             Text const& t = c.clockLines[i];
             bool seconds = c.clockSeconds && i + 1 == c.clockLines.size();
             ID2D1Brush* brush = seconds ? dim.get() : text.get();
-            dc->DrawTextLayout({middle(t.width), y + (c.clockPitch[i] - t.height) / 2},
+            dc->DrawTextLayout({inkAt(t), y + (c.clockPitch[i] - t.height) / 2},
                                t.layout.get(), brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             y += c.clockPitch[i];
         }
@@ -12086,7 +12145,7 @@ void DrawColumn(Island& g,
             DrawLogo(dc, m, middle(m.logoSize), y, opacity, textColor, ink.get());
             float numberTop = y + m.logoSize + logoGap;
             float pitch = m.width - m.logoSize - logoGap;
-            dc->DrawTextLayout({middle(m.percent.width), numberTop + (pitch - m.percent.height) / 2},
+            dc->DrawTextLayout({inkAt(m.percent), numberTop + (pitch - m.percent.height) / 2},
                                m.percent.layout.get(), figure.get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             y += m.width + gap;
         }
@@ -12234,6 +12293,17 @@ Text MakeText(Island& g,
     check_hresult(t.layout->GetMetrics(&metrics));
     t.width = std::ceil(metrics.widthIncludingTrailingWhitespace);
     t.height = metrics.height;
+    // The overhangs count from the layout box: the left one in from its left,
+    // the right one out past its far side.
+    t.ink = metrics.widthIncludingTrailingWhitespace / 2;
+    DWRITE_OVERHANG_METRICS over{};
+    if (SUCCEEDED(t.layout->GetOverhangMetrics(&over))) {
+        float box = t.layout->GetMaxWidth();
+        float left = -over.left, right = box + over.right;
+        if (right > left) {
+            t.ink = (left + right) / 2;
+        }
+    }
     return t;
 }
 
@@ -12255,16 +12325,12 @@ Content MeasureColumn(Island& g, float thickness, settings::Slot slot) {
 
     if (here(set.showClock, set.clockAt) && !g_clock.empty()) {
         float size = std::round(thickness * (float)theme::kIslandTextSize);
-        float small = std::round(thickness * (float)kColumnSecondsSize);
-        auto parts = ClockParts(g_clock, c.clockSeconds);
+        auto parts = tray::ClockParts(g_clock, c.clockSeconds);
         float length = 0;
         for (size_t i = 0; i < parts.size(); i++) {
-            bool seconds = c.clockSeconds && i + 1 == parts.size();
-            float textSize = seconds ? small : size;
             c.clockLines.push_back(
-                MakeText(g, parts[i], textSize, DWRITE_FONT_WEIGHT_NORMAL, 0, true));
-            c.clockPitch.push_back(std::round(
-                textSize * (float)(seconds ? kColumnSecondsPitch : kColumnLinePitch)));
+                MakeText(g, parts[i], size, DWRITE_FONT_WEIGHT_NORMAL, 0, true));
+            c.clockPitch.push_back(std::round(size * (float)kColumnLinePitch));
             length += c.clockPitch.back();
         }
         if (length > 0) {
