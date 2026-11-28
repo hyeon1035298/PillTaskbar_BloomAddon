@@ -30524,10 +30524,53 @@ void Apply() {
     }
 }
 
-// Taskbar thread: the file changed elsewhere (Bloom set a monitor's edge).
-void OnPrefsChanged() {
-    if (ReadEdges()) {
+// Bloom can change the common edge (values.json, which comes back as a settings
+// change) and the monitors' records together, and the two arrive apart. Applied
+// as each came, a taskbar moved to the records read with the old common edge and
+// then again. So a change of the file is read this long after its last one, when
+// a settings change made with it is in, and a settings change applied meanwhile
+// reads the records with it (ReadPendingEdges): the taskbars move once.
+constexpr UINT kEdgesAfterMs = 250;
+std::atomic<bool> g_edgesPending;  // the file changed and its records aren't read yet
+UINT_PTR g_edgesTimer;             // taskbar thread
+
+// Taskbar thread: the records waiting, if a settings change didn't take them.
+void ApplyPendingEdges() {
+    if (!core::g_unloading && g_edgesPending.exchange(false) && ReadEdges()) {
         Apply();
+    }
+}
+
+void CALLBACK OnEdgesTimer(HWND, UINT, UINT_PTR, DWORD) {
+    core::Guard(L"Taskbar edges", [] {
+        if (g_edgesTimer) {
+            KillTimer(nullptr, std::exchange(g_edgesTimer, 0));
+        }
+        ApplyPendingEdges();
+    });
+}
+
+// A settings change about to apply the edges, from any thread: the records
+// waiting for the timer are read first, so it applies both.
+void ReadPendingEdges() {
+    if (g_edgesPending.exchange(false)) {
+        ReadEdges();
+    }
+}
+
+// Taskbar thread: the file changed elsewhere (Bloom set a monitor's edge). At
+// once only without a timer.
+void OnPrefsChanged() {
+    if (core::g_unloading) {
+        return;
+    }
+    g_edgesPending = true;
+    if (g_edgesTimer) {
+        KillTimer(nullptr, std::exchange(g_edgesTimer, 0));
+    }
+    g_edgesTimer = SetTimer(nullptr, 0, kEdgesAfterMs, OnEdgesTimer);
+    if (!g_edgesTimer) {
+        ApplyPendingEdges();
     }
 }
 
@@ -30590,6 +30633,10 @@ void Stop() {
     if (std::exchange(g_listening, false)) {
         prefs::Unwatch(OnPrefsChanged);
     }
+    if (g_edgesTimer) {
+        KillTimer(nullptr, std::exchange(g_edgesTimer, 0));
+    }
+    g_edgesPending = false;
     EndRemake(false);
     core::g_onTaskbarGone = nullptr;
 }
@@ -32119,6 +32166,7 @@ PTP_TIMER g_timer;
 
 void Apply() {
     if (hooks::g_features.position) {
+        position::ReadPendingEdges();
         position::Apply();
     }
     core::RunOn(core::PrimaryTaskbar(), [] {
